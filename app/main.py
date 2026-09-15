@@ -3,11 +3,17 @@ import sys
 
 from fastapi import FastAPI
 
+from app.api.webhooks import router as webhooks_router
 from app.core.config import get_settings
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Roadside Triage Agent")
+app.include_router(webhooks_router, prefix="/api/v1")
 
 
 @app.on_event("startup")

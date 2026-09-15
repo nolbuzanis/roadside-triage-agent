@@ -180,6 +180,10 @@ DISPATCHER_ALERT_PHONE=
 - `GET /health` returns `{"status": "ok"}`
 - Vapi webhook route is registered
 
+### Status
+
+- [x] Completed in `feat/create-fastapi-app` PR
+
 ---
 
 # Phase 2 — Vapi Assistant & Voice Flow
