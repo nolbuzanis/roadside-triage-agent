@@ -124,6 +124,10 @@ app/
 - Application has no SQLAlchemy/Alembic dependency
 - Supabase is the only database integration
 
+### Status
+
+- [x] Completed in `feat/simplify-project-structure` PR
+
 ---
 
 ## P0 — Configure Environment Variables

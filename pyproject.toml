@@ -7,7 +7,7 @@ select = ["E", "F", "I", "B", "UP", "RUF"]
 ignore = ["B008"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["src"]
+known-first-party = ["app"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
