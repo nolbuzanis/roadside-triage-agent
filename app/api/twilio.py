@@ -2,21 +2,66 @@ import asyncio
 import logging
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import PlainTextResponse
+from twilio.request_validator import RequestValidator  # type: ignore[import-untyped]
 from twilio.twiml.voice_response import VoiceResponse  # type: ignore[import-untyped]
 
+from app.core.config import get_settings
 from app.realtime.session import RealtimeSession
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+_validator: RequestValidator | None = None
+
+
+def _get_validator() -> RequestValidator:
+    """Return a cached RequestValidator instance using the Twilio auth token."""
+    global _validator
+    if _validator is None:
+        settings = get_settings()
+        _validator = RequestValidator(settings.TWILIO_AUTH_TOKEN)
+    return _validator
+
+
+def _reconstruct_twilio_url(request: Request) -> str:
+    """Reconstruct the original URL Twilio used to reach this endpoint.
+
+    Behind TLS-terminating proxies (ngrok, nginx, Cloud Run, etc.),
+    ASGI sees plain HTTP. Twilio signs the HTTPS URL it used, so we
+    must reconstruct from forwarded headers.
+    """
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("host", request.url.hostname or "")
+    path = request.url.path
+    return f"{proto}://{host}{path}"
+
+
+def _validate_twilio_request(url: str, signature: str, params: dict[str, str]) -> bool:
+    """Validate that a request was signed by Twilio using the auth token."""
+    validator = _get_validator()
+    return bool(validator.validate(url, params, signature))
+
 
 @router.post("/twilio/voice")
-async def twilio_voice_webhook(request: Request) -> str:
-    """Handle incoming Twilio voice webhook and return TwiML to start a Media Stream."""
+async def twilio_voice_webhook(request: Request) -> PlainTextResponse:
+    """Handle incoming Twilio voice webhook and return TwiML to start a Media Stream.
+
+    Validates the Twilio request signature before processing.
+    """
+    twilio_signature = request.headers.get("X-Twilio-Signature", "")
     form = await request.form()
-    call_sid = form.get("CallSid", "unknown")
-    caller_phone = form.get("From", "unknown")
+    params = {k: str(v) for k, v in form.items()}
+
+    url = _reconstruct_twilio_url(request)
+
+    if not _validate_twilio_request(url, twilio_signature, params):
+        logger.warning("Invalid Twilio signature: url=%s", url)
+        return PlainTextResponse("Invalid request", status_code=403)
+
+    call_sid = params.get("CallSid", "unknown")
+    caller_phone = params.get("From", "unknown")
 
     logger.info("Incoming call: CallSid=%s, From=%s", call_sid, caller_phone)
 
@@ -31,7 +76,7 @@ async def twilio_voice_webhook(request: Request) -> str:
     stream.parameter(name="call_sid", value=call_sid)
     stream.parameter(name="caller_phone", value=caller_phone)
 
-    return str(response)
+    return PlainTextResponse(str(response), media_type="application/xml")
 
 
 @router.websocket("/twilio/media-stream")

@@ -1,12 +1,12 @@
 # Roadside Assistance Triage AI Voice Agent (MVP)
 
-An autonomous AI voice agent system built for towing companies to handle inbound non-emergency roadside assistance calls. Powered by Vapi.ai (Deepgram/OpenAI/ElevenLabs) and a FastAPI backend, this agent seamlessly gathers critical breakdown details from stranded drivers, persists structured tickets into a PostgreSQL database, and instantly notifies human dispatchers via SMS.
+An autonomous AI voice agent system built for towing companies to handle inbound non-emergency roadside assistance calls. Powered by OpenAI Realtime and a FastAPI backend, this agent seamlessly gathers critical breakdown details from stranded drivers, persists structured tickets into a Supabase database, and instantly notifies human dispatchers via SMS.
 
 ## Features
 
 - **Instant Intake**: Zero hold times for stranded callers, ensuring immediate and empathetic response.
-- **Voice-to-Database Pipeline**: Converts natural spoken conversations into structured, validated PostgreSQL records using LLM tool-calling.
-- **Emergency Escalation**: Automatically detects hazard keywords (e.g., "fire", "traffic") and transfers the call to a live human.
+- **Voice-to-Database Pipeline**: Converts natural spoken conversations into structured, validated Supabase records using OpenAI Realtime tool-calling.
+- **Emergency Escalation**: Automatically detects hazard situations (fire, injury, trapped occupants, etc.) and transfers the call to a live human.
 - **Dispatcher Alerts**: Sends instant, structured SMS notifications to dispatchers via Twilio the second a ticket is logged.
 
 ---
@@ -16,9 +16,9 @@ An autonomous AI voice agent system built for towing companies to handle inbound
 Before you begin, ensure you have the following installed and configured:
 
 - **Python 3.13+**
-- **PostgreSQL 15+** (running locally or via Docker)
-- **Vapi.ai Account** (for voice orchestration)
-- **Twilio Account** (for SIP trunking and outbound SMS alerts)
+- **Supabase Account** (for database and persistence)
+- **OpenAI Account** (for Realtime API access)
+- **Twilio Account** (for PSTN inbound calling and outbound SMS alerts)
 
 ---
 
@@ -39,42 +39,52 @@ source venv/bin/activate  # On Windows use: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 3. Configure Git Hooks
+### 3. Configure Environment Variables
 
-We use `pre-commit` to ensure code formatting (Black, isort) and linting (Flake8) standards are met before every commit.
-
-```bash
-pip install pre-commit
-pre-commit install
-```
-
-### 4. Configure Environment Variables
-
-Copy the example environment file and fill in your actual API keys and database credentials.
+Copy the example environment file and fill in your actual API keys and credentials.
 
 ```bash
 cp .env.example .env
 ```
 
-#### Environment Variables Table
+#### Environment Variables
 
-| Variable               | Required | Description                                                                                                  |
-| ---------------------- | -------- | ------------------------------------------------------------------------------------------------------------ |
-| `DATABASE_URL`         | Yes      | PostgreSQL connection string (e.g., `postgresql+psycopg://user:pass@localhost:5432/roadside_db`)             |
-| `VAPI_API_KEY`         | Yes      | Secret API key for configuring your Vapi.ai assistant                                                        |
-| `VAPI_WEBHOOK_SECRET`  | Yes      | Custom secret header used to securely verify inbound webhooks from Vapi                                      |
-| `TWILIO_ACCOUNT_SID`   | Yes      | Twilio Account SID for sending outbound SMS                                                                  |
-| `TWILIO_AUTH_TOKEN`    | Yes      | Twilio Auth Token                                                                                            |
-| `TWILIO_PHONE_NUMBER`  | Yes      | Your Twilio-provisioned phone number (e.g., `+16045550199`)                                                  |
-| `DISPATCHER_ALERT_PHONE` | Yes    | The cell phone number of the human dispatcher receiving alerts (e.g., `+16045550100`)                        |
+| Variable                  | Required | Description                                                                                     |
+| ------------------------- | -------- | ----------------------------------------------------------------------------------------------- |
+| `SUPABASE_URL`            | Yes      | Supabase project URL (e.g., `https://xyz.supabase.co`)                                         |
+| `SUPABASE_SERVICE_ROLE_KEY` | Yes    | Supabase service-role key for server-side database access                                       |
+| `OPENAI_API_KEY`          | Yes      | OpenAI API key for Realtime API                                                                 |
+| `OPENAI_REALTIME_MODEL`   | Yes      | Realtime model name (e.g., `gpt-4o-realtime-preview-2024-10-01`)                               |
+| `TWILIO_ACCOUNT_SID`      | Yes      | Twilio Account SID                                                                              |
+| `TWILIO_AUTH_TOKEN`       | Yes      | Twilio Auth Token (used for request signature validation and SMS)                               |
+| `TWILIO_PHONE_NUMBER`     | Yes      | Your Twilio-provisioned phone number (e.g., `+16045550199`)                                     |
+| `DISPATCHER_ALERT_PHONE`  | Yes      | Cell phone number of the human dispatcher receiving SMS alerts (e.g., `+16045550100`)           |
+| `EMERGENCY_TRANSFER_PHONE`| Yes      | Emergency transfer destination (911 or local emergency number)                                  |
 
-### 5. Run Database Migrations
+### 4. Configure Twilio Phone Number
 
-Initialize your database schema using Alembic:
+1. Purchase a phone number in the [Twilio Console](https://console.twilio.com/)
+2. Under the phone number's **Voice Configuration**, set the **A call comes in** webhook to:
+
+```
+https://<your-domain>/api/v1/twilio/voice
+```
+
+For local development, use [ngrok](https://ngrok.com/) to expose your local server:
 
 ```bash
-alembic upgrade head
+ngrok http 8000
 ```
+
+Then set the webhook URL to the ngrok HTTPS URL (e.g., `https://abc123.ngrok.io/api/v1/twilio/voice`).
+
+**Important**: The voice webhook returns TwiML that initiates a bidirectional Media Stream to `/api/v1/twilio/media-stream`. Twilio must be able to reach both the voice webhook and the WebSocket endpoint.
+
+### 5. Set Up Supabase
+
+1. Create a Supabase project
+2. Run the migration to create the `breakdown_tickets` table (see `supabase/migrations/`)
+3. Ensure Row Level Security is enabled on `breakdown_tickets`
 
 ## Running the Application
 
@@ -84,45 +94,43 @@ Start the FastAPI development server:
 uvicorn app.main:app --reload --port 8000
 ```
 
-*Note: To receive webhooks from Vapi.ai during local development, you will need to expose your local port `8000` to the internet using a tool like [ngrok](https://ngrok.com/) (`ngrok http 8000`).*
+### Verifying the Setup
 
-## Usage Example (Testing the Webhook)
+1. **Health check**: `GET /health` returns `{"status": "ok"}`
+2. **Local WebSocket test**: Connect to `ws://localhost:8000/api/v1/twilio/media-stream` to verify the WebSocket endpoint accepts connections
+3. **End-to-end test**: Call your Twilio phone number — the call should connect and the voice assistant should begin speaking
 
-You don't have to place a real phone call to test the backend logic. You can simulate the exact JSON payload that Vapi sends when the LLM successfully triggers the `log_breakdown_ticket` function using `curl`:
+---
 
-```bash
-curl -X POST http://localhost:8000/api/v1/webhooks/vapi \
-  -H "Content-Type: application/json" \
-  -H "x-vapi-secret: your_webhook_secret_here" \
-  -d '{
-    "message": {
-      "type": "tool-calls",
-      "call": {
-        "id": "call_test_890123",
-        "customer": {
-          "number": "+16045550111"
-        }
-      },
-      "toolCallList": [
-        {
-          "id": "tool_call_xyz",
-          "type": "function",
-          "function": {
-            "name": "log_breakdown_ticket",
-            "arguments": {
-              "location": "Main St and 4th Ave, Vancouver",
-              "vehicle": "Blue 2020 Hyundai Kona",
-              "issue": "Flat rear left tire, pulled over safely"
-            }
-          }
-        }
-      ]
-    }
-  }'
+## Architecture
+
 ```
-
-**Expected Result:**
-
-1. The FastAPI server returns a HTTP 200 success response.
-2. A new `BreakdownTicket` record is saved in your local PostgreSQL database.
-3. The specified `DISPATCHER_ALERT_PHONE` receives a Twilio SMS with the formatted ticket details.
+Inbound PSTN Call
+        |
+        v
+     Twilio
+        |
+   Media Streams
+        |
+        v
+  FastAPI Voice Server
+        |
+        v
+ OpenAI Realtime API
+        |
+   +----+------------------+
+   |                       |
+ normal intake        emergency branch
+   |                       |
+   v                       v
+create_ticket()       transfer call
+   |
+   v
+Supabase
+   |
+   v
+Twilio SMS
+   |
+   v
+Dispatcher
+```

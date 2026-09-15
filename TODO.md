@@ -279,6 +279,10 @@ EMERGENCY_TRANSFER_PHONE=
 - Twilio receives valid TwiML
 - The call can establish a Media Stream to the backend
 
+### Status
+
+- [x] Completed in `feat/configure-twilio-inbound-phone` PR
+
 ---
 
 ## P0 — Implement Twilio Media Stream WebSocket
