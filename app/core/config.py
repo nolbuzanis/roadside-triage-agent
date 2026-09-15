@@ -6,11 +6,13 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     SUPABASE_URL: str
     SUPABASE_SERVICE_ROLE_KEY: str
-    VAPI_WEBHOOK_SECRET: str
+    OPENAI_API_KEY: str
+    OPENAI_REALTIME_MODEL: str
     TWILIO_ACCOUNT_SID: str
     TWILIO_AUTH_TOKEN: str
     TWILIO_PHONE_NUMBER: str
     DISPATCHER_ALERT_PHONE: str
+    EMERGENCY_TRANSFER_PHONE: str
 
     model_config = {"env_file": ".env"}
 
