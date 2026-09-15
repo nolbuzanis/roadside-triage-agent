@@ -30,6 +30,10 @@ Source of truth:
 - Backend can authenticate using the service-role key
 - Secrets are excluded from git
 
+### Status
+
+- [x] Completed in `feat/setup-supabase-cli` PR
+
 ---
 
 ## P0 — Create `breakdown_tickets` Table
@@ -72,6 +76,10 @@ create table breakdown_tickets (
 - Schema matches the MVP model
 - Duplicate `call_id` cannot create duplicate tickets
 
+### Status
+
+- [x] Completed in `feat/setup-supabase-cli` PR
+
 ---
 
 ## P0 — Configure Supabase Security
@@ -86,6 +94,10 @@ create table breakdown_tickets (
 - Backend service-role access works
 - Public/anonymous access cannot insert or modify tickets
 - Supabase credentials are stored only as server-side secrets
+
+### Status
+
+- [x] Completed in `feat/setup-supabase-cli` PR
 
 ---
 
