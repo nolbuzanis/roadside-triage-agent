@@ -258,7 +258,7 @@ EMERGENCY_TRANSFER_PHONE=
 ### Status
 
 - [x] Completed in `feat/create-fastapi-app` PR
-- [ ] Add Twilio voice/WebSocket routes
+- [x] Add Twilio voice/WebSocket routes (PR #10)
 
 ---
 
