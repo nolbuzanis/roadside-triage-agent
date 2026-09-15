@@ -1,0 +1,4 @@
+# Dev dependencies
+pytest>=9.0.0
+mypy>=2.0.0
+ruff>=0.1.0

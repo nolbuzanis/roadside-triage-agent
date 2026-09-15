@@ -1,0 +1,12 @@
+{
+  "worktreePath": "../ai-agent-worktrees",
+  "sync": {
+    "copyFiles": [],
+    "symlinkDirs": [],
+    "exclude": []
+  },
+  "hooks": {
+    "postCreate": [],
+    "preDelete": []
+  }
+}

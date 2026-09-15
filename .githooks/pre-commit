@@ -1,0 +1,22 @@
+#!/bin/sh
+#
+# pre-commit hook
+# Rejects any commit made directly on the `main` branch.
+# All work must be done on a feature branch and submitted via pull request.
+
+protected_branch='main'
+
+# Resolve the current branch name
+current_branch=$(git symbolic-ref --short HEAD 2>/dev/null)
+
+if [ "$current_branch" = "$protected_branch" ]; then
+  echo ""
+  echo "ERROR: Committing directly to '$protected_branch' is prohibited."
+  echo ""
+  echo "Create a feature branch and open a pull request instead:"
+  echo "  git checkout -b feat/your-description"
+  echo ""
+  exit 1
+fi
+
+exit 0

@@ -1,0 +1,19 @@
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    open-pull-requests-limit: 5
+    schedule:
+      interval: "weekly"
+    groups:
+      dev-deps:
+        dependency-type: "development"
+      prod-minor-deps:
+        dependency-type: "production"
+        update-types:
+        - "minor"
+        - "patch"
+      prod-major-deps:
+        dependency-type: "production"
+        update-types:
+        - "major"
