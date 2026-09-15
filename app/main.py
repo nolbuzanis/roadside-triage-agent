@@ -3,6 +3,7 @@ import sys
 
 from fastapi import FastAPI
 
+from app.api.twilio import router as twilio_router
 from app.api.webhooks import router as webhooks_router
 from app.core.config import get_settings
 
@@ -14,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Roadside Triage Agent")
 app.include_router(webhooks_router, prefix="/api/v1")
+app.include_router(twilio_router, prefix="/api/v1")
 
 
 @app.on_event("startup")
