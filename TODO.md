@@ -122,7 +122,7 @@ create table breakdown_tickets (
 
 ### Status
 
-- [ ] Requires schema update from the previous Vapi-oriented version
+- [x] Completed in `feat/create-breakdown-tickets-table` PR
 
 ---
 
