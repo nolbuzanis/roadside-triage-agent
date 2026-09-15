@@ -6,6 +6,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     SUPABASE_URL: str
     SUPABASE_SERVICE_ROLE_KEY: str
+    VAPI_API_KEY: str
     VAPI_WEBHOOK_SECRET: str
     TWILIO_ACCOUNT_SID: str
     TWILIO_AUTH_TOKEN: str
