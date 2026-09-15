@@ -192,7 +192,7 @@ app/
 ### Status
 
 - [x] Completed in `feat/simplify-project-structure` PR
-- [ ] Update remaining dependencies/imports for realtime implementation
+- [x] Update remaining dependencies/imports for realtime implementation in `fix/update-dependencies-imports` PR
 
 ---
 
@@ -233,7 +233,7 @@ EMERGENCY_TRANSFER_PHONE=
 ### Status
 
 - [x] Completed in `feat/configure-env-variables` PR
-- [ ] Replace Vapi-specific variables with OpenAI/Twilio variables
+- [x] Replace Vapi-specific variables with OpenAI/Twilio variables in `fix/update-dependencies-imports` PR
 
 ---
 
