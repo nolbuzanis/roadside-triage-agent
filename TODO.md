@@ -6,6 +6,51 @@ Source of truth:
 - `ARCHITECTURE.md` — system architecture
 - `README.md` — setup and developer workflow
 
+## Architecture Direction
+
+The MVP uses a self-hosted voice orchestration path instead of Vapi:
+
+```text
+Inbound PSTN Call
+        |
+        v
+     Twilio
+        |
+   Media Streams
+        |
+        v
+  FastAPI Voice Server
+        |
+        v
+ OpenAI Realtime API
+        |
+   +----+------------------+
+   |                       |
+ normal intake        emergency branch
+   |                       |
+   v                       v
+create_ticket()       transfer call
+   |
+   v
+Supabase
+   |
+   v
+Twilio SMS
+   |
+   v
+Dispatcher
+```
+
+The backend owns Twilio call/webhook handling, the realtime audio WebSocket bridge, conversation/session state, ticket persistence, emergency transfer control, and dispatcher notification integration.
+
+OpenAI Realtime owns the live conversational audio/model loop.
+
+Supabase owns persistence.
+
+Twilio owns PSTN calling and dispatcher SMS.
+
+---
+
 ## Priority Legend
 
 - `[ ] P0` = required for MVP
@@ -44,7 +89,7 @@ Create the MVP ticket table directly in Supabase Postgres.
 create table breakdown_tickets (
   id uuid primary key default gen_random_uuid(),
   call_id text not null unique,
-  tool_call_id text,
+  session_id text,
   caller_phone text,
   location text not null,
   vehicle text not null,
@@ -56,12 +101,11 @@ create table breakdown_tickets (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
-
 ```
 
 - Create table in Supabase
 - Add unique constraint on `call_id`
-- Add `tool_call_id`
+- Add `session_id`
 - Add `status`
 - Add `hazard_detected`
 - Add `hazard_reason`
@@ -78,7 +122,7 @@ create table breakdown_tickets (
 
 ### Status
 
-- [x] Completed in `feat/setup-supabase-cli` PR
+- [ ] Requires schema update from the previous Vapi-oriented version
 
 ---
 
@@ -103,7 +147,7 @@ create table breakdown_tickets (
 
 ## P0 — Simplify Python Project Structure
 
-Create only the modules required by the MVP.
+Create only the modules required by the realtime MVP.
 
 ```text
 app/
@@ -111,15 +155,20 @@ app/
   main.py
   api/
     __init__.py
+    twilio.py
     webhooks.py
   services/
     __init__.py
     tickets.py
     notifier.py
+    calls.py
+    emergency.py
+  realtime/
+    __init__.py
+    session.py
   core/
     __init__.py
     config.py
-
 ```
 
 - Remove SQLAlchemy model layer
@@ -128,52 +177,63 @@ app/
 - Remove `app/models/`
 - Remove unused PostgreSQL ORM dependencies
 - Add Supabase Python client
-- Keep FastAPI as the HTTP backend
+- Add OpenAI SDK/client dependency
+- Add Twilio dependency
+- Add WebSocket support required by the realtime media bridge
+- Keep FastAPI as the application server
 
 ### Acceptance Criteria
 
 - `python -c "import app"` succeeds
 - Application has no SQLAlchemy/Alembic dependency
 - Supabase is the only database integration
+- OpenAI and Twilio clients can be imported successfully
 
 ### Status
 
 - [x] Completed in `feat/simplify-project-structure` PR
+- [ ] Update remaining dependencies/imports for realtime implementation
 
 ---
 
 ## P0 — Configure Environment Variables
 
-Replace the previous database/ORM configuration with:
+Use:
 
 ```text
 SUPABASE_URL=
 SUPABASE_SERVICE_ROLE_KEY=
 
-VAPI_WEBHOOK_SECRET=
+OPENAI_API_KEY=
+OPENAI_REALTIME_MODEL=
 
 TWILIO_ACCOUNT_SID=
 TWILIO_AUTH_TOKEN=
 TWILIO_PHONE_NUMBER=
 DISPATCHER_ALERT_PHONE=
-
+EMERGENCY_TRANSFER_PHONE=
 ```
 
 - Update `.env.example`
 - Update `app/core/config.py`
 - Validate required configuration at application startup
 - Remove `DATABASE_URL`
-- Remove unused `VAPI_API_KEY` unless required by an implemented backend feature
+- Remove `VAPI_API_KEY`
+- Remove `VAPI_WEBHOOK_SECRET`
+- Add configuration for the OpenAI Realtime model
+- Add separate emergency transfer destination
 
 ### Acceptance Criteria
 
 - `.env.example` contains only required MVP configuration
 - Application fails clearly when required variables are missing
 - No secrets are committed
+- Emergency transfer destination is configurable independently from dispatcher SMS
 
 ### Status
 
 - [x] Completed in `feat/configure-env-variables` PR
+- [ ] Replace Vapi-specific variables with OpenAI/Twilio variables
 
 ---
 
@@ -182,46 +242,94 @@ DISPATCHER_ALERT_PHONE=
 - Create `app/main.py`
 - Instantiate `FastAPI(title="Roadside Triage Agent")`
 - Add `/health`
-- Register webhook router
+- Register Twilio voice routes
+- Register ticket/webhook routes where needed
 - Configure basic application logging
 - Do not add unnecessary CORS configuration unless a browser client actually requires it
+- Add WebSocket route for Twilio Media Streams
 
 ### Acceptance Criteria
 
 - `uvicorn app.main:app --reload --port 8000` starts successfully
 - `GET /health` returns `{"status": "ok"}`
-- Vapi webhook route is registered
+- Twilio voice webhook is registered
+- Twilio Media Stream WebSocket route is registered
 
 ### Status
 
 - [x] Completed in `feat/create-fastapi-app` PR
+- [ ] Add Twilio voice/WebSocket routes
 
 ---
 
-# Phase 2 — Vapi Assistant & Voice Flow
+# Phase 2 — Twilio Telephony & Realtime Voice
 
-## P0 — Create Vapi Assistant
+## P0 — Configure Twilio Inbound Phone Number
 
-- Create Vapi assistant
-- Configure inbound phone number
-- Configure STT provider/model
-- Configure LLM
-- Configure TTS
-- Configure assistant system prompt
-- Configure server URL/webhook endpoint
-- Configure webhook authentication/secret
-- Verify current Vapi server event contract
+- Purchase/configure a Twilio phone number
+- Point the number's incoming voice webhook to FastAPI
+- Return TwiML that starts a bidirectional Media Stream
+- Verify the call reaches FastAPI
+- Capture the incoming caller number from Twilio
 
 ### Acceptance Criteria
 
-- Incoming call reaches the Vapi assistant
-- Assistant responds conversationally
-- Assistant can invoke tools
-- Server receives the actual Vapi payload generated by the platform
+- Calling the Twilio number reaches the application
+- FastAPI receives the caller phone number
+- Twilio receives valid TwiML
+- The call can establish a Media Stream to the backend
 
 ---
 
-## P0 — Implement Three-Step Triage Conversation
+## P0 — Implement Twilio Media Stream WebSocket
+
+Create the server-side WebSocket bridge.
+
+- Accept Twilio Media Stream connections
+- Handle `connected` event
+- Handle `start` event
+- Handle incoming `media` audio events
+- Forward caller audio to OpenAI Realtime
+- Receive model audio from OpenAI
+- Convert/forward audio back to Twilio in the format required by the active stream
+- Handle `stop`/disconnect events
+- Clean up the OpenAI realtime session when the call ends
+
+### Acceptance Criteria
+
+- Caller audio reaches the realtime model
+- Model audio reaches the caller
+- Two-way audio works
+- Call teardown closes both sides cleanly
+
+---
+
+## P0 — Implement OpenAI Realtime Session
+
+Create `app/realtime/session.py`.
+
+- Establish an authenticated realtime connection to OpenAI
+- Configure the selected realtime model
+- Configure audio input/output format
+- Configure voice
+- Configure turn detection/interruption behavior
+- Send the system instructions
+- Handle streaming audio events
+- Handle model response events
+- Handle tool/function call events
+- Handle errors and disconnects
+- Keep session state isolated per phone call
+
+### Acceptance Criteria
+
+- A caller can have a two-way realtime conversation
+- Audio responses stream without waiting for the full response
+- Model errors do not crash the FastAPI process
+- Each phone call has isolated realtime state
+
+---
+
+## P0 — Implement Realtime Conversation Instructions
 
 The assistant collects exactly:
 
@@ -229,13 +337,15 @@ The assistant collects exactly:
 2. Vehicle details
 3. Issue
 
-- Write explicit intake instructions
+- Write concise system instructions
 - Ask one required question at a time
 - Confirm ambiguous answers
-- Keep conversation concise
+- Keep responses short and natural
 - Avoid collecting payment information
 - Avoid promising a truck ETA
 - Confirm that the caller is in a safe situation before continuing normal intake when appropriate
+- Tell the assistant to prioritize safety over completing intake
+- Configure interruption behavior so the caller can speak naturally
 
 ### Acceptance Criteria
 
@@ -243,12 +353,15 @@ The assistant collects exactly:
 - Assistant collects all three required fields
 - Assistant does not invent missing information
 - Assistant asks follow-up questions when an answer is ambiguous
+- Caller can interrupt the assistant naturally
 
 ---
 
-## P0 — Implement `log_breakdown_ticket` Function Tool
+## P0 — Implement `create_breakdown_ticket` Tool
 
-Define the Vapi function tool with:
+Instead of Vapi function tools, expose a local application tool/function to the realtime session.
+
+Arguments:
 
 ```json
 {
@@ -256,44 +369,51 @@ Define the Vapi function tool with:
   "vehicle": "string",
   "issue": "string"
 }
-
 ```
 
-- Define tool name `log_breakdown_ticket`
+- Define tool name `create_breakdown_ticket`
 - Define required arguments
-- Configure tool to call the FastAPI server
-- Use the current Vapi tool-call payload structure
-- Verify arguments arrive under `toolCallList[].arguments`
-- Verify tool name arrives under `toolCallList[].name`
+- Register tool with the OpenAI realtime session
+- Validate tool arguments with Pydantic
+- Capture current Twilio call ID
+- Capture caller phone number
+- Persist ticket to Supabase
+- Return a compact tool result to the model
 
 ### Acceptance Criteria
 
-- Vapi successfully invokes `log_breakdown_ticket`
+- Realtime model can invoke the tool
 - Backend receives structured location, vehicle, and issue
-- Tool call ID can be correlated with the originating call
+- Exactly one ticket is created for a completed intake
+- Model receives a successful tool result and can close the call naturally
 
 ---
 
-# Phase 3 — Emergency Escalation
+# Phase 3 — Emergency Handling
 
-## P0 — Configure Native Vapi Transfer
+## P0 — Implement Server-Side Emergency Transfer
 
-- Configure Vapi Transfer Call tool
-- Configure emergency/live dispatcher destination
-- Add explicit transfer instructions to the assistant prompt
-- Ensure emergency transfer interrupts normal intake immediately
+Emergency escalation should not depend on ticket persistence.
+
+- Create `app/services/emergency.py`
+- Provide a direct server-side transfer mechanism using Twilio call control
+- Store the active Twilio call identifier in the per-call session state
+- Allow the realtime assistant to invoke an emergency transfer action
+- Transfer immediately to `EMERGENCY_TRANSFER_PHONE`
+- Stop normal intake after transfer begins
 
 ### Acceptance Criteria
 
-- Assistant can transfer an active call
-- Transfer does not depend on the database webhook
-- Caller is not forced to complete normal intake before escalation
+- Emergency transfer does not require ticket creation
+- Transfer can occur during an active call
+- Caller is not forced to complete normal intake
+- Transfer failure is surfaced/logged without crashing the process
 
 ---
 
 ## P0 — Define Emergency Conditions
 
-Assistant should immediately escalate when the caller indicates situations such as:
+The realtime assistant should immediately escalate when the caller indicates situations such as:
 
 - Fire or vehicle fire
 - Active collision/accident
@@ -302,113 +422,85 @@ Assistant should immediately escalate when the caller indicates situations such 
 - Unsafe position in active traffic
 - Explosion or similar immediate hazard
 - Other circumstances clearly requiring immediate human/emergency assistance
+
 - Explicitly distinguish safety hazards from harmless mentions of words such as "traffic" or "smoke"
 - Instruct the assistant to prioritize safety over completing intake
+- Do not implement safety handling as a simple substring matcher
 
 ### Acceptance Criteria
 
-- Emergency scenarios transfer immediately
+- Emergency scenarios trigger the transfer action immediately
 - Normal roadside problems continue through the normal intake flow
-- Assistant does not rely on simple substring keyword matching alone
+- The assistant does not rely on exact keyword matching alone
 
 ---
 
 ## P0 — Record Escalation State
 
-When possible, record emergency state in Supabase.
+When an emergency transfer occurs:
 
-- Set `hazard_detected = true`
+- Set `hazard_detected = true` where a ticket already exists
 - Store concise `hazard_reason`
-- Set `status = "escalated"`
-- Log escalation event
+- Set `status = "escalated"` when a record exists
+- Log the transfer event with call ID
+- Do not block the live transfer on a database write
 
 ### Acceptance Criteria
 
-- Emergency cases can be identified in the database
+- Emergency cases can be identified in the database when a ticket exists
 - Escalation reason is available for review
 - Database recording does not block the live transfer
 
 ---
 
-# Phase 4 — Ticket Webhook & Persistence
-
-## P0 — Implement Vapi Webhook
-
-Create:
-
-```text
-POST /api/v1/webhooks/vapi
-
-```
-
-- Validate webhook authentication
-- Validate event type
-- Parse the current Vapi `tool-calls` payload
-- Extract `message.call.id`
-- Extract `message.call.customer.number`
-- Extract `message.toolCallList[]`
-- Identify the `log_breakdown_ticket` tool call
-- Extract tool-call ID
-- Extract structured arguments
-- Validate arguments with Pydantic
-- Reject malformed requests with appropriate HTTP errors
-
-### Acceptance Criteria
-
-- Valid Vapi tool call is accepted
-- Invalid secret/authentication is rejected
-- Missing required arguments are rejected
-- Unexpected tool names are handled safely
-
----
+# Phase 4 — Ticket Persistence
 
 ## P0 — Implement Ticket Service
 
 Create `app/services/tickets.py`.
 
-- Create ticket from validated Vapi tool call
-- Insert into Supabase
+- Accept validated realtime tool arguments
+- Create ticket in Supabase
 - Handle duplicate `call_id` idempotently
-- Return existing ticket when a webhook is retried
+- Return existing ticket when the same call retries the operation
 - Set initial status to `pending`
-- Set initial `notification_status` to `pending`
+- Set initial notification status to `pending`
+- Store caller phone number
+- Store session/call identifiers necessary for troubleshooting
 
 ### Acceptance Criteria
 
-- Successful tool call creates exactly one ticket
+- Successful intake creates exactly one ticket
 - Retrying the same call does not create another ticket
-- Ticket data matches the Vapi arguments
+- Ticket data matches the collected information
 
 ---
 
-## P0 — Return Vapi Tool Result
+## P0 — Implement Call Session State
 
-Return the response shape required by the current Vapi tool-call contract.
+Create `app/services/calls.py` or equivalent call-session component.
 
-- Include the incoming `toolCallId`
-- Return a compact success result
-- Do not perform slow downstream work before responding
-- Verify the exact response contract against the live Vapi integration
+Per-call state should include at minimum:
 
-Example result conceptually:
-
-```json
-{
-  "results": [
-    {
-      "toolCallId": "TOOL_CALL_ID",
-      "result": "{\"status\":\"logged\"}"
-    }
-  ]
-}
-
+```text
+twilio_call_id
+caller_phone
+openai_session_id
+stream_sid
+transfer_state
+ticket_created
 ```
+
+- Create state when Twilio starts the call
+- Reuse state throughout the call
+- Clear state when the call ends
+- Prevent cross-call state leakage
 
 ### Acceptance Criteria
 
-- Vapi accepts the response
-- Assistant can continue/close the conversation normally
-- Backend response remains fast enough for the Vapi webhook timeout
+- Multiple concurrent calls do not share state
+- Ticket tool can identify the correct call
+- Emergency transfer acts on the correct live call
 
 ---
 
@@ -418,13 +510,13 @@ Example result conceptually:
 
 - Configure Supabase database webhook on `breakdown_tickets INSERT`
 - Trigger notification handler after ticket creation
-- Ensure notification processing does not delay the Vapi response
+- Ensure notification processing does not delay the voice interaction
 
 ### Acceptance Criteria
 
 - Every newly created ticket triggers notification processing
 - Notification failures do not affect ticket creation
-- Vapi response is independent of Twilio response time
+- Voice response is independent of Twilio SMS latency
 
 ---
 
@@ -459,7 +551,6 @@ Update the ticket after notification processing:
 pending
 sent
 failed
-
 ```
 
 - Set `notification_status = "sent"` after Twilio accepts the message
@@ -476,33 +567,48 @@ failed
 
 # Phase 6 — Testing
 
-## P0 — Test Vapi Payload Validation
+## P0 — Test Twilio Voice Webhook
 
 Create tests for:
 
-- Valid `tool-calls` payload
-- Invalid authentication
-- Missing `call.id`
-- Missing caller phone
-- Missing location
-- Missing vehicle
-- Missing issue
-- Unknown tool name
-- Malformed arguments
+- Valid incoming call webhook
+- Caller phone extraction
+- TwiML response
+- Media Stream URL generation
+- Invalid/malformed request handling
 
 ### Acceptance Criteria
 
-- All validation tests pass
-- Invalid payloads never create tickets
+- Valid Twilio request produces expected TwiML
+- Invalid requests fail safely
+- Media Stream is configured correctly
+
+---
+
+## P0 — Test Realtime Session
+
+Create tests/mocks for:
+
+- Realtime session setup
+- Audio forwarding
+- Model audio forwarding
+- Tool call events
+- Session errors
+- Disconnect cleanup
+
+### Acceptance Criteria
+
+- Realtime client can be mocked without external API calls
+- Tool calls are parsed correctly
+- Session cleanup occurs on call termination
 
 ---
 
 ## P0 — Test Ticket Persistence
 
-- Valid payload creates ticket
+- Valid tool call creates ticket
 - Duplicate `call_id` is idempotent
-- Correct `tool_call_id` is stored
-- Correct caller phone is stored
+- Caller phone is stored correctly
 - Correct location/vehicle/issue are stored
 - Default status is `pending`
 - Default notification status is `pending`
@@ -510,13 +616,13 @@ Create tests for:
 ### Acceptance Criteria
 
 - Database state is correct after each test
-- Duplicate webhook requests do not duplicate records
+- Duplicate requests do not duplicate records
 
 ---
 
 ## P0 — Test Emergency Scenarios
 
-Test the actual Vapi assistant with at least:
+Test the actual voice assistant with at least:
 
 - "My car is on fire"
 - "I'm bleeding"
@@ -541,21 +647,22 @@ Perform a real end-to-end call:
 
 ```text
 phone call
-→ Vapi
+→ Twilio
+→ FastAPI Media Stream
+→ OpenAI Realtime
 → three-step intake
-→ tool call
-→ FastAPI
+→ create_breakdown_ticket tool
 → Supabase
 → tool result
 → call completion
 → dispatcher SMS
-
 ```
 
 - Measure total call duration
 - Verify ticket contents
 - Verify SMS contents
 - Verify notification status
+- Verify caller can interrupt the assistant naturally
 
 ### Acceptance Criteria
 
@@ -563,6 +670,7 @@ phone call
 - Ticket appears in Supabase
 - Dispatcher receives SMS
 - Typical successful intake completes in <90 seconds
+- Conversation remains responsive throughout the call
 
 ---
 
@@ -572,20 +680,39 @@ Perform a real emergency scenario:
 
 ```text
 phone call
-→ Vapi detects hazard
-→ Vapi Transfer Call
+→ Twilio
+→ FastAPI Media Stream
+→ OpenAI Realtime detects hazard
+→ emergency transfer tool/action
+→ Twilio call transfer
 → human/emergency destination
-
 ```
 
 - Verify transfer starts immediately
 - Verify normal intake is interrupted
 - Verify escalation state is recorded where supported
+- Verify a failed database write does not prevent transfer
 
 ### Acceptance Criteria
 
 - Caller reaches the configured human/emergency destination
-- No database/webhook dependency exists for live transfer
+- No database dependency exists for the live transfer
+- Emergency transfer latency is acceptable
+
+---
+
+## P0 — Test Concurrent Calls
+
+- Start at least two simultaneous calls
+- Verify audio/session state remains isolated
+- Verify tickets are associated with the correct calls
+- Verify emergency transfer targets the correct live call
+
+### Acceptance Criteria
+
+- No cross-talk between sessions
+- No shared mutable call state
+- Both calls can complete independently
 
 ---
 
@@ -593,19 +720,28 @@ phone call
 
 ## P0 — Basic Structured Logging
 
-- Log webhook receipt
-- Log call ID
-- Log tool-call ID
-- Log ticket creation
-- Log notification success/failure
-- Log escalation events
+Log:
+
+- Twilio call start
+- Twilio call ID
+- caller phone where appropriate
+- OpenAI realtime session creation
+- OpenAI session ID
+- tool invocation
+- ticket creation
+- notification success/failure
+- emergency transfer events
+- call teardown
+- errors
+
 - Do not log secrets
 - Avoid unnecessary full-call transcript logging
 
 ### Acceptance Criteria
 
-- A ticket can be traced from webhook through notification
+- A ticket can be traced from call start through notification
 - Failures contain enough context to debug
+- Call/session IDs allow correlation across services
 
 ---
 
@@ -614,6 +750,7 @@ phone call
 - Keep `/health`
 - Verify application process is running
 - Optionally verify Supabase connectivity separately
+- Optionally verify OpenAI/Twilio configuration without making billable API calls
 
 ### Acceptance Criteria
 
@@ -628,6 +765,26 @@ phone call
 - Add retry/replay mechanism for failed notifications
 - Prevent duplicate SMS on webhook retries
 - Add timeout handling for Supabase/Twilio calls
+- Add bounded reconnect/error handling for OpenAI realtime sessions
+
+---
+
+## P1 — Load/Latency Validation
+
+Measure:
+
+- Call connection latency
+- Time-to-first-model-response
+- Tool-call latency
+- Ticket persistence latency
+- Emergency transfer latency
+- End-to-end conversation latency
+
+### Acceptance Criteria
+
+- No obvious latency spikes prevent natural conversation
+- Emergency transfer remains responsive
+- Database writes do not block normal conversation unnecessarily
 
 ---
 
@@ -635,35 +792,40 @@ phone call
 
 ## P0 — Update README
 
-Replace the previous local PostgreSQL/Alembic setup with:
+Replace the Vapi/local PostgreSQL setup with:
 
 - Supabase project setup
 - Supabase table creation
 - Environment variable setup
-- Vapi assistant setup
-- Vapi webhook configuration
-- Twilio configuration
-- Local FastAPI startup
-- Local webhook testing
-- End-to-end test instructions
+- Twilio phone number setup
+- Twilio Voice webhook setup
+- Twilio Media Streams setup
+- OpenAI Realtime configuration
+- FastAPI startup
+- Local WebSocket development/testing
+- Dispatcher SMS configuration
+- End-to-end phone test instructions
 
 ### Acceptance Criteria
 
 - A fresh developer can follow README from zero to running backend
-- No README instructions reference removed SQLAlchemy/Alembic infrastructure
-- README payload examples match the current Vapi contract
+- No README instructions reference Vapi
+- No README instructions reference SQLAlchemy/Alembic
+- README configuration matches the actual application
 
 ---
 
-## P1 — Add Vapi Configuration Documentation
+## P1 — Add Voice Configuration Documentation
 
 Document:
 
-- Assistant system prompt
-- `log_breakdown_ticket` tool schema
-- Transfer Call configuration
-- Server URL configuration
-- Webhook authentication
+- Realtime system prompt
+- Realtime model configuration
+- Voice/audio settings
+- Tool schema for `create_breakdown_ticket`
+- Emergency transfer behavior
+- Twilio webhook configuration
+- Media Stream configuration
 - Example normal conversation
 - Example emergency conversation
 
@@ -674,19 +836,20 @@ Document:
 The MVP is complete when all of the following work:
 
 - A driver can call the roadside number
-- Vapi answers immediately
+- Twilio answers and streams audio to the application
+- OpenAI Realtime provides the live voice interaction
 - The assistant collects location
 - The assistant collects vehicle details
 - The assistant collects issue
 - Emergency situations are transferred immediately
-- Normal calls invoke `log_breakdown_ticket`
-- FastAPI validates the Vapi request
+- Normal calls invoke `create_breakdown_ticket`
 - Exactly one ticket is created in Supabase
-- Duplicate webhook deliveries are idempotent
+- Duplicate ticket creation is idempotent
 - Dispatcher receives an SMS
 - Notification status is recorded
 - Real end-to-end normal call succeeds
 - Real end-to-end emergency call succeeds
+- At least two simultaneous calls remain isolated
 - Typical completed intake is under 90 seconds
 - README setup instructions work from a clean environment
 
@@ -707,6 +870,7 @@ The MVP is complete when all of the following work:
 - Analytics for call completion and escalation rates
 - Call/transcript audit tooling
 - Authentication for dispatcher-facing interfaces
+- Cost and usage monitoring per call
 
 ## P2
 
@@ -719,4 +883,5 @@ The MVP is complete when all of the following work:
 - Automated dispatch routing
 - Full dispatcher operations dashboard
 - Real-time fleet management
-
+- More sophisticated call analytics
+- Provider abstraction/fallback between realtime voice vendors
