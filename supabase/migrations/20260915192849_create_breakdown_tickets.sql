@@ -16,11 +16,6 @@ create table breakdown_tickets (
 
 alter table breakdown_tickets enable row level security;
 
-create policy "Service role can manage all tickets"
-  on breakdown_tickets
-  for all
-  using (auth.role() = 'service_role');
-
 create policy "Anonymous cannot access tickets"
   on breakdown_tickets
   for all
