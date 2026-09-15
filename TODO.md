@@ -159,6 +159,10 @@ DISPATCHER_ALERT_PHONE=
 - Application fails clearly when required variables are missing
 - No secrets are committed
 
+### Status
+
+- [x] Completed in `feat/configure-env-variables` PR
+
 ---
 
 ## P0 — Create FastAPI Application
@@ -676,6 +680,8 @@ The MVP is complete when all of the following work:
 
 ## P1
 
+- Migrate FastAPI startup validation from deprecated `@app.on_event("startup")` to `lifespan` context manager
+- Add unit test for `Settings` validation that asserts `ValidationError` when env vars are missing
 - Dispatcher ticket dashboard
 - Supabase Realtime ticket updates
 - `/api/v1/tickets` endpoint if a dedicated backend API becomes necessary
