@@ -302,6 +302,10 @@ Create the server-side WebSocket bridge.
 - Two-way audio works
 - Call teardown closes both sides cleanly
 
+### Status
+
+- [x] Completed in `feat/complete-twilio-media-stream-audio` PR
+
 ---
 
 ## P0 — Implement OpenAI Realtime Session

@@ -18,8 +18,10 @@ logger = logging.getLogger(__name__)
 
 REALTIME_URL = "wss://api.openai.com/v1/realtime"
 
-# OpenAI Realtime expects 24kHz PCM16 audio.
-OPENAI_SAMPLE_RATE = 24000
+# Twilio Media Streams use G.711 mu-law at 8kHz.
+# OpenAI Realtime supports g711_ulaw, so we match Twilio's native format
+# to avoid audio conversion overhead.
+TWILIO_AUDIO_RATE = 8000
 
 
 @dataclass
@@ -82,11 +84,11 @@ class RealtimeSession:
             "output_modalities": ["audio"],
             "audio": {
                 "input": {
-                    "format": {"type": "audio/pcm", "rate": OPENAI_SAMPLE_RATE},
+                    "format": {"type": "audio/g711_ulaw", "rate": TWILIO_AUDIO_RATE},
                     "turn_detection": {"type": "server_vad"},
                 },
                 "output": {
-                    "format": {"type": "audio/pcm", "rate": OPENAI_SAMPLE_RATE},
+                    "format": {"type": "audio/g711_ulaw", "rate": TWILIO_AUDIO_RATE},
                     "voice": "marin",
                 },
             },
@@ -115,7 +117,7 @@ class RealtimeSession:
             logger.exception("Error sending event: call_sid=%s", self.call_sid)
 
     async def send_audio(self, audio_b64: str) -> None:
-        """Forward base64-encoded PCM16 audio from Twilio to OpenAI."""
+        """Forward base64-encoded audio from Twilio to OpenAI."""
         await self._send({
             "type": "input_audio_buffer.append",
             "audio": audio_b64,
