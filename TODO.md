@@ -457,6 +457,10 @@ The realtime assistant should immediately escalate when the caller indicates sit
 - Normal roadside problems continue through the normal intake flow
 - The assistant does not rely on exact keyword matching alone
 
+### Status
+
+- [x] Completed in `feat/define-emergency-conditions` PR
+
 ---
 
 ## P0 — Record Escalation State
