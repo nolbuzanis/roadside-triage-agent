@@ -91,3 +91,18 @@ def update_ticket_hazard(
         logger.info("Ticket escalated: call_id=%s, reason=%s", call_id, hazard_reason)
     except Exception:
         logger.exception("Failed to update hazard state: call_id=%s", call_id)
+
+
+def update_notification_status(*, call_id: str, status: str) -> None:
+    """Update the notification_status field on a ticket.
+
+    Non-blocking: logs failures but does not raise.
+    """
+    try:
+        supabase = _get_supabase()
+        supabase.table("breakdown_tickets").update(
+            {"notification_status": status}
+        ).eq("call_id", call_id).execute()
+        logger.info("Notification status updated: call_id=%s, status=%s", call_id, status)
+    except Exception:
+        logger.exception("Failed to update notification status: call_id=%s", call_id)

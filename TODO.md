@@ -558,7 +558,9 @@ ticket_created
 - Notification failures do not affect ticket creation
 - Voice response is independent of Twilio SMS latency
 
----
+### Status
+
+- [x] Completed in `feat/create-ticket-insert-webhook` PR
 
 ## P0 — Implement Dispatcher Notification Service
 
@@ -581,7 +583,9 @@ Create `app/services/notifier.py` or a small notification function/Edge Function
 - SMS contains all critical intake information
 - Twilio failure does not fail ticket creation
 
----
+### Status
+
+- [x] Completed in `feat/create-ticket-insert-webhook` PR
 
 ## P0 — Track Notification Status
 
@@ -603,7 +607,9 @@ failed
 - Database clearly shows notification state
 - Failed notifications can be identified and retried later
 
----
+### Status
+
+- [x] Completed in `feat/create-ticket-insert-webhook` PR
 
 # Phase 6 — Testing
 
