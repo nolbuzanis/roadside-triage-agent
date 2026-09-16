@@ -18,9 +18,11 @@ from app.realtime.tools import (
     TicketToolResult,
 )
 from app.services.emergency import transfer_call
-from app.services.tickets import create_ticket
+from app.services.tickets import create_ticket, update_ticket_hazard
 
 logger = logging.getLogger(__name__)
+
+_background_tasks: set[asyncio.Task[None]] = set()
 
 
 async def handle_create_breakdown_ticket(
@@ -60,6 +62,23 @@ async def handle_create_breakdown_ticket(
         return TicketToolResult(status="error", error="Unable to create the ticket")
 
 
+async def _record_escalation(*, call_sid: str, arguments: str) -> None:
+    """Record hazard escalation state on the ticket if one exists.
+
+    Runs as a background task so it never blocks the live transfer.
+    """
+    try:
+        args = EmergencyTransferArgs.model_validate_json(arguments)
+        await asyncio.to_thread(
+            update_ticket_hazard,
+            call_id=call_sid,
+            hazard_reason=args.reason,
+        )
+        logger.info("Escalation state recorded: call_sid=%s", call_sid)
+    except Exception:
+        logger.exception("Failed to record escalation state: call_sid=%s", call_sid)
+
+
 async def handle_transfer_to_emergency(
     *,
     call_sid: str | None,
@@ -95,6 +114,13 @@ async def handle_transfer_to_emergency(
         )
 
     if success:
+        if call_sid:
+            task = asyncio.create_task(
+                _record_escalation(call_sid=call_sid, arguments=arguments),
+                name=f"escalation-record-{call_sid}",
+            )
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
         return EmergencyTransferResult(
             status="transferred",
             message="Emergency transfer in progress. Stay on the line.",

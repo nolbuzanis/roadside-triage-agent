@@ -479,6 +479,10 @@ When an emergency transfer occurs:
 - Escalation reason is available for review
 - Database recording does not block the live transfer
 
+### Status
+
+- [x] Completed in `feat/record-escalation-state` PR
+
 ---
 
 # Phase 4 — Ticket Persistence
