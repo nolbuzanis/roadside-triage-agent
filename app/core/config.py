@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     TWILIO_PHONE_NUMBER: str
     DISPATCHER_ALERT_PHONE: str
     EMERGENCY_TRANSFER_PHONE: str
+    WEBHOOK_SECRET: str = ""
 
     model_config = {"env_file": ".env"}
 
