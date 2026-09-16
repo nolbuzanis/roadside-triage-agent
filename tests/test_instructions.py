@@ -57,3 +57,44 @@ def test_instructions_reference_ticket_tool() -> None:
 def test_instructions_prohibit_inventing_information() -> None:
     """Must not invent or assume information."""
     assert "invent" in ROADSIDE_ASSISTANT_INSTRUCTIONS.lower() or "assume" in ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
+
+
+def test_instructions_distinguish_true_emergencies_from_false_positives() -> None:
+    """Must explicitly warn against transferring for benign keyword mentions."""
+    assert "false positive" in ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
+
+
+def test_instructions_warn_against_keyword_matching() -> None:
+    """Must not transfer based on keyword matching alone."""
+    lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
+    assert "keyword matching" in lower or "keyword" in lower
+
+
+def test_instructions_provide_traffic_distinction() -> None:
+    """Must distinguish 'stopped in active traffic' from 'traffic is heavy'."""
+    lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
+    assert "stopped in active traffic" in lower or "travel lane" in lower
+
+
+def test_instructions_provide_smoke_distinction() -> None:
+    """Must distinguish vehicle fire from exhaust or steam."""
+    lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
+    assert "exhaust" in lower or "steam" in lower
+
+
+def test_instructions_provide_accident_distinction() -> None:
+    """Must distinguish collision with injuries from minor fender-bender."""
+    lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
+    assert "fender-bender" in lower or "injuries" in lower
+
+
+def test_instructions_prioritize_safety_when_uncertain() -> None:
+    """Must instruct erring on the side of transfer when uncertain."""
+    lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
+    assert "when in doubt" in lower or "err on the side" in lower
+
+
+def test_instructions_require_use_of_transfer_tool() -> None:
+    """Must instruct using the transfer tool, not just telling caller to call 911."""
+    lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
+    assert "transfer_to_emergency" in lower
