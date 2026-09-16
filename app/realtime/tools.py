@@ -1,6 +1,26 @@
-"""Realtime tool definitions for the roadside triage assistant."""
+"""Realtime tool definitions and typed models for the roadside triage assistant."""
 
 from __future__ import annotations
+
+from pydantic import BaseModel
+
+
+class TicketArgs(BaseModel):
+    """Validated arguments for the create_breakdown_ticket tool."""
+
+    location: str
+    vehicle: str
+    issue: str
+
+
+class TicketToolResult(BaseModel):
+    """Result returned to the OpenAI Realtime model after a tool call."""
+
+    status: str
+    ticket_id: str | None = None
+    message: str | None = None
+    error: str | None = None
+
 
 CREATE_BREAKDOWN_TICKET_TOOL = {
     "type": "function",

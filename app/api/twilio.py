@@ -1,28 +1,56 @@
 import asyncio
-import json
 import logging
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 from twilio.request_validator import RequestValidator  # type: ignore[import-untyped]
 from twilio.twiml.voice_response import VoiceResponse  # type: ignore[import-untyped]
 
 from app.core.config import get_settings
 from app.realtime.instructions import ROADSIDE_ASSISTANT_INSTRUCTIONS
 from app.realtime.session import RealtimeSession
-from app.realtime.tools import REALTIME_TOOLS
+from app.realtime.tools import REALTIME_TOOLS, TicketArgs, TicketToolResult
 from app.services.tickets import create_ticket
 
 logger = logging.getLogger(__name__)
 
 
-class TicketArgs(BaseModel):
-    """Validated arguments for the create_breakdown_ticket tool."""
+async def handle_create_breakdown_ticket(
+    *,
+    call_sid: str | None,
+    caller_phone: str | None,
+    arguments: str,
+) -> TicketToolResult:
+    """Parse, validate, and create a breakdown ticket from a tool call.
 
-    location: str
-    vehicle: str
-    issue: str
+    This function bridges the OpenAI Realtime boundary (JSON arguments) to the
+    ticket service (typed Python values). It handles argument validation, calls
+    the ticket service, and returns a typed result.
+    """
+    try:
+        args = TicketArgs.model_validate_json(arguments)
+    except ValidationError:
+        logger.warning("Invalid tool arguments: call_sid=%s", call_sid)
+        return TicketToolResult(status="error", error="Invalid arguments")
+
+    try:
+        ticket = await asyncio.to_thread(
+            create_ticket,
+            call_id=call_sid or "unknown",
+            caller_phone=caller_phone or "unknown",
+            location=args.location,
+            vehicle=args.vehicle,
+            issue=args.issue,
+        )
+        return TicketToolResult(
+            status="created",
+            ticket_id=ticket.get("id"),
+            message="Ticket created successfully. You may now close the call.",
+        )
+    except Exception:
+        logger.exception("Failed to create ticket: call_sid=%s", call_sid)
+        return TicketToolResult(status="error", error="Unable to create the ticket")
 
 
 router = APIRouter()
@@ -125,35 +153,19 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
         logger.error("Realtime session error: call_sid=%s, error=%s", call_sid, error)
 
     async def handle_tool_call(call_id: str, func_name: str, arguments: str) -> str:
-        """Handle a tool call from the realtime model."""
+        """Thin dispatcher: route tool calls to the appropriate handler."""
         logger.info("Tool call received: call_sid=%s, function=%s", call_sid, func_name)
 
-        if func_name != "create_breakdown_ticket":
-            logger.warning("Unknown tool: %s", func_name)
-            return json.dumps({"error": f"Unknown tool: {func_name}"})
-
-        try:
-            args = TicketArgs.model_validate_json(arguments)
-        except ValidationError as e:
-            logger.warning("Invalid tool arguments: call_sid=%s, errors=%s", call_sid, e)
-            return json.dumps({"error": "Invalid arguments", "details": e.errors()})
-
-        try:
-            ticket = create_ticket(
-                call_id=call_sid or "unknown",
-                caller_phone=caller_phone or "unknown",
-                location=args.location,
-                vehicle=args.vehicle,
-                issue=args.issue,
+        if func_name == "create_breakdown_ticket":
+            result = await handle_create_breakdown_ticket(
+                call_sid=call_sid,
+                caller_phone=caller_phone,
+                arguments=arguments,
             )
-            return json.dumps({
-                "status": "created",
-                "ticket_id": ticket.get("id"),
-                "message": "Ticket created successfully. You may now close the call.",
-            })
-        except Exception as e:
-            logger.exception("Failed to create ticket: call_sid=%s", call_sid)
-            return json.dumps({"error": f"Failed to create ticket: {e}"})
+            return result.model_dump_json()
+
+        logger.warning("Unknown tool: %s", func_name)
+        return TicketToolResult(status="error", error="Unknown tool").model_dump_json()
 
     try:
         while True:
