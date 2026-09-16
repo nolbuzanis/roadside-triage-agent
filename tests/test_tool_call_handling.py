@@ -96,6 +96,8 @@ class TestTicketToolResult:
 class TestHandleCreateBreakdownTicket:
     """Tests for the async tool-specific handler."""
 
+    @pytest.mark.asyncio
+    @pytest.mark.asyncio
     async def test_valid_args_creates_ticket(self) -> None:
         mock_ticket = {"id": "ticket-uuid-123", "call_id": "CA_test"}
         with patch("app.api.twilio.create_ticket", return_value=mock_ticket) as mock_create:
@@ -118,6 +120,7 @@ class TestHandleCreateBreakdownTicket:
             issue="Won't start",
         )
 
+    @pytest.mark.asyncio
     async def test_invalid_json_arguments_returns_error(self) -> None:
         result = await handle_create_breakdown_ticket(
             call_sid="CA_test",
@@ -129,6 +132,7 @@ class TestHandleCreateBreakdownTicket:
         assert result.error == "Invalid arguments"
         assert result.ticket_id is None
 
+    @pytest.mark.asyncio
     async def test_missing_fields_returns_error(self) -> None:
         result = await handle_create_breakdown_ticket(
             call_sid="CA_test",
@@ -139,6 +143,7 @@ class TestHandleCreateBreakdownTicket:
         assert result.status == "error"
         assert result.error == "Invalid arguments"
 
+    @pytest.mark.asyncio
     async def test_create_ticket_failure_returns_safe_error(self) -> None:
         with patch("app.api.twilio.create_ticket", side_effect=RuntimeError("DB connection failed")):
             result = await handle_create_breakdown_ticket(
@@ -151,6 +156,7 @@ class TestHandleCreateBreakdownTicket:
         assert result.error == "Unable to create the ticket"
         assert result.ticket_id is None
 
+    @pytest.mark.asyncio
     async def test_create_ticket_failure_does_not_expose_exception_details(self) -> None:
         with patch("app.api.twilio.create_ticket", side_effect=RuntimeError("sensitive internal detail")):
             result = await handle_create_breakdown_ticket(
@@ -162,6 +168,7 @@ class TestHandleCreateBreakdownTicket:
         serialized = result.model_dump_json()
         assert "sensitive internal detail" not in serialized
 
+    @pytest.mark.asyncio
     async def test_call_sid_falls_back_to_unknown(self) -> None:
         mock_ticket = {"id": "t1", "call_id": "unknown"}
         with patch("app.api.twilio.create_ticket", return_value=mock_ticket) as mock_create:
@@ -176,6 +183,7 @@ class TestHandleCreateBreakdownTicket:
         assert call_kwargs["call_id"] == "unknown"
         assert call_kwargs["caller_phone"] == "unknown"
 
+    @pytest.mark.asyncio
     async def test_handler_uses_to_thread_for_blocking_io(self) -> None:
         """Verify that create_ticket is called via asyncio.to_thread (non-blocking)."""
         mock_ticket = {"id": "t1"}
