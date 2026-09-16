@@ -10,7 +10,14 @@ from twilio.twiml.voice_response import VoiceResponse  # type: ignore[import-unt
 from app.core.config import get_settings
 from app.realtime.instructions import ROADSIDE_ASSISTANT_INSTRUCTIONS
 from app.realtime.session import RealtimeSession
-from app.realtime.tools import REALTIME_TOOLS, TicketArgs, TicketToolResult
+from app.realtime.tools import (
+    REALTIME_TOOLS,
+    EmergencyTransferArgs,
+    EmergencyTransferResult,
+    TicketArgs,
+    TicketToolResult,
+)
+from app.services.emergency import transfer_call
 from app.services.tickets import create_ticket
 
 logger = logging.getLogger(__name__)
@@ -51,6 +58,52 @@ async def handle_create_breakdown_ticket(
     except Exception:
         logger.exception("Failed to create ticket: call_sid=%s", call_sid)
         return TicketToolResult(status="error", error="Unable to create the ticket")
+
+
+async def handle_transfer_to_emergency(
+    *,
+    call_sid: str | None,
+    arguments: str,
+) -> EmergencyTransferResult:
+    """Parse, validate, and execute an emergency call transfer."""
+    try:
+        EmergencyTransferArgs.model_validate_json(arguments)
+    except ValidationError:
+        logger.warning("Invalid emergency transfer arguments: call_sid=%s", call_sid)
+        return EmergencyTransferResult(status="error", error="Invalid arguments")
+
+    settings = get_settings()
+    destination = settings.EMERGENCY_TRANSFER_PHONE
+
+    logger.info(
+        "Emergency transfer requested: call_sid=%s, destination=%s",
+        call_sid,
+        destination,
+    )
+
+    try:
+        success = await asyncio.to_thread(
+            transfer_call,
+            call_sid=call_sid or "unknown",
+            destination_phone=destination,
+        )
+    except Exception:
+        logger.exception("Emergency transfer exception: call_sid=%s", call_sid)
+        return EmergencyTransferResult(
+            status="error",
+            error="Unable to complete transfer. Please call 911 directly.",
+        )
+
+    if success:
+        return EmergencyTransferResult(
+            status="transferred",
+            message="Emergency transfer in progress. Stay on the line.",
+        )
+    else:
+        return EmergencyTransferResult(
+            status="error",
+            error="Unable to complete transfer. Please call 911 directly.",
+        )
 
 
 router = APIRouter()
@@ -157,12 +210,19 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
         logger.info("Tool call received: call_sid=%s, function=%s", call_sid, func_name)
 
         if func_name == "create_breakdown_ticket":
-            result = await handle_create_breakdown_ticket(
+            ticket_result = await handle_create_breakdown_ticket(
                 call_sid=call_sid,
                 caller_phone=caller_phone,
                 arguments=arguments,
             )
-            return result.model_dump_json()
+            return ticket_result.model_dump_json()
+
+        if func_name == "transfer_to_emergency":
+            transfer_result = await handle_transfer_to_emergency(
+                call_sid=call_sid,
+                arguments=arguments,
+            )
+            return transfer_result.model_dump_json()
 
         logger.warning("Unknown tool: %s", func_name)
         return TicketToolResult(status="error", error="Unknown tool").model_dump_json()
