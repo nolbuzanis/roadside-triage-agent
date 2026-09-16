@@ -335,6 +335,10 @@ Create `app/realtime/session.py`.
 - Model errors do not crash the FastAPI process
 - Each phone call has isolated realtime state
 
+### Status
+
+- [x] Completed (implemented in earlier PRs, registered with tools in `feat/openai-realtime-session`)
+
 ---
 
 ## P0 — Implement Realtime Conversation Instructions
@@ -398,6 +402,10 @@ Arguments:
 - Backend receives structured location, vehicle, and issue
 - Exactly one ticket is created for a completed intake
 - Model receives a successful tool result and can close the call naturally
+
+### Status
+
+- [x] Completed in `feat/openai-realtime-session` PR
 
 ---
 
@@ -873,6 +881,9 @@ The MVP is complete when all of the following work:
 
 - Migrate FastAPI startup validation from deprecated `@app.on_event("startup")` to `lifespan` context manager
 - Add unit test for `Settings` validation that asserts `ValidationError` when env vars are missing
+- Handle `IntegrityError` in `create_ticket()` for concurrent duplicate `call_id` inserts (atomic idempotent insert)
+- Add unit tests for `TicketArgs` Pydantic validation and `CREATE_BREAKDOWN_TICKET_TOOL` schema shape
+- Pass OpenAI `session_id` to `create_ticket()` for troubleshooting correlation
 - Dispatcher ticket dashboard
 - Supabase Realtime ticket updates
 - `/api/v1/tickets` endpoint if a dedicated backend API becomes necessary
