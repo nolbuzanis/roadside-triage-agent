@@ -873,7 +873,6 @@ The MVP is complete when all of the following work:
 
 - Migrate FastAPI startup validation from deprecated `@app.on_event("startup")` to `lifespan` context manager
 - Add unit test for `Settings` validation that asserts `ValidationError` when env vars are missing
-- Add unit test for realtime conversation instructions that asserts critical phrases (safety, required fields, behavioral constraints) exist in the prompt
 - Dispatcher ticket dashboard
 - Supabase Realtime ticket updates
 - `/api/v1/tickets` endpoint if a dedicated backend API becomes necessary
