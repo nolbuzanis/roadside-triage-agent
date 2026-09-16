@@ -169,3 +169,161 @@ def test_url_reconstruction_from_forwarded_headers(
 
     assert response.status_code == 200
     mock_reconstruct.assert_called_once()
+
+
+@patch("app.api.twilio._validate_twilio_request")
+def test_empty_form_data_returns_valid_twiml(mock_validate: MagicMock) -> None:
+    """Missing form fields should default to 'unknown' in the TwiML."""
+    mock_validate.return_value = True
+
+    response = client.post(
+        "/api/v1/twilio/voice",
+        data={},
+        headers=_make_twilio_headers(),
+    )
+
+    assert response.status_code == 200
+    body = response.text
+    assert "<Connect>" in body
+    assert "<Stream" in body
+    assert "unknown" in body
+
+
+@patch("app.api.twilio._validate_twilio_request")
+def test_missing_from_defaults_to_unknown(mock_validate: MagicMock) -> None:
+    """When From is missing, caller_phone should default to 'unknown'."""
+    mock_validate.return_value = True
+
+    response = client.post(
+        "/api/v1/twilio/voice",
+        data={"CallSid": "CA_test_sid"},
+        headers=_make_twilio_headers(),
+    )
+
+    assert response.status_code == 200
+    assert "unknown" in response.text
+    assert "CA_test_sid" in response.text
+
+
+@patch("app.api.twilio._validate_twilio_request")
+def test_missing_callsid_defaults_to_unknown(mock_validate: MagicMock) -> None:
+    """When CallSid is missing, call_sid should default to 'unknown'."""
+    mock_validate.return_value = True
+
+    response = client.post(
+        "/api/v1/twilio/voice",
+        data={"From": "+15551234567"},
+        headers=_make_twilio_headers(),
+    )
+
+    assert response.status_code == 200
+    assert "unknown" in response.text
+    assert "+15551234567" in response.text
+
+
+@patch("app.api.twilio._validate_twilio_request")
+def test_twiml_xml_structure_is_valid(mock_validate: MagicMock) -> None:
+    """The TwiML response should be well-formed XML."""
+    mock_validate.return_value = True
+
+    response = client.post(
+        "/api/v1/twilio/voice",
+        data=TWILIO_PARAMS,
+        headers=_make_twilio_headers(),
+    )
+
+    assert response.status_code == 200
+    body = response.text
+    assert body.startswith("<?xml")
+    assert "<Response>" in body
+    assert "</Response>" in body
+    assert "</Connect>" in body
+    assert "</Stream>" in body
+
+
+@patch("app.api.twilio._validate_twilio_request")
+def test_stream_url_is_websocket(mock_validate: MagicMock) -> None:
+    """The stream URL should use ws:// or wss:// protocol."""
+    mock_validate.return_value = True
+
+    response = client.post(
+        "/api/v1/twilio/voice",
+        data=TWILIO_PARAMS,
+        headers=_make_twilio_headers(),
+    )
+
+    assert response.status_code == 200
+    body = response.text
+    assert "wss://" in body or "ws://" in body
+
+
+def test_reconstruct_url_without_forwarded_headers() -> None:
+    """URL reconstruction should fall back to request.url when headers are absent."""
+    from app.api.twilio import _reconstruct_twilio_url
+
+    mock_request = MagicMock()
+    mock_request.headers = {}
+    mock_request.url.scheme = "http"
+    mock_request.url.hostname = "localhost"
+    mock_request.url.path = "/api/v1/twilio/voice"
+
+    url = _reconstruct_twilio_url(mock_request)
+
+    assert url == "http://localhost/api/v1/twilio/voice"
+
+
+def test_reconstruct_url_with_forwarded_proto() -> None:
+    """URL reconstruction should use x-forwarded-proto when present."""
+    from app.api.twilio import _reconstruct_twilio_url
+
+    mock_request = MagicMock()
+    mock_request.headers = {"x-forwarded-proto": "https", "host": "example.com"}
+    mock_request.url.path = "/api/v1/twilio/voice"
+
+    url = _reconstruct_twilio_url(mock_request)
+
+    assert url == "https://example.com/api/v1/twilio/voice"
+
+
+def test_reconstruct_url_missing_host_header() -> None:
+    """URL reconstruction should handle missing host header gracefully."""
+    from app.api.twilio import _reconstruct_twilio_url
+
+    mock_request = MagicMock()
+    mock_request.headers = {"x-forwarded-proto": "https"}
+    mock_request.url.hostname = None
+    mock_request.url.path = "/api/v1/twilio/voice"
+
+    url = _reconstruct_twilio_url(mock_request)
+
+    assert url == "https:///api/v1/twilio/voice"
+
+
+@patch("app.api.twilio._validate_twilio_request")
+def test_request_with_extra_twilio_params(mock_validate: MagicMock) -> None:
+    """Extra Twilio parameters should not break the handler."""
+    mock_validate.return_value = True
+
+    response = client.post(
+        "/api/v1/twilio/voice",
+        data={**TWILIO_PARAMS, "AccountSid": "AC_extra", "ApiVersion": "2010-04-01"},
+        headers=_make_twilio_headers(),
+    )
+
+    assert response.status_code == 200
+    assert "<Connect>" in response.text
+
+
+@patch("app.api.twilio._validate_twilio_request")
+def test_caller_phone_with_special_characters(mock_validate: MagicMock) -> None:
+    """Special characters in the From field should be preserved in TwiML."""
+    mock_validate.return_value = True
+
+    response = client.post(
+        "/api/v1/twilio/voice",
+        data={**TWILIO_PARAMS, "From": "+15551234567;phone=true"},
+        headers=_make_twilio_headers(),
+    )
+
+    assert response.status_code == 200
+    assert "+15551234567;phone=true" in response.text

@@ -629,6 +629,10 @@ Create tests for:
 - Invalid requests fail safely
 - Media Stream is configured correctly
 
+### Status
+
+- [x] Completed in `feat/test-twilio-voice-webhook` PR
+
 ---
 
 ## P0 — Test Realtime Session
