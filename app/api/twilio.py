@@ -1,16 +1,29 @@
 import asyncio
+import json
 import logging
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel, ValidationError
 from twilio.request_validator import RequestValidator  # type: ignore[import-untyped]
 from twilio.twiml.voice_response import VoiceResponse  # type: ignore[import-untyped]
 
 from app.core.config import get_settings
 from app.realtime.instructions import ROADSIDE_ASSISTANT_INSTRUCTIONS
 from app.realtime.session import RealtimeSession
+from app.realtime.tools import REALTIME_TOOLS
+from app.services.tickets import create_ticket
 
 logger = logging.getLogger(__name__)
+
+
+class TicketArgs(BaseModel):
+    """Validated arguments for the create_breakdown_ticket tool."""
+
+    location: str
+    vehicle: str
+    issue: str
+
 
 router = APIRouter()
 
@@ -111,6 +124,37 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
         """Log errors from the OpenAI Realtime session."""
         logger.error("Realtime session error: call_sid=%s, error=%s", call_sid, error)
 
+    async def handle_tool_call(call_id: str, func_name: str, arguments: str) -> str:
+        """Handle a tool call from the realtime model."""
+        logger.info("Tool call received: call_sid=%s, function=%s", call_sid, func_name)
+
+        if func_name != "create_breakdown_ticket":
+            logger.warning("Unknown tool: %s", func_name)
+            return json.dumps({"error": f"Unknown tool: {func_name}"})
+
+        try:
+            args = TicketArgs.model_validate_json(arguments)
+        except ValidationError as e:
+            logger.warning("Invalid tool arguments: call_sid=%s, errors=%s", call_sid, e)
+            return json.dumps({"error": "Invalid arguments", "details": e.errors()})
+
+        try:
+            ticket = create_ticket(
+                call_id=call_sid or "unknown",
+                caller_phone=caller_phone or "unknown",
+                location=args.location,
+                vehicle=args.vehicle,
+                issue=args.issue,
+            )
+            return json.dumps({
+                "status": "created",
+                "ticket_id": ticket.get("id"),
+                "message": "Ticket created successfully. You may now close the call.",
+            })
+        except Exception as e:
+            logger.exception("Failed to create ticket: call_sid=%s", call_sid)
+            return json.dumps({"error": f"Failed to create ticket: {e}"})
+
     try:
         while True:
             data = await websocket.receive_json()
@@ -141,7 +185,9 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                     caller_phone=caller_phone or "unknown",
                     stream_sid=stream_sid or "unknown",
                     instructions=ROADSIDE_ASSISTANT_INSTRUCTIONS,
+                    tools=REALTIME_TOOLS,
                     on_audio_delta=send_audio_to_twilio,
+                    on_tool_call=handle_tool_call,
                     on_error=handle_session_error,
                 )
 
