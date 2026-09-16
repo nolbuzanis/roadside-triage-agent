@@ -506,6 +506,10 @@ Create `app/services/tickets.py`.
 - Retrying the same call does not create another ticket
 - Ticket data matches the collected information
 
+### Status
+
+- [x] Completed in `feat/openai-realtime-session` PR
+
 ---
 
 ## P0 — Implement Call Session State
@@ -533,6 +537,10 @@ ticket_created
 - Multiple concurrent calls do not share state
 - Ticket tool can identify the correct call
 - Emergency transfer acts on the correct live call
+
+### Status
+
+- [x] Completed in `feat/implement-call-session-state` PR
 
 ---
 
@@ -895,6 +903,7 @@ The MVP is complete when all of the following work:
 - Add unit test for `Settings` validation that asserts `ValidationError` when env vars are missing
 - Handle `IntegrityError` in `create_ticket()` for concurrent duplicate `call_id` inserts (atomic idempotent insert)
 - Add unit tests for `TicketArgs` Pydantic validation and `CREATE_BREAKDOWN_TICKET_TOOL` schema shape
+- Add unit tests for `CallState` and `CallStateManager` (create/get/remove/isolation) and integration tests verifying tool handlers update state correctly
 - Pass OpenAI `session_id` to `create_ticket()` for troubleshooting correlation
 - Dispatcher ticket dashboard
 - Supabase Realtime ticket updates

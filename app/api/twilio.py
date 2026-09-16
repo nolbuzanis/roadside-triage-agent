@@ -17,6 +17,7 @@ from app.realtime.tools import (
     TicketArgs,
     TicketToolResult,
 )
+from app.services.calls import call_manager
 from app.services.emergency import transfer_call
 from app.services.tickets import create_ticket, update_ticket_hazard
 
@@ -52,6 +53,10 @@ async def handle_create_breakdown_ticket(
             vehicle=args.vehicle,
             issue=args.issue,
         )
+        if call_sid:
+            state = call_manager.get(call_sid)
+            if state:
+                state.ticket_created = True
         return TicketToolResult(
             status="created",
             ticket_id=ticket.get("id"),
@@ -115,6 +120,9 @@ async def handle_transfer_to_emergency(
 
     if success:
         if call_sid:
+            state = call_manager.get(call_sid)
+            if state:
+                state.transfer_state = "transferred"
             task = asyncio.create_task(
                 _record_escalation(call_sid=call_sid, arguments=arguments),
                 name=f"escalation-record-{call_sid}",
@@ -271,6 +279,12 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                 caller_phone = start_data.get("customParameters", {}).get(
                     "caller_phone"
                 )
+                call_state = call_manager.create(
+                    twilio_call_id=call_sid or "unknown",
+                    caller_phone=caller_phone or "unknown",
+                )
+                call_state.stream_sid = stream_sid
+
                 logger.info(
                     "Media Stream started: stream_sid=%s, call_sid=%s, caller=%s",
                     stream_sid,
@@ -312,6 +326,8 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
     except Exception:
         logger.exception("Media Stream error: call_sid=%s", call_sid)
     finally:
+        if call_sid:
+            call_manager.remove(call_sid)
         if session:
             await session.close()
         if process_task:
