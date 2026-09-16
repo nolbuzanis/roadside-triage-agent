@@ -137,6 +137,20 @@ A PR should include:
 - verification performed
 - any known limitations
 
+**Long PR messages:** When the PR body exceeds a single line, pipe a heredoc into `gh pr create --body-file -`. Avoid passing long multi-line strings directly in `--body` arguments, as shell quoting of special characters (backticks, parentheses, URLs) frequently causes parsing errors. Example:
+
+```bash
+cat <<'EOF' | gh pr create --fill --body-file -
+## Summary
+
+Describe the change here.
+
+## Verification
+
+- All tests pass
+EOF
+```
+
 ## Review Rules
 
 Every meaningful PR must receive an independent review from the Reviewer subagent before it is considered ready.

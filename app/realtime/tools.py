@@ -69,9 +69,12 @@ TRANSFER_TO_EMERGENCY_TOOL = {
     "name": "transfer_to_emergency",
     "description": (
         "Immediately transfer the caller to emergency services. Use this when the "
-        "caller is in immediate danger — fire, active collision, injury, trapped "
-        "occupants, unsafe position in traffic, or any situation requiring emergency "
-        "response. Do NOT collect intake information before transferring."
+        "caller describes an immediate physical danger: active fire, collision with "
+        "injuries or entrapment, bleeding or injury, trapped occupants, or a vehicle "
+        "stopped in active traffic lanes. Do NOT transfer for benign mentions of words "
+        "like 'traffic' or 'smoke' alone — assess whether the caller is actually in "
+        "danger. Do NOT collect intake information before transferring. If in doubt, "
+        "transfer."
     ),
     "parameters": {
         "type": "object",
