@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
@@ -14,6 +14,7 @@ from app.realtime.tools import (
     EmergencyTransferArgs,
     EmergencyTransferResult,
 )
+from app.services.emergency import transfer_call
 
 # ---------------------------------------------------------------------------
 # EmergencyTransferArgs model tests
@@ -225,3 +226,148 @@ class TestHandleTransferToEmergency:
 
         serialized = result.model_dump_json()
         assert "sensitive internal detail" not in serialized
+
+
+# ---------------------------------------------------------------------------
+# transfer_call (app/services/emergency.py) unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestTransferCall:
+    """Unit tests for the transfer_call function in emergency.py."""
+
+    @patch("app.services.emergency.get_settings")
+    @patch("app.services.emergency.TwilioClient")
+    def test_successful_transfer_returns_true(
+        self, mock_client_cls: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        mock_settings.return_value.TWILIO_ACCOUNT_SID = "AC_test_sid"
+        mock_settings.return_value.TWILIO_AUTH_TOKEN = "test_auth_token"
+
+        mock_call = MagicMock()
+        mock_call.status = "queued"
+        mock_client_cls.return_value.calls.return_value.update.return_value = mock_call
+
+        result = transfer_call(
+            call_sid="CA_test_123",
+            destination_phone="+19115551234",
+        )
+
+        assert result is True
+
+    @patch("app.services.emergency.get_settings")
+    @patch("app.services.emergency.TwilioClient")
+    def test_successful_transfer_creates_client_with_correct_credentials(
+        self, mock_client_cls: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        mock_settings.return_value.TWILIO_ACCOUNT_SID = "AC_real_sid"
+        mock_settings.return_value.TWILIO_AUTH_TOKEN = "real_auth_token"
+
+        mock_call = MagicMock()
+        mock_call.status = "queued"
+        mock_client_cls.return_value.calls.return_value.update.return_value = mock_call
+
+        transfer_call(
+            call_sid="CA_test",
+            destination_phone="+15551234567",
+        )
+
+        mock_client_cls.assert_called_once_with("AC_real_sid", "real_auth_token")
+
+    @patch("app.services.emergency.get_settings")
+    @patch("app.services.emergency.TwilioClient")
+    def test_successful_transfer_passes_correct_twiml(
+        self, mock_client_cls: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        mock_settings.return_value.TWILIO_ACCOUNT_SID = "AC_test_sid"
+        mock_settings.return_value.TWILIO_AUTH_TOKEN = "test_auth_token"
+
+        mock_call = MagicMock()
+        mock_call.status = "queued"
+        mock_client_cls.return_value.calls.return_value.update.return_value = mock_call
+
+        transfer_call(
+            call_sid="CA_test",
+            destination_phone="+19115551234",
+        )
+
+        mock_client_cls.return_value.calls.return_value.update.assert_called_once_with(
+            twiml="<Response><Dial>+19115551234</Dial></Response>"
+        )
+
+    @patch("app.services.emergency.get_settings")
+    @patch("app.services.emergency.TwilioClient")
+    def test_successful_transfer_calls_with_correct_sid(
+        self, mock_client_cls: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        mock_settings.return_value.TWILIO_ACCOUNT_SID = "AC_test_sid"
+        mock_settings.return_value.TWILIO_AUTH_TOKEN = "test_auth_token"
+
+        mock_call = MagicMock()
+        mock_call.status = "queued"
+        mock_client_cls.return_value.calls.return_value.update.return_value = mock_call
+
+        transfer_call(
+            call_sid="CA_specific_call_sid",
+            destination_phone="+15559990000",
+        )
+
+        mock_client_cls.return_value.calls.assert_called_once_with("CA_specific_call_sid")
+
+    @patch("app.services.emergency.get_settings")
+    @patch("app.services.emergency.TwilioClient")
+    def test_twilio_exception_returns_false(
+        self, mock_client_cls: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        mock_settings.return_value.TWILIO_ACCOUNT_SID = "AC_test_sid"
+        mock_settings.return_value.TWILIO_AUTH_TOKEN = "test_auth_token"
+
+        mock_client_cls.return_value.calls.return_value.update.side_effect = Exception(
+            "Twilio API error"
+        )
+
+        result = transfer_call(
+            call_sid="CA_test",
+            destination_phone="+19115551234",
+        )
+
+        assert result is False
+
+    @patch("app.services.emergency.get_settings")
+    @patch("app.services.emergency.TwilioClient")
+    def test_twilio_runtime_error_returns_false(
+        self, mock_client_cls: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        mock_settings.return_value.TWILIO_ACCOUNT_SID = "AC_test_sid"
+        mock_settings.return_value.TWILIO_AUTH_TOKEN = "test_auth_token"
+
+        mock_client_cls.return_value.calls.return_value.update.side_effect = RuntimeError(
+            "Connection refused"
+        )
+
+        result = transfer_call(
+            call_sid="CA_test",
+            destination_phone="+19115551234",
+        )
+
+        assert result is False
+
+    @patch("app.services.emergency.get_settings")
+    @patch("app.services.emergency.TwilioClient")
+    def test_exception_does_not_propagate(
+        self, mock_client_cls: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Verify that exceptions are caught and do not propagate to the caller."""
+        mock_settings.return_value.TWILIO_ACCOUNT_SID = "AC_test_sid"
+        mock_settings.return_value.TWILIO_AUTH_TOKEN = "test_auth_token"
+
+        mock_client_cls.return_value.calls.return_value.update.side_effect = Exception(
+            "sensitive internal detail"
+        )
+
+        result = transfer_call(
+            call_sid="CA_test",
+            destination_phone="+19115551234",
+        )
+
+        assert result is False

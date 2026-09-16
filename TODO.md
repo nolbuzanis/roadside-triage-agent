@@ -888,7 +888,6 @@ The MVP is complete when all of the following work:
 - Handle `IntegrityError` in `create_ticket()` for concurrent duplicate `call_id` inserts (atomic idempotent insert)
 - Add unit tests for `TicketArgs` Pydantic validation and `CREATE_BREAKDOWN_TICKET_TOOL` schema shape
 - Pass OpenAI `session_id` to `create_ticket()` for troubleshooting correlation
-- Add unit tests for `emergency.py::transfer_call` (TwiML format, Twilio client interaction, error handling)
 - Dispatcher ticket dashboard
 - Supabase Realtime ticket updates
 - `/api/v1/tickets` endpoint if a dedicated backend API becomes necessary
