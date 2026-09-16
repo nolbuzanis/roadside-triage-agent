@@ -7,6 +7,7 @@ from twilio.request_validator import RequestValidator  # type: ignore[import-unt
 from twilio.twiml.voice_response import VoiceResponse  # type: ignore[import-untyped]
 
 from app.core.config import get_settings
+from app.realtime.instructions import ROADSIDE_ASSISTANT_INSTRUCTIONS
 from app.realtime.session import RealtimeSession
 
 logger = logging.getLogger(__name__)
@@ -139,6 +140,7 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                     call_sid=call_sid or "unknown",
                     caller_phone=caller_phone or "unknown",
                     stream_sid=stream_sid or "unknown",
+                    instructions=ROADSIDE_ASSISTANT_INSTRUCTIONS,
                     on_audio_delta=send_audio_to_twilio,
                     on_error=handle_session_error,
                 )
