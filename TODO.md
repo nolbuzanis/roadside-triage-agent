@@ -363,6 +363,10 @@ The assistant collects exactly:
 - Assistant asks follow-up questions when an answer is ambiguous
 - Caller can interrupt the assistant naturally
 
+### Status
+
+- [x] Completed in `feat/realtime-conversation-instructions` PR
+
 ---
 
 ## P0 — Implement `create_breakdown_ticket` Tool
