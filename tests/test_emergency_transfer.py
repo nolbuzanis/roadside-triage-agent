@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
 
-from app.api.twilio import handle_transfer_to_emergency
+from app.api.twilio import _record_escalation, handle_transfer_to_emergency
 from app.realtime.tools import (
     TRANSFER_TO_EMERGENCY_TOOL,
     EmergencyTransferArgs,
@@ -371,3 +371,103 @@ class TestTransferCall:
         )
 
         assert result is False
+
+
+# ---------------------------------------------------------------------------
+# _record_escalation background task tests
+# ---------------------------------------------------------------------------
+
+
+class TestRecordEscalation:
+    """Tests for the _record_escalation background task."""
+
+    @pytest.mark.asyncio
+    async def test_calls_update_ticket_hazard_with_correct_args(self) -> None:
+        with patch("app.api.twilio.update_ticket_hazard") as mock_update:
+            await _record_escalation(
+                call_sid="CA_test",
+                arguments='{"reason": "Vehicle fire"}',
+            )
+
+        mock_update.assert_called_once_with(
+            call_id="CA_test",
+            hazard_reason="Vehicle fire",
+        )
+
+    @pytest.mark.asyncio
+    async def test_exception_in_update_is_caught(self) -> None:
+        with patch(
+            "app.api.twilio.update_ticket_hazard",
+            side_effect=RuntimeError("Supabase connection failed"),
+        ):
+            # Should not raise
+            await _record_escalation(
+                call_sid="CA_test",
+                arguments='{"reason": "Fire"}',
+            )
+
+    @pytest.mark.asyncio
+    async def test_invalid_arguments_is_caught(self) -> None:
+        with patch("app.api.twilio.update_ticket_hazard") as mock_update:
+            # Invalid JSON should be caught, update_ticket_hazard should not be called
+            await _record_escalation(
+                call_sid="CA_test",
+                arguments="not json",
+            )
+
+        mock_update.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# handle_transfer_to_emergency escalation integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestHandleTransferEscalationIntegration:
+    """Tests verifying escalation recording is wired into the transfer handler."""
+
+    @pytest.mark.asyncio
+    async def test_background_task_created_on_successful_transfer(self) -> None:
+        """Verify _record_escalation is scheduled as a background task on success."""
+        with patch("app.api.twilio.transfer_call", return_value=True):
+            with patch("app.api.twilio.get_settings") as mock_settings:
+                mock_settings.return_value.EMERGENCY_TRANSFER_PHONE = "+19115551234"
+                with patch("app.api.twilio._record_escalation") as mock_record:
+                    mock_record.return_value = AsyncMock()
+                    result = await handle_transfer_to_emergency(
+                        call_sid="CA_test",
+                        arguments='{"reason": "Car on fire"}',
+                    )
+
+        assert result.status == "transferred"
+
+    @pytest.mark.asyncio
+    async def test_no_background_task_when_call_sid_is_empty(self) -> None:
+        """Verify no escalation task is created when call_sid is empty."""
+        with patch("app.api.twilio.transfer_call", return_value=True):
+            with patch("app.api.twilio.get_settings") as mock_settings:
+                mock_settings.return_value.EMERGENCY_TRANSFER_PHONE = "+19115551234"
+                with patch("app.api.twilio._record_escalation") as mock_record:
+                    result = await handle_transfer_to_emergency(
+                        call_sid="",
+                        arguments='{"reason": "Fire"}',
+                    )
+
+        assert result.status == "transferred"
+        # _record_escalation should not have been called directly
+        mock_record.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_escalation_on_transfer_failure(self) -> None:
+        """Verify no escalation task is created when transfer fails."""
+        with patch("app.api.twilio.transfer_call", return_value=False):
+            with patch("app.api.twilio.get_settings") as mock_settings:
+                mock_settings.return_value.EMERGENCY_TRANSFER_PHONE = "+19115551234"
+                with patch("app.api.twilio._record_escalation") as mock_record:
+                    result = await handle_transfer_to_emergency(
+                        call_sid="CA_test",
+                        arguments='{"reason": "Trapped"}',
+                    )
+
+        assert result.status == "error"
+        mock_record.assert_not_called()
