@@ -8,7 +8,7 @@ from twilio.request_validator import RequestValidator  # type: ignore[import-unt
 from twilio.twiml.voice_response import VoiceResponse  # type: ignore[import-untyped]
 
 from app.core.config import get_settings
-from app.realtime.instructions import ROADSIDE_ASSISTANT_INSTRUCTIONS
+from app.realtime.instructions import OPENING_GREETING, ROADSIDE_ASSISTANT_INSTRUCTIONS
 from app.realtime.session import RealtimeSession
 from app.realtime.tools import (
     REALTIME_TOOLS,
@@ -297,6 +297,7 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                     caller_phone=caller_phone or "unknown",
                     stream_sid=stream_sid or "unknown",
                     instructions=ROADSIDE_ASSISTANT_INSTRUCTIONS,
+                    greeting=OPENING_GREETING,
                     tools=REALTIME_TOOLS,
                     on_audio_delta=send_audio_to_twilio,
                     on_tool_call=handle_tool_call,

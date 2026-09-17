@@ -41,6 +41,7 @@ class RealtimeSession:
     caller_phone: str
     stream_sid: str
     instructions: str = ""
+    greeting: str = ""
     tools: list[dict[str, Any]] = field(default_factory=list)
     on_tool_call: Callable[[str, str, str], Coroutine[Any, Any, str]] | None = None
     on_audio_delta: Callable[[str], Coroutine[Any, Any, None]] | None = None
@@ -77,6 +78,9 @@ class RealtimeSession:
         await self._configure_session(settings)
         logger.info("OpenAI Realtime session configured: call_sid=%s", self.call_sid)
 
+        if self.greeting:
+            await self._trigger_greeting()
+
     async def _configure_session(self, settings: Any) -> None:
         """Send session.update to configure model, voice, audio, tools, and turn detection."""
         session_config: dict[str, Any] = {
@@ -102,6 +106,18 @@ class RealtimeSession:
             session_config["tool_choice"] = "auto"
 
         await self._send({"type": "session.update", "session": session_config})
+
+    async def _trigger_greeting(self) -> None:
+        """Inject the opening greeting and trigger the model to speak it."""
+        await self._send({
+            "type": "conversation.item.create",
+            "item": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "audio", "audio": self.greeting}],
+            },
+        })
+        await self._send({"type": "response.create"})
 
     async def _send(self, event: dict[str, Any]) -> None:
         """Send a JSON event to the OpenAI WebSocket."""

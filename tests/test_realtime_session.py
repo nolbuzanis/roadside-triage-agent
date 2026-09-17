@@ -166,6 +166,41 @@ class TestSessionSetup:
         assert "tools" not in event["session"]
         assert "tool_choice" not in event["session"]
 
+    async def test_connect_sends_greeting_when_provided(self) -> None:
+        session = _make_session(greeting="Hello there!")
+        ws = _make_ws()
+        await _connect_session(session, ws)
+
+        sent_events = [json.loads(c[0][0]) for c in ws.send.call_args_list]
+        types = [e["type"] for e in sent_events]
+        assert "conversation.item.create" in types
+        assert "response.create" in types
+
+        item_create = next(e for e in sent_events if e["type"] == "conversation.item.create")
+        assert item_create["item"]["type"] == "message"
+        assert item_create["item"]["role"] == "assistant"
+        assert item_create["item"]["content"][0]["type"] == "audio"
+        assert item_create["item"]["content"][0]["audio"] == "Hello there!"
+
+    async def test_connect_skips_greeting_when_empty(self) -> None:
+        session = _make_session(greeting="")
+        ws = _make_ws()
+        await _connect_session(session, ws)
+
+        sent_events = [json.loads(c[0][0]) for c in ws.send.call_args_list]
+        types = [e["type"] for e in sent_events]
+        assert "conversation.item.create" not in types
+        assert "response.create" not in types
+
+    async def test_connect_skips_greeting_by_default(self) -> None:
+        session = _make_session()
+        ws = _make_ws()
+        await _connect_session(session, ws)
+
+        sent_events = [json.loads(c[0][0]) for c in ws.send.call_args_list]
+        types = [e["type"] for e in sent_events]
+        assert "conversation.item.create" not in types
+
 
 # ---------------------------------------------------------------------------
 # Audio forwarding
