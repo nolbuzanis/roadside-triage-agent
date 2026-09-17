@@ -4,9 +4,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -70,7 +67,7 @@ class TestCreateTicketNew:
 
         from app.services.tickets import create_ticket
 
-        ticket = create_ticket(
+        create_ticket(
             call_id="CA_status",
             caller_phone="+15550000000",
             location="A",
