@@ -232,6 +232,9 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                 "streamSid": stream_sid,
                 "media": {"payload": audio_b64},
             })
+            # Record first audio sent to Twilio (only once per call)
+            if session and session.latency_tracker:
+                session.latency_tracker.record_event("first_twilio_audio_sent")
         except Exception:
             logger.warning("Failed to send audio to Twilio: call_sid=%s", call_sid)
 
@@ -303,6 +306,11 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                     on_tool_call=handle_tool_call,
                     on_error=handle_session_error,
                 )
+
+                # Record call started and twilio stream started events
+                assert session.latency_tracker is not None
+                session.latency_tracker.record_event("call_started")
+                session.latency_tracker.record_event("twilio_stream_started")
 
                 try:
                     await session.connect()
