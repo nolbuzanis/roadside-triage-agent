@@ -51,12 +51,12 @@ echo "Backend ready at http://localhost:$PORT"
 NGROK_DOMAIN="tattoo-margarine-demanding.ngrok-free.dev"
 NGROK_URL="https://$NGROK_DOMAIN"
 echo "Starting ngrok tunnel on $NGROK_DOMAIN..."
-ngrok http "$PORT" --domain="$NGROK_DOMAIN" --log=stdout &
+ngrok http "$PORT" --url="$NGROK_DOMAIN" --log=stdout &
 NGROK_PID=$!
 
 echo "Waiting for ngrok tunnel..."
 for i in $(seq 1 30); do
-  if curl -sf "https://$NGROK_DOMAIN" -o /dev/null 2>/dev/null; then
+  if curl -sf "$NGROK_URL/health" -o /dev/null 2>/dev/null; then
     break
   fi
   sleep 0.5
