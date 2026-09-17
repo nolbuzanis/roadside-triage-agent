@@ -1,8 +1,11 @@
+import asyncio
 import logging
 import sys
+import time
 
+import httpx
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 
 from app.api.twilio import router as twilio_router
 from app.api.webhooks import router as webhooks_router
@@ -51,5 +54,87 @@ async def validate_settings() -> None:
 
 
 @app.get("/health")
-async def health():
-    return {"status": "ok"}
+async def health(
+    check_db: bool = Query(default=False),
+    check_twilio: bool = Query(default=False),
+    check_openai: bool = Query(default=False),
+):
+    """Health check endpoint.
+
+    Returns basic process status by default. Pass query params to also verify
+    downstream service connectivity (each adds latency from a lightweight API call):
+
+    - ``?check_db=true`` — Supabase row read
+    - ``?check_twilio=true`` — Twilio account fetch (non-billable)
+    - ``?check_openai=true`` — OpenAI models list (non-billable)
+    """
+    start = time.monotonic()
+    status = "ok"
+    error_msg: str | None = None
+    settings = None
+
+    try:
+        settings = get_settings()
+    except Exception as exc:
+        logger.warning("Health check: configuration invalid", error=str(exc))
+        status = "error"
+        error_msg = "configuration_invalid"
+
+    if status == "ok" and check_db:
+
+        def _sync_check_db() -> None:
+            from app.services.tickets import _get_supabase
+
+            supabase = _get_supabase()
+            supabase.table("breakdown_tickets").select("id").limit(1).execute()
+
+        try:
+            await asyncio.wait_for(asyncio.to_thread(_sync_check_db), timeout=5.0)
+        except Exception as exc:
+            logger.warning("Health check: database unreachable", error=str(exc))
+            status = "degraded"
+
+    if status == "ok" and check_twilio:
+
+        def _sync_check_twilio() -> None:
+            from twilio.rest import Client as TwilioClient  # type: ignore[import-untyped]
+
+            client = TwilioClient(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)  # type: ignore[union-attr]
+            client.api.accounts(settings.TWILIO_ACCOUNT_SID).fetch()  # type: ignore[union-attr]
+
+        try:
+            await asyncio.wait_for(asyncio.to_thread(_sync_check_twilio), timeout=5.0)
+        except Exception as exc:
+            logger.warning("Health check: Twilio unreachable", error=str(exc))
+            status = "degraded"
+
+    if status == "ok" and check_openai:
+
+        async def _check_openai() -> None:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    "https://api.openai.com/v1/models",
+                    headers={"Authorization": f"Bearer {settings.OPENAI_API_KEY}"},  # type: ignore[union-attr]
+                    timeout=5.0,
+                )
+                resp.raise_for_status()
+
+        try:
+            await asyncio.wait_for(_check_openai(), timeout=5.0)
+        except Exception as exc:
+            logger.warning("Health check: OpenAI unreachable", error=str(exc))
+            status = "degraded"
+
+    result: dict[str, object] = {
+        "status": status,
+        "response_time_ms": round((time.monotonic() - start) * 1000, 1),
+    }
+    if error_msg:
+        result["error"] = error_msg
+    if check_db and status != "error":
+        result["database"] = "ok" if status == "ok" else "error"
+    if check_twilio and status != "error":
+        result["twilio"] = "ok" if status == "ok" else "error"
+    if check_openai and status != "error":
+        result["openai"] = "ok" if status == "ok" else "error"
+    return result

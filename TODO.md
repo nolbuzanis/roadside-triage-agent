@@ -835,6 +835,10 @@ Log:
 - Health endpoint responds quickly
 - Deployment platform can use it for health monitoring
 
+### Status
+
+- [x] Completed in `feat/health-check-endpoint` PR
+
 ---
 
 ## P1 — Error Recovery
