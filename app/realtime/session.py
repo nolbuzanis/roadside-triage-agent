@@ -84,11 +84,11 @@ class RealtimeSession:
             "output_modalities": ["audio"],
             "audio": {
                 "input": {
-                    "format": {"type": "audio/g711_ulaw", "rate": TWILIO_AUDIO_RATE},
+                    "format": {"type": "audio/pcmu", "rate": TWILIO_AUDIO_RATE},
                     "turn_detection": {"type": "server_vad"},
                 },
                 "output": {
-                    "format": {"type": "audio/g711_ulaw", "rate": TWILIO_AUDIO_RATE},
+                    "format": {"type": "audio/pcmu", "rate": TWILIO_AUDIO_RATE},
                     "voice": "marin",
                 },
             },
