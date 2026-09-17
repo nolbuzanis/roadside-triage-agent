@@ -652,6 +652,10 @@ Create tests/mocks for:
 - Tool calls are parsed correctly
 - Session cleanup occurs on call termination
 
+### Status
+
+- [x] Completed in `feat/test-realtime-session` PR
+
 ---
 
 ## P0 — Test Ticket Persistence
