@@ -84,11 +84,11 @@ class RealtimeSession:
             "output_modalities": ["audio"],
             "audio": {
                 "input": {
-                    "format": {"type": "audio/pcmu", "rate": TWILIO_AUDIO_RATE},
+                    "format": {"type": "audio/pcmu"},
                     "turn_detection": {"type": "server_vad"},
                 },
                 "output": {
-                    "format": {"type": "audio/pcmu", "rate": TWILIO_AUDIO_RATE},
+                    "format": {"type": "audio/pcmu"},
                     "voice": "marin",
                 },
             },

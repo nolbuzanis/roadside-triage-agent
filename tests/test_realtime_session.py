@@ -123,7 +123,7 @@ class TestSessionSetup:
         assert session_config["type"] == "realtime"
         assert session_config["output_modalities"] == ["audio"]
         assert session_config["audio"]["input"]["format"]["type"] == "audio/pcmu"
-        assert session_config["audio"]["input"]["format"]["rate"] == 8000
+        assert "rate" not in session_config["audio"]["input"]["format"]
         assert session_config["audio"]["output"]["voice"] == "marin"
         assert session_config["audio"]["input"]["turn_detection"]["type"] == "server_vad"
 
