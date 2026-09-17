@@ -1,6 +1,6 @@
 """Tests for realtime conversation instructions content."""
 
-from app.realtime.instructions import ROADSIDE_ASSISTANT_INSTRUCTIONS
+from app.realtime.instructions import OPENING_GREETING, ROADSIDE_ASSISTANT_INSTRUCTIONS
 
 
 def test_instructions_contain_safety_priority() -> None:
@@ -98,3 +98,24 @@ def test_instructions_require_use_of_transfer_tool() -> None:
     """Must instruct using the transfer tool, not just telling caller to call 911."""
     lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
     assert "transfer_to_emergency" in lower
+
+
+def test_greeting_constant_value() -> None:
+    """The greeting constant must be the exact expected string."""
+    assert OPENING_GREETING == "Thanks for calling roadside assistance. How can I help?"
+
+
+def test_instructions_include_greeting_section() -> None:
+    """Instructions must contain an Opening Greeting section."""
+    assert "Opening Greeting" in ROADSIDE_ASSISTANT_INSTRUCTIONS
+
+
+def test_instructions_reference_greeting_constant() -> None:
+    """Instructions must include the exact greeting text."""
+    assert OPENING_GREETING in ROADSIDE_ASSISTANT_INSTRUCTIONS
+
+
+def test_instructions_forbid_paraphrasing_greeting() -> None:
+    """Instructions must tell the model not to paraphrase the greeting."""
+    lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
+    assert "do not paraphrase" in lower or "do not rephrase" in lower
