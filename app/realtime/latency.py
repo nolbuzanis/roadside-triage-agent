@@ -39,8 +39,11 @@ class CallLatencyTracker:
     # Monotonic timestamps (seconds) for duration calculations
     _call_started: float = field(default=0.0, init=False)
     _twilio_stream_started: float = field(default=0.0, init=False)
+    _openai_connection_started: float = field(default=0.0, init=False)
+    _openai_websocket_connected: float = field(default=0.0, init=False)
     _openai_session_created: float = field(default=0.0, init=False)
     _session_update_sent: float = field(default=0.0, init=False)
+    _openai_session_updated: float = field(default=0.0, init=False)
     _response_create_sent: float = field(default=0.0, init=False)
     _first_openai_audio_received: float = field(default=0.0, init=False)
     _first_twilio_audio_sent: float = field(default=0.0, init=False)
@@ -68,10 +71,16 @@ class CallLatencyTracker:
             self._call_started = now
         elif event == "twilio_stream_started":
             self._twilio_stream_started = now
+        elif event == "openai_connection_started":
+            self._openai_connection_started = now
+        elif event == "openai_websocket_connected":
+            self._openai_websocket_connected = now
         elif event == "openai_session_created":
             self._openai_session_created = now
         elif event == "session_update_sent":
             self._session_update_sent = now
+        elif event == "openai_session_updated":
+            self._openai_session_updated = now
         elif event == "response_create_sent":
             self._response_create_sent = now
         elif event == "first_openai_audio_received":
@@ -141,9 +150,44 @@ class CallLatencyTracker:
                 (self._twilio_stream_started - self._call_started) * 1000
             )
 
+        if self._twilio_stream_started > 0 and self._openai_connection_started > 0:
+            metrics["stream_to_connection_attempt_ms"] = int(
+                (self._openai_connection_started - self._twilio_stream_started) * 1000
+            )
+
+        if self._openai_connection_started > 0 and self._openai_websocket_connected > 0:
+            metrics["websocket_connection_ms"] = int(
+                (self._openai_websocket_connected - self._openai_connection_started) * 1000
+            )
+
+        if self._openai_websocket_connected > 0 and self._openai_session_created > 0:
+            metrics["websocket_to_session_created_ms"] = int(
+                (self._openai_session_created - self._openai_websocket_connected) * 1000
+            )
+
+        if self._openai_session_created > 0 and self._session_update_sent > 0:
+            metrics["session_created_to_update_sent_ms"] = int(
+                (self._session_update_sent - self._openai_session_created) * 1000
+            )
+
+        if self._session_update_sent > 0 and self._openai_session_updated > 0:
+            metrics["session_update_roundtrip_ms"] = int(
+                (self._openai_session_updated - self._session_update_sent) * 1000
+            )
+
+        if self._openai_session_updated > 0 and self._response_create_sent > 0:
+            metrics["session_updated_to_response_create_ms"] = int(
+                (self._response_create_sent - self._openai_session_updated) * 1000
+            )
+
         if self._twilio_stream_started > 0 and self._openai_session_created > 0:
             metrics["time_to_openai_session_ms"] = int(
                 (self._openai_session_created - self._twilio_stream_started) * 1000
+            )
+
+        if self._twilio_stream_started > 0 and self._session_update_sent > 0:
+            metrics["twilio_stream_to_session_update_ms"] = int(
+                (self._session_update_sent - self._twilio_stream_started) * 1000
             )
 
         if self._response_create_sent > 0 and self._first_openai_audio_received > 0:
@@ -213,9 +257,44 @@ class CallLatencyTracker:
                 (self._twilio_stream_started - self._call_started) * 1000
             )
 
+        if self._twilio_stream_started > 0 and self._openai_connection_started > 0:
+            metrics["stream_to_connection_attempt_ms"] = int(
+                (self._openai_connection_started - self._twilio_stream_started) * 1000
+            )
+
+        if self._openai_connection_started > 0 and self._openai_websocket_connected > 0:
+            metrics["websocket_connection_ms"] = int(
+                (self._openai_websocket_connected - self._openai_connection_started) * 1000
+            )
+
+        if self._openai_websocket_connected > 0 and self._openai_session_created > 0:
+            metrics["websocket_to_session_created_ms"] = int(
+                (self._openai_session_created - self._openai_websocket_connected) * 1000
+            )
+
+        if self._openai_session_created > 0 and self._session_update_sent > 0:
+            metrics["session_created_to_update_sent_ms"] = int(
+                (self._session_update_sent - self._openai_session_created) * 1000
+            )
+
+        if self._session_update_sent > 0 and self._openai_session_updated > 0:
+            metrics["session_update_roundtrip_ms"] = int(
+                (self._openai_session_updated - self._session_update_sent) * 1000
+            )
+
+        if self._openai_session_updated > 0 and self._response_create_sent > 0:
+            metrics["session_updated_to_response_create_ms"] = int(
+                (self._response_create_sent - self._openai_session_updated) * 1000
+            )
+
         if self._twilio_stream_started > 0 and self._openai_session_created > 0:
             metrics["time_to_openai_session_ms"] = int(
                 (self._openai_session_created - self._twilio_stream_started) * 1000
+            )
+
+        if self._twilio_stream_started > 0 and self._session_update_sent > 0:
+            metrics["twilio_stream_to_session_update_ms"] = int(
+                (self._session_update_sent - self._twilio_stream_started) * 1000
             )
 
         if self._response_create_sent > 0 and self._first_openai_audio_received > 0:

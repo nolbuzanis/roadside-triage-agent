@@ -73,6 +73,9 @@ class RealtimeSession:
             model,
         )
 
+        assert self.latency_tracker is not None
+        self.latency_tracker.record_event("openai_connection_started")
+
         self._ws = await websockets.connect(
             url,
             additional_headers=additional_headers,
@@ -81,6 +84,7 @@ class RealtimeSession:
             close_timeout=5,
         )
         self._connected = True
+        self.latency_tracker.record_event("openai_websocket_connected")
 
         await self._configure_session(settings)
         logger.info("OpenAI Realtime session configured: call_sid=%s", self.call_sid)
@@ -194,6 +198,8 @@ class RealtimeSession:
 
         elif event_type == "session.updated":
             logger.debug("OpenAI session updated: call_sid=%s", self.call_sid)
+            assert self.latency_tracker is not None
+            self.latency_tracker.record_event("openai_session_updated")
 
         elif event_type == "response.output_audio.delta":
             audio_b64 = event.get("delta", "")
