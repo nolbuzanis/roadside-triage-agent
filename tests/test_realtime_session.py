@@ -179,7 +179,7 @@ class TestSessionSetup:
         item_create = next(e for e in sent_events if e["type"] == "conversation.item.create")
         assert item_create["item"]["type"] == "message"
         assert item_create["item"]["role"] == "assistant"
-        assert item_create["item"]["content"][0]["type"] == "text"
+        assert item_create["item"]["content"][0]["type"] == "output_text"
         assert item_create["item"]["content"][0]["text"] == "Hello there!"
 
     async def test_connect_skips_greeting_when_empty(self) -> None:
