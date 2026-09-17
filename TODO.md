@@ -801,6 +801,10 @@ Log:
 - Failures contain enough context to debug
 - Call/session IDs allow correlation across services
 
+### Status
+
+- [x] Completed in `feat/basic-structured-logging` PR
+
 ---
 
 ## P0 — Health Check

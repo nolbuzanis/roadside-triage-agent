@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import logging
 from typing import Any
+
+import structlog
 
 from app.core.config import get_settings
 from supabase import Client, create_client
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 _client: Client | None = None
 
@@ -43,7 +44,7 @@ def create_ticket(
 
     existing = table.select("*").eq("call_id", call_id).execute()
     if existing.data:
-        logger.info("Ticket already exists for call_id=%s, returning existing", call_id)
+        logger.info("Ticket already exists, returning existing", call_id=call_id)
         return dict(existing.data[0])  # type: ignore[arg-type]
 
     row: dict[str, Any] = {
@@ -62,10 +63,10 @@ def create_ticket(
     ticket: dict[str, Any] = dict(result.data[0]) if result.data else row  # type: ignore[arg-type]
 
     logger.info(
-        "Ticket created: id=%s, call_id=%s, location=%s",
-        ticket.get("id"),
-        call_id,
-        location,
+        "Ticket created",
+        ticket_id=ticket.get("id"),
+        call_id=call_id,
+        location=location,
     )
     return ticket
 
@@ -88,9 +89,9 @@ def update_ticket_hazard(
                 "status": "escalated",
             }
         ).eq("call_id", call_id).execute()
-        logger.info("Ticket escalated: call_id=%s, reason=%s", call_id, hazard_reason)
+        logger.info("Ticket escalated", call_id=call_id, reason=hazard_reason)
     except Exception:
-        logger.exception("Failed to update hazard state: call_id=%s", call_id)
+        logger.exception("Failed to update hazard state", call_id=call_id)
 
 
 def update_notification_status(*, call_id: str, status: str) -> None:
@@ -103,6 +104,6 @@ def update_notification_status(*, call_id: str, status: str) -> None:
         supabase.table("breakdown_tickets").update(
             {"notification_status": status}
         ).eq("call_id", call_id).execute()
-        logger.info("Notification status updated: call_id=%s, status=%s", call_id, status)
+        logger.info("Notification status updated", call_id=call_id, status=status)
     except Exception:
-        logger.exception("Failed to update notification status: call_id=%s", call_id)
+        logger.exception("Failed to update notification status", call_id=call_id)

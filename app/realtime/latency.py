@@ -11,14 +11,14 @@ for correlating events across systems.
 
 from __future__ import annotations
 
-import json
-import logging
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-logger = logging.getLogger(__name__)
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 
 @dataclass
@@ -121,7 +121,6 @@ class CallLatencyTracker:
 
         # Build log entry
         log_entry: dict[str, Any] = {
-            "event": event,
             "call_id": self.call_id,
             "timestamp": wall_now,
             "elapsed_ms": elapsed_ms,
@@ -134,7 +133,7 @@ class CallLatencyTracker:
         for key, value in kwargs.items():
             log_entry[key] = value
 
-        logger.info(json.dumps(log_entry))
+        logger.info(event, **log_entry)
 
     def log_latency_metrics(self) -> dict[str, Any]:
         """Calculate and log all latency metrics for this call.
@@ -143,7 +142,6 @@ class CallLatencyTracker:
             Dictionary of calculated latency metrics
         """
         metrics: dict[str, Any] = {
-            "event": "latency_metrics",
             "call_id": self.call_id,
         }
 
@@ -262,7 +260,7 @@ class CallLatencyTracker:
                 self._call_ended, tz=UTC
             ).isoformat()
 
-        logger.info(json.dumps(metrics))
+        logger.info("latency_metrics", **metrics)
         return metrics
 
     def get_metrics(self) -> dict[str, Any]:

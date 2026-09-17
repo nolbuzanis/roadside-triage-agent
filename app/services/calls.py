@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+
+import structlog
 
 if TYPE_CHECKING:
     from app.realtime.session import RealtimeSession
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 @dataclass
@@ -62,7 +63,7 @@ class CallStateManager:
             caller_phone=caller_phone,
         )
         self._calls[twilio_call_id] = state
-        logger.info("Call state created: call_sid=%s", twilio_call_id)
+        logger.info("Call state created", call_sid=twilio_call_id)
         return state
 
     def get(self, call_sid: str) -> CallState | None:
@@ -73,7 +74,7 @@ class CallStateManager:
         """Remove state for a completed call. No-op if already removed."""
         removed = self._calls.pop(call_sid, None)
         if removed is not None:
-            logger.info("Call state removed: call_sid=%s", call_sid)
+            logger.info("Call state removed", call_sid=call_sid)
 
     @property
     def active_count(self) -> int:

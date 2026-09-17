@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import logging
-
+import structlog
 from twilio.rest import Client as TwilioClient  # type: ignore[import-untyped]
 
 from app.core.config import get_settings
 from app.services.tickets import update_notification_status
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 def notify_dispatcher(
@@ -44,13 +43,13 @@ def notify_dispatcher(
             to=settings.DISPATCHER_ALERT_PHONE,
         )
         logger.info(
-            "Dispatcher SMS sent: call_id=%s, sid=%s",
-            call_id,
-            message.sid,
+            "Dispatcher SMS sent",
+            call_id=call_id,
+            sms_sid=message.sid,
         )
         update_notification_status(call_id=call_id, status="sent")
         return True
     except Exception:
-        logger.exception("Dispatcher SMS failed: call_id=%s", call_id)
+        logger.exception("Dispatcher SMS failed", call_id=call_id)
         update_notification_status(call_id=call_id, status="failed")
         return False

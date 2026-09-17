@@ -1,6 +1,6 @@
 import asyncio
-import logging
 
+import structlog
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
 from pydantic import ValidationError
@@ -21,7 +21,7 @@ from app.services.calls import EarlyConnection, call_manager
 from app.services.emergency import transfer_call
 from app.services.tickets import create_ticket, update_ticket_hazard
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 _background_tasks: set[asyncio.Task[None]] = set()
 
@@ -45,7 +45,7 @@ async def handle_create_breakdown_ticket(
     try:
         args = TicketArgs.model_validate_json(arguments)
     except ValidationError:
-        logger.warning("Invalid tool arguments: call_sid=%s", call_sid)
+        logger.warning("Invalid tool arguments", call_sid=call_sid)
         return TicketToolResult(status="error", error="Invalid arguments")
 
     try:
@@ -67,7 +67,7 @@ async def handle_create_breakdown_ticket(
             message="Ticket created successfully. You may now close the call.",
         )
     except Exception:
-        logger.exception("Failed to create ticket: call_sid=%s", call_sid)
+        logger.exception("Failed to create ticket", call_sid=call_sid)
         return TicketToolResult(status="error", error="Unable to create the ticket")
 
 
@@ -83,9 +83,9 @@ async def _record_escalation(*, call_sid: str, arguments: str) -> None:
             call_id=call_sid,
             hazard_reason=args.reason,
         )
-        logger.info("Escalation state recorded: call_sid=%s", call_sid)
+        logger.info("Escalation state recorded", call_sid=call_sid)
     except Exception:
-        logger.exception("Failed to record escalation state: call_sid=%s", call_sid)
+        logger.exception("Failed to record escalation state", call_sid=call_sid)
 
 
 async def handle_transfer_to_emergency(
@@ -97,16 +97,16 @@ async def handle_transfer_to_emergency(
     try:
         EmergencyTransferArgs.model_validate_json(arguments)
     except ValidationError:
-        logger.warning("Invalid emergency transfer arguments: call_sid=%s", call_sid)
+        logger.warning("Invalid emergency transfer arguments", call_sid=call_sid)
         return EmergencyTransferResult(status="error", error="Invalid arguments")
 
     settings = get_settings()
     destination = settings.EMERGENCY_TRANSFER_PHONE
 
     logger.info(
-        "Emergency transfer requested: call_sid=%s, destination=%s",
-        call_sid,
-        destination,
+        "Emergency transfer requested",
+        call_sid=call_sid,
+        destination=destination,
     )
 
     try:
@@ -116,7 +116,7 @@ async def handle_transfer_to_emergency(
             destination_phone=destination,
         )
     except Exception:
-        logger.exception("Emergency transfer exception: call_sid=%s", call_sid)
+        logger.exception("Emergency transfer exception", call_sid=call_sid)
         return EmergencyTransferResult(
             status="error",
             error="Unable to complete transfer. Please call 911 directly.",
@@ -172,10 +172,10 @@ async def _start_early_openai_connection(
 
     try:
         await session.connect_early()
-        logger.info("Early OpenAI connection ready: call_sid=%s", call_sid)
+        logger.info("Early OpenAI connection ready", call_sid=call_sid)
         return session
     except Exception:
-        logger.exception("Early OpenAI connection failed: call_sid=%s", call_sid)
+        logger.exception("Early OpenAI connection failed", call_sid=call_sid)
         await session.close()
         raise
 
@@ -223,13 +223,13 @@ async def twilio_voice_webhook(request: Request) -> PlainTextResponse:
     url = _reconstruct_twilio_url(request)
 
     if not _validate_twilio_request(url, twilio_signature, params):
-        logger.warning("Invalid Twilio signature: url=%s", url)
+        logger.warning("Invalid Twilio signature", url=url)
         return PlainTextResponse("Invalid request", status_code=403)
 
     call_sid = params.get("CallSid", "unknown")
     caller_phone = params.get("From", "unknown")
 
-    logger.info("Incoming call: CallSid=%s, From=%s", call_sid, caller_phone)
+    logger.info("Incoming call", call_sid=call_sid, caller_phone=caller_phone)
 
     # Start OpenAI Realtime connection early to overlap with Twilio call setup.
     # The connection task runs concurrently; the media stream handler will
@@ -288,15 +288,15 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
             if session and session.latency_tracker:
                 session.latency_tracker.record_event("first_twilio_audio_sent")
         except Exception:
-            logger.warning("Failed to send audio to Twilio: call_sid=%s", call_sid)
+            logger.warning("Failed to send audio to Twilio", call_sid=call_sid)
 
     async def handle_session_error(error: Exception) -> None:
         """Log errors from the OpenAI Realtime session."""
-        logger.error("Realtime session error: call_sid=%s, error=%s", call_sid, error)
+        logger.error("Realtime session error", call_sid=call_sid, error=str(error))
 
     async def handle_tool_call(call_id: str, func_name: str, arguments: str) -> str:
         """Thin dispatcher: route tool calls to the appropriate handler."""
-        logger.info("Tool call received: call_sid=%s, function=%s", call_sid, func_name)
+        logger.info("Tool call received", call_sid=call_sid, function=func_name)
 
         if func_name == "create_breakdown_ticket":
             ticket_result = await handle_create_breakdown_ticket(
@@ -313,7 +313,7 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
             )
             return transfer_result.model_dump_json()
 
-        logger.warning("Unknown tool: %s", func_name)
+        logger.warning("Unknown tool", function=func_name)
         return TicketToolResult(status="error", error="Unknown tool").model_dump_json()
 
     try:
@@ -336,10 +336,10 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                 )
 
                 logger.info(
-                    "Media Stream started: stream_sid=%s, call_sid=%s, caller=%s",
-                    stream_sid,
-                    call_sid,
-                    caller_phone,
+                    "Media Stream started",
+                    stream_sid=stream_sid,
+                    call_sid=call_sid,
+                    caller_phone=caller_phone,
                 )
 
                 # Check for an existing early OpenAI connection
@@ -358,12 +358,12 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                             stream_sid or "unknown"
                         )
                         logger.info(
-                            "Reused early OpenAI connection: call_sid=%s", call_sid
+                            "Reused early OpenAI connection", call_sid=call_sid
                         )
                     except Exception:
                         logger.exception(
-                            "Early connection failed, falling back: call_sid=%s",
-                            call_sid,
+                            "Early connection failed, falling back",
+                            call_sid=call_sid,
                         )
                         session = None
 
@@ -399,13 +399,13 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                             session.process_events()
                         )
                         logger.info(
-                            "OpenAI Realtime session connected: call_sid=%s",
-                            call_sid,
+                            "OpenAI Realtime session connected",
+                            call_sid=call_sid,
                         )
                     except Exception:
                         logger.exception(
-                            "Failed to connect OpenAI Realtime session: call_sid=%s",
-                            call_sid,
+                            "Failed to connect OpenAI Realtime session",
+                            call_sid=call_sid,
                         )
                         session = None
                 else:
@@ -425,13 +425,13 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                         await session.send_audio(payload)
 
             elif event in ("stop", "closed"):
-                logger.info("Media Stream stopping: call_sid=%s", call_sid)
+                logger.info("Media Stream stopping", call_sid=call_sid)
                 break
 
     except WebSocketDisconnect:
-        logger.info("Media Stream disconnected: call_sid=%s", call_sid)
+        logger.info("Media Stream disconnected", call_sid=call_sid)
     except Exception:
-        logger.exception("Media Stream error: call_sid=%s", call_sid)
+        logger.exception("Media Stream error", call_sid=call_sid)
     finally:
         # Clean up pending early connection if it was never consumed
         if early_connection is None and call_sid is not None:
