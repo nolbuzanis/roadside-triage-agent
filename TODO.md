@@ -875,6 +875,10 @@ Replace the Vapi/local PostgreSQL setup with:
 - No README instructions reference SQLAlchemy/Alembic
 - README configuration matches the actual application
 
+### Status
+
+- [x] Completed in `feat/update-readme` PR
+
 ---
 
 ## P1 — Add Voice Configuration Documentation
