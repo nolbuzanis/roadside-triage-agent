@@ -1,0 +1,450 @@
+"""Tests for ticket persistence service (app/services/tickets.py)."""
+
+from __future__ import annotations
+
+from unittest.mock import MagicMock, patch
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _mock_supabase(*, existing_data: list | None = None, insert_data: list | None = None) -> MagicMock:
+    """Build a mock Supabase client with chained table().select/insert/update."""
+    client = MagicMock()
+    table = MagicMock()
+    client.table.return_value = table
+
+    # select chain: table.select("*").eq(...).execute()
+    select_result = MagicMock()
+    select_result.data = existing_data or []
+    table.select.return_value = table
+    table.eq.return_value = table
+    table.execute.return_value = select_result
+
+    # insert chain: table.insert(row).execute() — separate mock so insert
+    # results don't collide with the select result.
+    insert_result = MagicMock()
+    insert_result.data = insert_data or []
+    insert_chain = MagicMock()
+    insert_chain.execute.return_value = insert_result
+    table.insert.return_value = insert_chain
+
+    return client
+
+
+# ---------------------------------------------------------------------------
+# create_ticket — new ticket
+# ---------------------------------------------------------------------------
+
+
+class TestCreateTicketNew:
+    """Tests for creating a brand-new ticket."""
+
+    @patch("app.services.tickets._get_supabase")
+    def test_creates_ticket_with_correct_fields(self, mock_get_sb: MagicMock) -> None:
+        sb = _mock_supabase(insert_data=[{"id": "uuid-1", "call_id": "CA_new"}])
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import create_ticket
+
+        ticket = create_ticket(
+            call_id="CA_new",
+            caller_phone="+15551234567",
+            location="123 Main St",
+            vehicle="Toyota Camry",
+            issue="Flat tire",
+        )
+
+        assert ticket["call_id"] == "CA_new"
+        table = sb.table.return_value
+        table.insert.assert_called_once()
+
+    @patch("app.services.tickets._get_supabase")
+    def test_default_status_is_pending(self, mock_get_sb: MagicMock) -> None:
+        sb = _mock_supabase()
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import create_ticket
+
+        create_ticket(
+            call_id="CA_status",
+            caller_phone="+15550000000",
+            location="A",
+            vehicle="B",
+            issue="C",
+        )
+
+        table = sb.table.return_value
+        insert_call = table.insert.call_args
+        row = insert_call[0][0]
+        assert row["status"] == "pending"
+
+    @patch("app.services.tickets._get_supabase")
+    def test_default_notification_status_is_pending(self, mock_get_sb: MagicMock) -> None:
+        sb = _mock_supabase()
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import create_ticket
+
+        create_ticket(
+            call_id="CA_notif",
+            caller_phone="+15550000000",
+            location="A",
+            vehicle="B",
+            issue="C",
+        )
+
+        table = sb.table.return_value
+        row = table.insert.call_args[0][0]
+        assert row["notification_status"] == "pending"
+
+    @patch("app.services.tickets._get_supabase")
+    def test_caller_phone_is_stored(self, mock_get_sb: MagicMock) -> None:
+        sb = _mock_supabase()
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import create_ticket
+
+        create_ticket(
+            call_id="CA_phone",
+            caller_phone="+15559876543",
+            location="A",
+            vehicle="B",
+            issue="C",
+        )
+
+        row = sb.table.return_value.insert.call_args[0][0]
+        assert row["caller_phone"] == "+15559876543"
+
+    @patch("app.services.tickets._get_supabase")
+    def test_location_vehicle_issue_are_stored(self, mock_get_sb: MagicMock) -> None:
+        sb = _mock_supabase()
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import create_ticket
+
+        create_ticket(
+            call_id="CA_data",
+            caller_phone="+15550000000",
+            location="Highway 101 NB",
+            vehicle="Honda Civic 2022",
+            issue="Engine overheating",
+        )
+
+        row = sb.table.return_value.insert.call_args[0][0]
+        assert row["location"] == "Highway 101 NB"
+        assert row["vehicle"] == "Honda Civic 2022"
+        assert row["issue"] == "Engine overheating"
+
+    @patch("app.services.tickets._get_supabase")
+    def test_session_id_is_included_when_provided(self, mock_get_sb: MagicMock) -> None:
+        sb = _mock_supabase()
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import create_ticket
+
+        create_ticket(
+            call_id="CA_session",
+            caller_phone="+15550000000",
+            location="A",
+            vehicle="B",
+            issue="C",
+            session_id="sess_abc123",
+        )
+
+        row = sb.table.return_value.insert.call_args[0][0]
+        assert row["session_id"] == "sess_abc123"
+
+    @patch("app.services.tickets._get_supabase")
+    def test_session_id_is_omitted_when_none(self, mock_get_sb: MagicMock) -> None:
+        sb = _mock_supabase()
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import create_ticket
+
+        create_ticket(
+            call_id="CA_nosess",
+            caller_phone="+15550000000",
+            location="A",
+            vehicle="B",
+            issue="C",
+        )
+
+        row = sb.table.return_value.insert.call_args[0][0]
+        assert "session_id" not in row
+
+
+# ---------------------------------------------------------------------------
+# create_ticket — idempotency (duplicate call_id)
+# ---------------------------------------------------------------------------
+
+
+class TestCreateTicketIdempotent:
+    """Tests for duplicate call_id handling."""
+
+    @patch("app.services.tickets._get_supabase")
+    def test_duplicate_call_id_returns_existing_ticket(self, mock_get_sb: MagicMock) -> None:
+        existing = {"id": "uuid-existing", "call_id": "CA_dup", "location": "Already St"}
+        sb = _mock_supabase(existing_data=[existing])
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import create_ticket
+
+        ticket = create_ticket(
+            call_id="CA_dup",
+            caller_phone="+15550000000",
+            location="New St",
+            vehicle="X",
+            issue="Y",
+        )
+
+        assert ticket["id"] == "uuid-existing"
+        assert ticket["location"] == "Already St"
+
+    @patch("app.services.tickets._get_supabase")
+    def test_duplicate_call_id_does_not_insert(self, mock_get_sb: MagicMock) -> None:
+        existing = {"id": "uuid-existing", "call_id": "CA_dup2"}
+        sb = _mock_supabase(existing_data=[existing])
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import create_ticket
+
+        create_ticket(
+            call_id="CA_dup2",
+            caller_phone="+15550000000",
+            location="A",
+            vehicle="B",
+            issue="C",
+        )
+
+        sb.table.return_value.insert.assert_not_called()
+
+    @patch("app.services.tickets._get_supabase")
+    def test_second_request_with_same_call_id_returns_same_ticket(self, mock_get_sb: MagicMock) -> None:
+        existing = {"id": "uuid-first", "call_id": "CA_same", "status": "pending"}
+        sb = _mock_supabase(existing_data=[existing])
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import create_ticket
+
+        first = create_ticket(
+            call_id="CA_same",
+            caller_phone="+15550000000",
+            location="A",
+            vehicle="B",
+            issue="C",
+        )
+        second = create_ticket(
+            call_id="CA_same",
+            caller_phone="+15559999999",
+            location="Different",
+            vehicle="Different",
+            issue="Different",
+        )
+
+        assert first["id"] == second["id"]
+        assert first == second
+
+
+# ---------------------------------------------------------------------------
+# create_ticket — returns inserted row on success
+# ---------------------------------------------------------------------------
+
+
+class TestCreateTicketReturnsInserted:
+    """Verify the returned dict matches what Supabase would return."""
+
+    @patch("app.services.tickets._get_supabase")
+    def test_returns_inserted_row_from_supabase(self, mock_get_sb: MagicMock) -> None:
+        inserted = {
+            "id": "uuid-new",
+            "call_id": "CA_new",
+            "caller_phone": "+15550000000",
+            "location": "X",
+            "vehicle": "Y",
+            "issue": "Z",
+            "status": "pending",
+            "notification_status": "pending",
+        }
+        # Build mock manually so insert().execute() returns the inserted row.
+        sb = MagicMock()
+        table = MagicMock()
+        sb.table.return_value = table
+        select_result = MagicMock()
+        select_result.data = []
+        table.select.return_value = table
+        table.eq.return_value = table
+        table.execute.return_value = select_result
+        insert_result = MagicMock()
+        insert_result.data = [inserted]
+        table.insert.return_value = MagicMock(execute=MagicMock(return_value=insert_result))
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import create_ticket
+
+        ticket = create_ticket(
+            call_id="CA_new",
+            caller_phone="+15550000000",
+            location="X",
+            vehicle="Y",
+            issue="Z",
+        )
+
+        assert ticket["id"] == "uuid-new"
+        assert ticket["status"] == "pending"
+
+    @patch("app.services.tickets._get_supabase")
+    def test_falls_back_to_row_when_no_data_returned(self, mock_get_sb: MagicMock) -> None:
+        sb = _mock_supabase(insert_data=[])
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import create_ticket
+
+        ticket = create_ticket(
+            call_id="CA_fallback",
+            caller_phone="+15550000000",
+            location="A",
+            vehicle="B",
+            issue="C",
+        )
+
+        assert ticket["call_id"] == "CA_fallback"
+        assert ticket["location"] == "A"
+
+
+# ---------------------------------------------------------------------------
+# update_ticket_hazard
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateTicketHazard:
+    """Tests for the hazard escalation updater."""
+
+    @patch("app.services.tickets._get_supabase")
+    def test_sets_hazard_detected_true(self, mock_get_sb: MagicMock) -> None:
+        sb = MagicMock()
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import update_ticket_hazard
+
+        update_ticket_hazard(call_id="CA_haz", hazard_reason="Vehicle fire")
+
+        sb.table.return_value.update.assert_called_once()
+        update_payload = sb.table.return_value.update.call_args[0][0]
+        assert update_payload["hazard_detected"] is True
+
+    @patch("app.services.tickets._get_supabase")
+    def test_sets_hazard_reason(self, mock_get_sb: MagicMock) -> None:
+        sb = MagicMock()
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import update_ticket_hazard
+
+        update_ticket_hazard(call_id="CA_haz", hazard_reason="Trapped occupant")
+
+        update_payload = sb.table.return_value.update.call_args[0][0]
+        assert update_payload["hazard_reason"] == "Trapped occupant"
+
+    @patch("app.services.tickets._get_supabase")
+    def test_sets_status_to_escalated(self, mock_get_sb: MagicMock) -> None:
+        sb = MagicMock()
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import update_ticket_hazard
+
+        update_ticket_hazard(call_id="CA_haz", hazard_reason="Fire")
+
+        update_payload = sb.table.return_value.update.call_args[0][0]
+        assert update_payload["status"] == "escalated"
+
+    @patch("app.services.tickets._get_supabase")
+    def test_filters_by_call_id(self, mock_get_sb: MagicMock) -> None:
+        sb = MagicMock()
+        table = MagicMock()
+        sb.table.return_value = table
+        # Chain: table.update().eq().execute() — each returns a distinct mock
+        update_mock = MagicMock()
+        table.update.return_value = update_mock
+        eq_mock = MagicMock()
+        update_mock.eq.return_value = eq_mock
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import update_ticket_hazard
+
+        update_ticket_hazard(call_id="CA_specific", hazard_reason="Accident")
+
+        update_mock.eq.assert_called_once_with("call_id", "CA_specific")
+
+    @patch("app.services.tickets._get_supabase")
+    def test_exception_is_swallowed(self, mock_get_sb: MagicMock) -> None:
+        sb = MagicMock()
+        sb.table.return_value.update.side_effect = RuntimeError("DB down")
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import update_ticket_hazard
+
+        # Should not raise
+        update_ticket_hazard(call_id="CA_err", hazard_reason="Fire")
+
+
+# ---------------------------------------------------------------------------
+# update_notification_status
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateNotificationStatus:
+    """Tests for the notification status updater."""
+
+    @patch("app.services.tickets._get_supabase")
+    def test_updates_notification_status_to_sent(self, mock_get_sb: MagicMock) -> None:
+        sb = MagicMock()
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import update_notification_status
+
+        update_notification_status(call_id="CA_notif", status="sent")
+
+        update_payload = sb.table.return_value.update.call_args[0][0]
+        assert update_payload["notification_status"] == "sent"
+
+    @patch("app.services.tickets._get_supabase")
+    def test_updates_notification_status_to_failed(self, mock_get_sb: MagicMock) -> None:
+        sb = MagicMock()
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import update_notification_status
+
+        update_notification_status(call_id="CA_notif", status="failed")
+
+        update_payload = sb.table.return_value.update.call_args[0][0]
+        assert update_payload["notification_status"] == "failed"
+
+    @patch("app.services.tickets._get_supabase")
+    def test_filters_by_call_id(self, mock_get_sb: MagicMock) -> None:
+        sb = MagicMock()
+        table = MagicMock()
+        sb.table.return_value = table
+        # Chain: table.update().eq().execute() — each returns a distinct mock
+        update_mock = MagicMock()
+        table.update.return_value = update_mock
+        eq_mock = MagicMock()
+        update_mock.eq.return_value = eq_mock
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import update_notification_status
+
+        update_notification_status(call_id="CA_filter", status="sent")
+
+        update_mock.eq.assert_called_once_with("call_id", "CA_filter")
+
+    @patch("app.services.tickets._get_supabase")
+    def test_exception_is_swallowed(self, mock_get_sb: MagicMock) -> None:
+        sb = MagicMock()
+        sb.table.return_value.update.side_effect = RuntimeError("Timeout")
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import update_notification_status
+
+        # Should not raise
+        update_notification_status(call_id="CA_err", status="sent")

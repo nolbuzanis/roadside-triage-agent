@@ -672,6 +672,10 @@ Create tests/mocks for:
 - Database state is correct after each test
 - Duplicate requests do not duplicate records
 
+### Status
+
+- [x] Completed in `feat/test-ticket-persistence` PR
+
 ---
 
 ## P0 — Test Emergency Scenarios
