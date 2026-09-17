@@ -926,7 +926,6 @@ The MVP is complete when all of the following work:
 ## P1
 
 - Migrate FastAPI startup validation from deprecated `@app.on_event("startup")` to `lifespan` context manager
-- Add lightweight OpenAI/Twilio configuration verification to health check (verify env vars are set without making billable API calls)
 - Add unit test for `Settings` validation that asserts `ValidationError` when env vars are missing
 - Handle `IntegrityError` in `create_ticket()` for concurrent duplicate `call_id` inserts (atomic idempotent insert)
 - Add unit tests for `TicketArgs` Pydantic validation and `CREATE_BREAKDOWN_TICKET_TOOL` schema shape
