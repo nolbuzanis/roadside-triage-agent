@@ -1,6 +1,6 @@
 """Tests for the /health endpoint."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -72,3 +72,91 @@ def test_health_check_db_error(
     body = resp.json()
     assert body["status"] == "degraded"
     assert body["database"] == "error"
+
+
+@patch("app.main.get_settings")
+def test_health_check_twilio_ok(mock_settings: MagicMock) -> None:
+    settings = MagicMock()
+    settings.TWILIO_ACCOUNT_SID = "AC_test"
+    settings.TWILIO_AUTH_TOKEN = "test_token"
+    mock_settings.return_value = settings
+
+    mock_fetch = MagicMock()
+    mock_accounts = MagicMock()
+    mock_accounts.fetch.return_value = mock_fetch
+
+    mock_twilio_client = MagicMock()
+    mock_twilio_client.api.accounts.return_value = mock_accounts
+
+    with patch("twilio.rest.Client", return_value=mock_twilio_client):
+        resp = client.get("/health?check_twilio=true")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["twilio"] == "ok"
+
+
+@patch("app.main.get_settings")
+def test_health_check_twilio_error(mock_settings: MagicMock) -> None:
+    settings = MagicMock()
+    settings.TWILIO_ACCOUNT_SID = "AC_test"
+    settings.TWILIO_AUTH_TOKEN = "bad_token"
+    mock_settings.return_value = settings
+
+    mock_twilio_client = MagicMock()
+    mock_twilio_client.api.accounts.return_value.fetch.side_effect = RuntimeError("auth failed")
+
+    with patch("twilio.rest.Client", return_value=mock_twilio_client):
+        resp = client.get("/health?check_twilio=true")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "degraded"
+    assert body["twilio"] == "error"
+
+
+@patch("app.main.get_settings")
+def test_health_check_openai_ok(mock_settings: MagicMock) -> None:
+    settings = MagicMock()
+    settings.OPENAI_API_KEY = "sk-test"
+    mock_settings.return_value = settings
+
+    mock_response = MagicMock()
+    mock_response.raise_for_status.return_value = None
+
+    mock_client_instance = MagicMock()
+    mock_client_instance.get = AsyncMock(return_value=mock_response)
+
+    mock_client_cls = MagicMock()
+    mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client_instance)
+    mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("app.main.httpx.AsyncClient", mock_client_cls):
+        resp = client.get("/health?check_openai=true")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["openai"] == "ok"
+
+
+@patch("app.main.get_settings")
+def test_health_check_openai_error(mock_settings: MagicMock) -> None:
+    settings = MagicMock()
+    settings.OPENAI_API_KEY = "sk-bad"
+    mock_settings.return_value = settings
+
+    mock_response = MagicMock()
+    mock_response.raise_for_status.side_effect = RuntimeError("unauthorized")
+
+    mock_client_instance = MagicMock()
+    mock_client_instance.get = AsyncMock(return_value=mock_response)
+
+    mock_client_cls = MagicMock()
+    mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client_instance)
+    mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("app.main.httpx.AsyncClient", mock_client_cls):
+        resp = client.get("/health?check_openai=true")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "degraded"
+    assert body["openai"] == "error"
