@@ -48,25 +48,19 @@ done
 echo "Backend ready at http://localhost:$PORT"
 
 # --- Start ngrok ---
-echo "Starting ngrok tunnel..."
-ngrok http "$PORT" --log=stdout &
+NGROK_DOMAIN="tattoo-margarine-demanding.ngrok-free.dev"
+NGROK_URL="https://$NGROK_DOMAIN"
+echo "Starting ngrok tunnel on $NGROK_DOMAIN..."
+ngrok http "$PORT" --domain="$NGROK_DOMAIN" --log=stdout &
 NGROK_PID=$!
 
 echo "Waiting for ngrok tunnel..."
-NGROK_URL=""
 for i in $(seq 1 30); do
-  NGROK_URL=$(curl -s http://127.0.0.1:4040/api/tunnels 2>/dev/null \
-    | python3 -c "import sys,json; print(json.load(sys.stdin)['tunnels'][0]['public_url'])" 2>/dev/null) || true
-  if [ -n "$NGROK_URL" ]; then
+  if curl -sf "https://$NGROK_DOMAIN" -o /dev/null 2>/dev/null; then
     break
   fi
   sleep 0.5
 done
-
-if [ -z "$NGROK_URL" ]; then
-  echo "Error: ngrok tunnel failed to establish."
-  exit 1
-fi
 
 echo ""
 echo "========================================="
