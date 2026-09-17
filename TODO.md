@@ -697,6 +697,10 @@ Test the actual voice assistant with at least:
 - Non-emergency mentions do not automatically transfer
 - Normal triage still works after benign mentions
 
+### Status
+
+- [x] Completed via live e2e testing
+
 ---
 
 ## P0 — Test Full Normal Call
@@ -730,6 +734,10 @@ phone call
 - Typical successful intake completes in <90 seconds
 - Conversation remains responsive throughout the call
 
+### Status
+
+- [x] Completed via live e2e testing
+
 ---
 
 ## P0 — Test Full Emergency Call
@@ -757,6 +765,10 @@ phone call
 - No database dependency exists for the live transfer
 - Emergency transfer latency is acceptable
 
+### Status
+
+- [x] Completed via live e2e testing
+
 ---
 
 ## P0 — Test Concurrent Calls
@@ -771,6 +783,10 @@ phone call
 - No cross-talk between sessions
 - No shared mutable call state
 - Both calls can complete independently
+
+### Status
+
+- [x] Completed via live e2e testing
 
 ---
 
@@ -874,6 +890,10 @@ Replace the Vapi/local PostgreSQL setup with:
 - No README instructions reference Vapi
 - No README instructions reference SQLAlchemy/Alembic
 - README configuration matches the actual application
+
+### Status
+
+- [x] Completed in `feat/update-readme` PR
 
 ---
 

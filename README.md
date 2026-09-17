@@ -8,6 +8,7 @@ An autonomous AI voice agent system built for towing companies to handle inbound
 - **Voice-to-Database Pipeline**: Converts natural spoken conversations into structured, validated Supabase records using OpenAI Realtime tool-calling.
 - **Emergency Escalation**: Automatically detects hazard situations (fire, injury, trapped occupants, etc.) and transfers the call to a live human.
 - **Dispatcher Alerts**: Sends instant, structured SMS notifications to dispatchers via Twilio the second a ticket is logged.
+- **Structured Logging**: JSON-structured logs with call/session correlation IDs for traceability across services.
 
 ---
 
@@ -17,8 +18,10 @@ Before you begin, ensure you have the following installed and configured:
 
 - **Python 3.13+**
 - **Supabase Account** (for database and persistence)
+- **Supabase CLI** (for local development and migrations)
 - **OpenAI Account** (for Realtime API access)
 - **Twilio Account** (for PSTN inbound calling and outbound SMS alerts)
+- **ngrok** (for local development — exposes local server to Twilio)
 
 ---
 
@@ -34,9 +37,9 @@ cd roadside-triage-agent
 ### 2. Create Virtual Environment & Install Dependencies
 
 ```bash
-python3.13 -m venv venv
-source venv/bin/activate  # On Windows use: venv\Scripts\activate
-pip install -r requirements.txt
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt -r requirements-dev.txt
 ```
 
 ### 3. Configure Environment Variables
@@ -49,49 +52,96 @@ cp .env.example .env
 
 #### Environment Variables
 
-| Variable                  | Required | Description                                                                                     |
-| ------------------------- | -------- | ----------------------------------------------------------------------------------------------- |
-| `SUPABASE_URL`            | Yes      | Supabase project URL (e.g., `https://xyz.supabase.co`)                                         |
-| `SUPABASE_SERVICE_ROLE_KEY` | Yes    | Supabase service-role key for server-side database access                                       |
-| `OPENAI_API_KEY`          | Yes      | OpenAI API key for Realtime API                                                                 |
-| `OPENAI_REALTIME_MODEL`   | Yes      | Realtime model name (e.g., `gpt-4o-realtime-preview-2024-10-01`)                               |
-| `TWILIO_ACCOUNT_SID`      | Yes      | Twilio Account SID                                                                              |
-| `TWILIO_AUTH_TOKEN`       | Yes      | Twilio Auth Token (used for request signature validation and SMS)                               |
-| `TWILIO_PHONE_NUMBER`     | Yes      | Your Twilio-provisioned phone number (e.g., `+16045550199`)                                     |
-| `DISPATCHER_ALERT_PHONE`  | Yes      | Cell phone number of the human dispatcher receiving SMS alerts (e.g., `+16045550100`)           |
-| `EMERGENCY_TRANSFER_PHONE`| Yes      | Emergency transfer destination (911 or local emergency number)                                  |
+| Variable                     | Required | Description                                                                                     |
+| ---------------------------- | -------- | ----------------------------------------------------------------------------------------------- |
+| `SUPABASE_URL`               | Yes      | Supabase project URL (e.g., `https://xyz.supabase.co`)                                         |
+| `SUPABASE_SERVICE_ROLE_KEY`  | Yes      | Supabase service-role key for server-side database access                                       |
+| `OPENAI_API_KEY`             | Yes      | OpenAI API key for Realtime API                                                                 |
+| `OPENAI_REALTIME_MODEL`      | Yes      | Realtime model name (e.g., `gpt-4o-realtime-preview-2024-10-01`)                               |
+| `TWILIO_ACCOUNT_SID`         | Yes      | Twilio Account SID                                                                              |
+| `TWILIO_AUTH_TOKEN`          | Yes      | Twilio Auth Token (used for request signature validation and SMS)                               |
+| `TWILIO_PHONE_NUMBER`        | Yes      | Your Twilio-provisioned phone number (e.g., `+16045550199`)                                     |
+| `DISPATCHER_ALERT_PHONE`     | Yes      | Cell phone number of the human dispatcher receiving SMS alerts (e.g., `+16045550100`)           |
+| `EMERGENCY_TRANSFER_PHONE`   | Yes      | Emergency transfer destination (911 or local emergency number)                                  |
+| `WEBHOOK_SECRET`             | No       | Shared secret for Supabase database webhook validation (leave empty to skip)                    |
 
-### 4. Configure Twilio Phone Number
+### 4. Set Up Supabase
+
+#### Create Supabase Project
+
+1. Go to [supabase.com](https://supabase.com) and create a new project
+2. Note your **Project URL** and **Service Role Key** (Settings → API)
+3. Set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` in your `.env`
+
+#### Run Database Migrations
+
+The project includes Supabase CLI migrations. With the Supabase CLI installed:
+
+```bash
+# Link to your remote project (first time only)
+supabase link --project-ref <your-project-ref>
+
+# Push migrations to create the breakdown_tickets table, RLS policies, and webhooks
+supabase db push
+```
+
+This applies the migrations in `supabase/migrations/`:
+- `breakdown_tickets` table with all required columns
+- Row Level Security policies
+- Ticket insert webhook for dispatcher notifications
+
+Alternatively, you can run the SQL directly in the Supabase SQL Editor (Dashboard → SQL Editor).
+
+### 5. Configure Twilio Phone Number
 
 1. Purchase a phone number in the [Twilio Console](https://console.twilio.com/)
 2. Under the phone number's **Voice Configuration**, set the **A call comes in** webhook to:
 
 ```
-https://<your-domain>/api/v1/twilio/voice
+POST https://<your-domain>/api/v1/twilio/voice
 ```
 
-For local development, use [ngrok](https://ngrok.com/) to expose your local server:
+For local development, use ngrok (see [Running Locally](#running-locally) below).
+
+**Important**: The voice webhook returns TwiML that initiates a bidirectional Media Stream to `/api/v1/twilio/media-stream`. Twilio must be able to reach both the voice webhook URL and the WebSocket endpoint.
+
+---
+
+## Running Locally
+
+### Quick Start (with ngrok)
+
+The `dev.sh` script starts both the backend and an ngrok tunnel:
+
+```bash
+chmod +x dev.sh
+./dev.sh
+```
+
+This will:
+1. Start the FastAPI server on `http://localhost:8000`
+2. Start an ngrok tunnel
+3. Print the Twilio webhook URL to configure
+
+### Manual Start
+
+**Terminal 1 — Start the backend:**
+
+```bash
+source .venv/bin/activate
+uvicorn app.main:app --reload --port 8000
+```
+
+**Terminal 2 — Start ngrok:**
 
 ```bash
 ngrok http 8000
 ```
 
-Then set the webhook URL to the ngrok HTTPS URL (e.g., `https://abc123.ngrok.io/api/v1/twilio/voice`).
+Then set your Twilio voice webhook to the ngrok HTTPS URL:
 
-**Important**: The voice webhook returns TwiML that initiates a bidirectional Media Stream to `/api/v1/twilio/media-stream`. Twilio must be able to reach both the voice webhook and the WebSocket endpoint.
-
-### 5. Set Up Supabase
-
-1. Create a Supabase project
-2. Run the migration to create the `breakdown_tickets` table (see `supabase/migrations/`)
-3. Ensure Row Level Security is enabled on `breakdown_tickets`
-
-## Running the Application
-
-Start the FastAPI development server:
-
-```bash
-uvicorn app.main:app --reload --port 8000
+```
+POST https://<your-ngrok-id>.ngrok.io/api/v1/twilio/voice
 ```
 
 ### Verifying the Setup
@@ -99,6 +149,51 @@ uvicorn app.main:app --reload --port 8000
 1. **Health check**: `GET /health` returns `{"status": "ok"}`
 2. **Local WebSocket test**: Connect to `ws://localhost:8000/api/v1/twilio/media-stream` to verify the WebSocket endpoint accepts connections
 3. **End-to-end test**: Call your Twilio phone number — the call should connect and the voice assistant should begin speaking
+
+---
+
+## Project Structure
+
+```text
+app/
+  __init__.py
+  main.py                          # FastAPI app, logging config, health endpoint
+  api/
+    __init__.py
+    twilio.py                      # Twilio voice webhook, Media Stream WebSocket, tool handlers
+    webhooks.py                    # Supabase INSERT webhook, dispatcher notification dispatch
+  services/
+    __init__.py
+    tickets.py                     # Ticket CRUD in Supabase (create, update hazard, update notification)
+    notifier.py                    # Dispatcher SMS via Twilio
+    calls.py                       # Per-call session state (CallState, CallStateManager)
+    emergency.py                   # Emergency call transfer via Twilio call control
+  realtime/
+    __init__.py
+    session.py                     # OpenAI Realtime WebSocket session manager
+    tools.py                       # Tool schemas (create_breakdown_ticket, transfer_to_emergency)
+    instructions.py                # System prompt and opening greeting
+    latency.py                     # Structured latency instrumentation
+  core/
+    __init__.py
+    config.py                      # Pydantic Settings (env var validation)
+tests/
+  test_app.py                      # App import smoke test
+  test_twilio_voice_webhook.py     # TwiML response, signature validation
+  test_realtime_session.py         # Session setup, audio forwarding, tool calls, errors
+  test_ticket_persistence.py       # Ticket CRUD, idempotency, hazard updates
+  test_emergency_transfer.py       # Transfer tool, Twilio call control, escalation recording
+  test_webhooks.py                 # Supabase webhook endpoint
+  test_tool_call_handling.py       # Pydantic models, tool handler logic
+  test_notifier.py                 # Dispatcher SMS sending
+  test_instructions.py             # Instruction content validation
+  test_latency.py                  # Latency tracking and metrics
+  test_early_connection.py         # Early OpenAI connection lifecycle
+  test_structured_logging.py       # Structured logging configuration and output
+supabase/
+  config.toml                      # Supabase CLI configuration
+  migrations/                      # SQL migrations (table, RLS, webhooks)
+```
 
 ---
 
@@ -110,7 +205,7 @@ Inbound PSTN Call
         v
      Twilio
         |
-   Media Streams
+   Media Streams (WebSocket)
         |
         v
   FastAPI Voice Server
@@ -124,16 +219,79 @@ Inbound PSTN Call
    |                       |
    v                       v
 create_ticket()       transfer call
+   |                       |
+   v                       v
+Supabase              Twilio Call Transfer
    |
    v
-Supabase
+Supabase INSERT Webhook
    |
    v
-Twilio SMS
-   |
-   v
-Dispatcher
+Dispatcher SMS (Twilio)
 ```
+
+### Key Components
+
+| Component | Role |
+|-----------|------|
+| **Twilio** | PSTN inbound calling, Media Stream audio, dispatcher SMS, emergency call transfer |
+| **FastAPI** | Voice webhook handler, WebSocket bridge, tool dispatch, session state |
+| **OpenAI Realtime** | Live conversational audio/model loop, tool invocation |
+| **Supabase** | Ticket persistence, INSERT webhook for notification dispatch |
+| **structlog** | Structured JSON logging with call/session correlation |
+
+---
+
+## Testing
+
+### Run All Tests
+
+```bash
+source .venv/bin/activate
+python -m pytest tests/ -v
+```
+
+### Run Specific Test Files
+
+```bash
+python -m pytest tests/test_twilio_voice_webhook.py -v
+python -m pytest tests/test_realtime_session.py -v
+python -m pytest tests/test_emergency_transfer.py -v
+```
+
+### Lint & Type Check
+
+```bash
+ruff check .
+mypy .
+```
+
+### CI
+
+The GitHub Actions workflow (`.github/workflows/ci.yml`) runs tests, linting, and type checking on every push and PR to `main`.
+
+---
+
+## End-to-End Phone Testing
+
+Once your local setup is running and Twilio is configured:
+
+### Normal Call Flow
+
+1. Call your Twilio phone number
+2. The AI assistant greets you and asks for your location
+3. Provide location, vehicle details, and issue
+4. The assistant creates a ticket and confirms
+5. Check Supabase for the new `breakdown_tickets` row
+6. Check your dispatcher phone for the SMS alert
+
+### Emergency Call Flow
+
+1. Call your Twilio phone number
+2. Say something like "My car is on fire" or "I'm bleeding"
+3. The assistant detects the emergency and transfers the call
+4. Verify the call transfers to `EMERGENCY_TRANSFER_PHONE`
+5. If a ticket existed, verify it's marked as `escalated` in Supabase
 
 ---
 
@@ -479,6 +637,12 @@ gcloud logs read "resource.type=cloud_run_revision AND resource.labels.service_n
   --format="json"
 ```
 
+All application logs are emitted as structured JSON (via `structlog`) with correlation fields:
+- `call_sid` — Twilio CallSid for correlating across services
+- `openai_session_id` — OpenAI session ID for Realtime API correlation
+- `ticket_id` — Supabase ticket UUID
+- `sms_sid` — Twilio SMS SID for notification tracking
+
 #### View Metrics
 
 In the Google Cloud Console, navigate to:
@@ -515,6 +679,7 @@ For production workloads, adjust these values based on your traffic patterns.
 | `TWILIO_PHONE_NUMBER` | Yes | Twilio phone number |
 | `DISPATCHER_ALERT_PHONE` | Yes | Dispatcher SMS destination |
 | `EMERGENCY_TRANSFER_PHONE` | Yes | Emergency transfer number |
+| `WEBHOOK_SECRET` | No | Supabase webhook validation secret |
 
 ### Production (Secret Manager)
 
