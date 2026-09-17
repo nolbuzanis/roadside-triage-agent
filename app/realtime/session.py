@@ -40,7 +40,7 @@ class RealtimeSession:
 
     call_sid: str
     caller_phone: str
-    stream_sid: str
+    stream_sid: str = ""
     instructions: str = ""
     greeting: str = ""
     tools: list[dict[str, Any]] = field(default_factory=list)
@@ -58,7 +58,50 @@ class RealtimeSession:
             self.latency_tracker = CallLatencyTracker(call_id=self.call_sid)
 
     async def connect(self) -> None:
-        """Establish WebSocket connection to OpenAI Realtime API and configure session."""
+        """Establish WebSocket connection to OpenAI Realtime API and configure session.
+
+        Connects, configures the session, and sends the greeting if provided.
+        For early connection (before Twilio Media Stream), use connect_early()
+        followed by set_stream_sid_and_greet().
+        """
+        await self._connect_websocket()
+        await self._configure_session()
+        logger.info("OpenAI Realtime session configured: call_sid=%s", self.call_sid)
+
+        if self.greeting:
+            await self._trigger_greeting()
+
+    async def connect_early(self) -> None:
+        """Start the OpenAI connection before the Twilio Media Stream arrives.
+
+        Establishes the WebSocket and configures the session, but does NOT
+        send the greeting. The greeting is deferred until set_stream_sid_and_greet()
+        is called after the Media Stream provides the stream_sid.
+
+        This allows the ~1.5s WebSocket connection latency to overlap with
+        Twilio's call/media-stream setup time.
+        """
+        assert self.latency_tracker is not None
+        self.latency_tracker.record_event("early_connection_started")
+        await self._connect_websocket()
+        await self._configure_session()
+        self.latency_tracker.record_event("early_connection_completed")
+        logger.info(
+            "OpenAI Realtime session configured (early): call_sid=%s", self.call_sid
+        )
+
+    async def set_stream_sid_and_greet(self, stream_sid: str) -> None:
+        """Set the Twilio stream SID and send the greeting.
+
+        Called after the Twilio Media Stream 'start' event provides the stream_sid.
+        If a greeting was configured, it is sent here (deferred from connect_early).
+        """
+        self.stream_sid = stream_sid
+        if self.greeting:
+            await self._trigger_greeting()
+
+    async def _connect_websocket(self) -> None:
+        """Open the WebSocket connection to OpenAI Realtime API."""
         settings = get_settings()
         model = settings.OPENAI_REALTIME_MODEL
         url = f"{REALTIME_URL}?model={model}"
@@ -86,14 +129,10 @@ class RealtimeSession:
         self._connected = True
         self.latency_tracker.record_event("openai_websocket_connected")
 
-        await self._configure_session(settings)
-        logger.info("OpenAI Realtime session configured: call_sid=%s", self.call_sid)
-
-        if self.greeting:
-            await self._trigger_greeting()
-
-    async def _configure_session(self, settings: Any) -> None:
+    async def _configure_session(self, settings: Any = None) -> None:
         """Send session.update to configure model, voice, audio, tools, and turn detection."""
+        if settings is None:
+            settings = get_settings()
         session_config: dict[str, Any] = {
             "type": "realtime",
             "output_modalities": ["audio"],
