@@ -50,7 +50,7 @@ class RealtimeSession:
 
     _ws: ClientConnection | None = field(default=None, init=False, repr=False)
     _connected: bool = field(default=False, init=False, repr=False)
-    latency_tracker: CallLatencyTracker = field(default=None, init=False, repr=False)
+    latency_tracker: CallLatencyTracker | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize the latency tracker for this call."""
@@ -113,6 +113,7 @@ class RealtimeSession:
             session_config["tool_choice"] = "auto"
 
         await self._send({"type": "session.update", "session": session_config})
+        assert self.latency_tracker is not None
         self.latency_tracker.record_event("session_update_sent")
 
     async def _trigger_greeting(self) -> None:
@@ -126,6 +127,7 @@ class RealtimeSession:
             },
         })
         await self._send({"type": "response.create"})
+        assert self.latency_tracker is not None
         self.latency_tracker.record_event("response_create_sent")
 
     async def _send(self, event: dict[str, Any]) -> None:
@@ -184,6 +186,7 @@ class RealtimeSession:
         if event_type == "session.created":
             logger.info("OpenAI session created: call_sid=%s", self.call_sid)
             # Extract session ID if present
+            assert self.latency_tracker is not None
             session_id = event.get("session", {}).get("id")
             if session_id:
                 self.latency_tracker.openai_session_id = session_id
@@ -196,6 +199,7 @@ class RealtimeSession:
             audio_b64 = event.get("delta", "")
             if audio_b64:
                 # Record first audio received (only once per call)
+                assert self.latency_tracker is not None
                 self.latency_tracker.record_event("first_openai_audio_received")
                 if self.on_audio_delta:
                     await self.on_audio_delta(audio_b64)
@@ -248,6 +252,7 @@ class RealtimeSession:
         )
 
         # Record tool call started
+        assert self.latency_tracker is not None
         self.latency_tracker.record_event("tool_call_started", tool_call_id=call_id)
 
         result = ""
@@ -270,6 +275,7 @@ class RealtimeSession:
             result = json.dumps({"error": "No tool handler registered"})
 
         # Record tool call completed
+        assert self.latency_tracker is not None
         self.latency_tracker.record_event("tool_call_completed", tool_call_id=call_id)
 
         # Send the function result back to the model
@@ -289,6 +295,7 @@ class RealtimeSession:
         self._connected = False
 
         # Record call ended and log latency metrics
+        assert self.latency_tracker is not None
         self.latency_tracker.record_event("call_ended")
         self.latency_tracker.log_latency_metrics()
 

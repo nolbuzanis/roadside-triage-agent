@@ -15,7 +15,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -61,7 +61,7 @@ class CallLatencyTracker:
             **kwargs: Additional context to include in the log (e.g., tool_call_id)
         """
         now = time.monotonic()
-        wall_now = datetime.now(timezone.utc).isoformat()
+        wall_now = datetime.now(UTC).isoformat()
 
         # Record the timestamp based on event type
         if event == "call_started":
@@ -186,15 +186,15 @@ class CallLatencyTracker:
         # Add wall-clock timestamps for key events
         if self._call_started > 0:
             metrics["call_started_at"] = datetime.fromtimestamp(
-                self._call_started, tz=timezone.utc
+                self._call_started, tz=UTC
             ).isoformat()
         if self._first_openai_audio_received > 0:
             metrics["first_audio_at"] = datetime.fromtimestamp(
-                self._first_openai_audio_received, tz=timezone.utc
+                self._first_openai_audio_received, tz=UTC
             ).isoformat()
         if self._call_ended > 0:
             metrics["call_ended_at"] = datetime.fromtimestamp(
-                self._call_ended, tz=timezone.utc
+                self._call_ended, tz=UTC
             ).isoformat()
 
         logger.info(json.dumps(metrics))
