@@ -13,6 +13,7 @@ import websockets.exceptions
 from websockets.asyncio.client import ClientConnection
 
 from app.core.config import get_settings
+from app.realtime.latency import CallLatencyTracker
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,12 @@ class RealtimeSession:
 
     _ws: ClientConnection | None = field(default=None, init=False, repr=False)
     _connected: bool = field(default=False, init=False, repr=False)
+    latency_tracker: CallLatencyTracker = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Initialize the latency tracker for this call."""
+        if self.latency_tracker is None:
+            self.latency_tracker = CallLatencyTracker(call_id=self.call_sid)
 
     async def connect(self) -> None:
         """Establish WebSocket connection to OpenAI Realtime API and configure session."""
@@ -106,6 +113,7 @@ class RealtimeSession:
             session_config["tool_choice"] = "auto"
 
         await self._send({"type": "session.update", "session": session_config})
+        self.latency_tracker.record_event("session_update_sent")
 
     async def _trigger_greeting(self) -> None:
         """Inject the opening greeting and trigger the model to speak it."""
@@ -118,6 +126,7 @@ class RealtimeSession:
             },
         })
         await self._send({"type": "response.create"})
+        self.latency_tracker.record_event("response_create_sent")
 
     async def _send(self, event: dict[str, Any]) -> None:
         """Send a JSON event to the OpenAI WebSocket."""
@@ -174,14 +183,22 @@ class RealtimeSession:
 
         if event_type == "session.created":
             logger.info("OpenAI session created: call_sid=%s", self.call_sid)
+            # Extract session ID if present
+            session_id = event.get("session", {}).get("id")
+            if session_id:
+                self.latency_tracker.openai_session_id = session_id
+            self.latency_tracker.record_event("openai_session_created")
 
         elif event_type == "session.updated":
             logger.debug("OpenAI session updated: call_sid=%s", self.call_sid)
 
         elif event_type == "response.output_audio.delta":
             audio_b64 = event.get("delta", "")
-            if audio_b64 and self.on_audio_delta:
-                await self.on_audio_delta(audio_b64)
+            if audio_b64:
+                # Record first audio received (only once per call)
+                self.latency_tracker.record_event("first_openai_audio_received")
+                if self.on_audio_delta:
+                    await self.on_audio_delta(audio_b64)
 
         elif event_type == "response.done":
             response = event.get("response", {})
@@ -230,6 +247,9 @@ class RealtimeSession:
             call_id,
         )
 
+        # Record tool call started
+        self.latency_tracker.record_event("tool_call_started", tool_call_id=call_id)
+
         result = ""
         if self.on_tool_call:
             try:
@@ -249,6 +269,9 @@ class RealtimeSession:
             )
             result = json.dumps({"error": "No tool handler registered"})
 
+        # Record tool call completed
+        self.latency_tracker.record_event("tool_call_completed", tool_call_id=call_id)
+
         # Send the function result back to the model
         await self._send({
             "type": "conversation.item.create",
@@ -264,6 +287,10 @@ class RealtimeSession:
         """Cleanly close the OpenAI Realtime session and WebSocket."""
         logger.info("Closing OpenAI Realtime session: call_sid=%s", self.call_sid)
         self._connected = False
+
+        # Record call ended and log latency metrics
+        self.latency_tracker.record_event("call_ended")
+        self.latency_tracker.log_latency_metrics()
 
         if self._ws is not None:
             try:
