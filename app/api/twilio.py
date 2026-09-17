@@ -17,13 +17,17 @@ from app.realtime.tools import (
     TicketArgs,
     TicketToolResult,
 )
-from app.services.calls import call_manager
+from app.services.calls import EarlyConnection, call_manager
 from app.services.emergency import transfer_call
 from app.services.tickets import create_ticket, update_ticket_hazard
 
 logger = logging.getLogger(__name__)
 
 _background_tasks: set[asyncio.Task[None]] = set()
+
+# Pending early OpenAI connections, keyed by Twilio CallSid.
+# Created in the voice webhook; consumed in the media stream handler.
+_pending_connections: dict[str, EarlyConnection] = {}
 
 
 async def handle_create_breakdown_ticket(
@@ -145,6 +149,37 @@ router = APIRouter()
 _validator: RequestValidator | None = None
 
 
+async def _start_early_openai_connection(
+    *,
+    call_sid: str,
+    caller_phone: str,
+) -> RealtimeSession:
+    """Create and connect an OpenAI Realtime session before the Twilio Media Stream arrives.
+
+    This runs as a background task started from the voice webhook, allowing the
+    ~1.5s WebSocket connection latency to overlap with Twilio call setup.
+
+    Returns the connected session on success. Raises on failure so the caller
+    can fall back to creating a new session.
+    """
+    session = RealtimeSession(
+        call_sid=call_sid,
+        caller_phone=caller_phone,
+        instructions=ROADSIDE_ASSISTANT_INSTRUCTIONS,
+        greeting=OPENING_GREETING,
+        tools=REALTIME_TOOLS,
+    )
+
+    try:
+        await session.connect_early()
+        logger.info("Early OpenAI connection ready: call_sid=%s", call_sid)
+        return session
+    except Exception:
+        logger.exception("Early OpenAI connection failed: call_sid=%s", call_sid)
+        await session.close()
+        raise
+
+
 def _get_validator() -> RequestValidator:
     """Return a cached RequestValidator instance using the Twilio auth token."""
     global _validator
@@ -178,6 +213,8 @@ async def twilio_voice_webhook(request: Request) -> PlainTextResponse:
     """Handle incoming Twilio voice webhook and return TwiML to start a Media Stream.
 
     Validates the Twilio request signature before processing.
+    Starts the OpenAI Realtime connection early so the ~1.5s WebSocket latency
+    overlaps with Twilio call/media-stream setup.
     """
     twilio_signature = request.headers.get("X-Twilio-Signature", "")
     form = await request.form()
@@ -193,6 +230,19 @@ async def twilio_voice_webhook(request: Request) -> PlainTextResponse:
     caller_phone = params.get("From", "unknown")
 
     logger.info("Incoming call: CallSid=%s, From=%s", call_sid, caller_phone)
+
+    # Start OpenAI Realtime connection early to overlap with Twilio call setup.
+    # The connection task runs concurrently; the media stream handler will
+    # await it when the Twilio Media Stream arrives.
+    connection_task = asyncio.create_task(
+        _start_early_openai_connection(call_sid=call_sid, caller_phone=caller_phone),
+        name=f"early-openai-{call_sid}",
+    )
+    _pending_connections[call_sid] = EarlyConnection(
+        call_sid=call_sid,
+        caller_phone=caller_phone,
+        connection_task=connection_task,
+    )
 
     host = request.url.hostname
     port = request.url.port or (443 if request.url.scheme == "https" else 80)
@@ -213,7 +263,8 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
     """Handle Twilio Media Stream WebSocket connection.
 
     Bridges Twilio audio to/from an OpenAI Realtime session.
-    Each call gets an isolated session instance.
+    Each call gets an isolated session instance. If an early OpenAI connection
+    was started from the voice webhook, it is reused here.
     """
     await websocket.accept()
 
@@ -221,6 +272,7 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
     process_task: asyncio.Task[None] | None = None
     stream_sid: str | None = None
     call_sid: str | None = None
+    early_connection: EarlyConnection | None = None
 
     async def send_audio_to_twilio(audio_b64: str) -> None:
         """Forward OpenAI audio delta to Twilio Media Stream."""
@@ -282,11 +334,6 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                 caller_phone = start_data.get("customParameters", {}).get(
                     "caller_phone"
                 )
-                call_state = call_manager.create(
-                    twilio_call_id=call_sid or "unknown",
-                    caller_phone=caller_phone or "unknown",
-                )
-                call_state.stream_sid = stream_sid
 
                 logger.info(
                     "Media Stream started: stream_sid=%s, call_sid=%s, caller=%s",
@@ -295,30 +342,81 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                     caller_phone,
                 )
 
-                session = RealtimeSession(
-                    call_sid=call_sid or "unknown",
-                    caller_phone=caller_phone or "unknown",
-                    stream_sid=stream_sid or "unknown",
-                    instructions=ROADSIDE_ASSISTANT_INSTRUCTIONS,
-                    greeting=OPENING_GREETING,
-                    tools=REALTIME_TOOLS,
-                    on_audio_delta=send_audio_to_twilio,
-                    on_tool_call=handle_tool_call,
-                    on_error=handle_session_error,
-                )
+                # Check for an existing early OpenAI connection
+                early_connection = _pending_connections.pop(call_sid, None)
 
-                # Record call started and twilio stream started events
-                assert session.latency_tracker is not None
-                session.latency_tracker.record_event("call_started")
-                session.latency_tracker.record_event("twilio_stream_started")
+                if early_connection is not None:
+                    # Await the early connection task
+                    try:
+                        session = await early_connection.connection_task
+                        # Attach callbacks that need the WebSocket
+                        session.on_audio_delta = send_audio_to_twilio
+                        session.on_tool_call = handle_tool_call
+                        session.on_error = handle_session_error
+                        # Set stream_sid and send the deferred greeting
+                        await session.set_stream_sid_and_greet(
+                            stream_sid or "unknown"
+                        )
+                        logger.info(
+                            "Reused early OpenAI connection: call_sid=%s", call_sid
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Early connection failed, falling back: call_sid=%s",
+                            call_sid,
+                        )
+                        session = None
 
-                try:
-                    await session.connect()
+                if session is None:
+                    # Fallback: create session from scratch (no early connection
+                    # or early connection failed)
+                    call_state = call_manager.create(
+                        twilio_call_id=call_sid or "unknown",
+                        caller_phone=caller_phone or "unknown",
+                    )
+                    call_state.stream_sid = stream_sid
+
+                    session = RealtimeSession(
+                        call_sid=call_sid or "unknown",
+                        caller_phone=caller_phone or "unknown",
+                        stream_sid=stream_sid or "unknown",
+                        instructions=ROADSIDE_ASSISTANT_INSTRUCTIONS,
+                        greeting=OPENING_GREETING,
+                        tools=REALTIME_TOOLS,
+                        on_audio_delta=send_audio_to_twilio,
+                        on_tool_call=handle_tool_call,
+                        on_error=handle_session_error,
+                    )
+
+                    # Record call started and twilio stream started events
+                    assert session.latency_tracker is not None
+                    session.latency_tracker.record_event("call_started")
+                    session.latency_tracker.record_event("twilio_stream_started")
+
+                    try:
+                        await session.connect()
+                        process_task = asyncio.create_task(
+                            session.process_events()
+                        )
+                        logger.info(
+                            "OpenAI Realtime session connected: call_sid=%s",
+                            call_sid,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to connect OpenAI Realtime session: call_sid=%s",
+                            call_sid,
+                        )
+                        session = None
+                else:
+                    # Early connection succeeded — create call state and start
+                    # event processing
+                    call_state = call_manager.create(
+                        twilio_call_id=call_sid or "unknown",
+                        caller_phone=caller_phone or "unknown",
+                    )
+                    call_state.stream_sid = stream_sid
                     process_task = asyncio.create_task(session.process_events())
-                    logger.info("OpenAI Realtime session connected: call_sid=%s", call_sid)
-                except Exception:
-                    logger.exception("Failed to connect OpenAI Realtime session: call_sid=%s", call_sid)
-                    session = None
 
             elif event == "media":
                 if session and session.is_connected:
@@ -335,6 +433,19 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
     except Exception:
         logger.exception("Media Stream error: call_sid=%s", call_sid)
     finally:
+        # Clean up pending early connection if it was never consumed
+        if early_connection is None and call_sid is not None:
+            pending = _pending_connections.pop(call_sid, None)
+            if pending is not None:
+                pending.connection_task.cancel()
+                try:
+                    await pending.connection_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                # Close session if it was created before task was cancelled
+                if pending.session is not None:
+                    await pending.session.close()
+
         if call_sid:
             call_manager.remove(call_sid)
         if session:

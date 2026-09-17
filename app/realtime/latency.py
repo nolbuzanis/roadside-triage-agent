@@ -39,8 +39,10 @@ class CallLatencyTracker:
     # Monotonic timestamps (seconds) for duration calculations
     _call_started: float = field(default=0.0, init=False)
     _twilio_stream_started: float = field(default=0.0, init=False)
+    _early_connection_started: float = field(default=0.0, init=False)
     _openai_connection_started: float = field(default=0.0, init=False)
     _openai_websocket_connected: float = field(default=0.0, init=False)
+    _early_connection_completed: float = field(default=0.0, init=False)
     _openai_session_created: float = field(default=0.0, init=False)
     _session_update_sent: float = field(default=0.0, init=False)
     _openai_session_updated: float = field(default=0.0, init=False)
@@ -71,10 +73,14 @@ class CallLatencyTracker:
             self._call_started = now
         elif event == "twilio_stream_started":
             self._twilio_stream_started = now
+        elif event == "early_connection_started":
+            self._early_connection_started = now
         elif event == "openai_connection_started":
             self._openai_connection_started = now
         elif event == "openai_websocket_connected":
             self._openai_websocket_connected = now
+        elif event == "early_connection_completed":
+            self._early_connection_completed = now
         elif event == "openai_session_created":
             self._openai_session_created = now
         elif event == "session_update_sent":
@@ -153,6 +159,21 @@ class CallLatencyTracker:
         if self._twilio_stream_started > 0 and self._openai_connection_started > 0:
             metrics["stream_to_connection_attempt_ms"] = int(
                 (self._openai_connection_started - self._twilio_stream_started) * 1000
+            )
+
+        if self._early_connection_started > 0 and self._early_connection_completed > 0:
+            metrics["early_connection_latency_ms"] = int(
+                (self._early_connection_completed - self._early_connection_started) * 1000
+            )
+
+        if self._twilio_stream_started > 0 and self._early_connection_started > 0:
+            metrics["twilio_stream_to_early_connection_started_ms"] = int(
+                (self._early_connection_started - self._twilio_stream_started) * 1000
+            )
+
+        if self._early_connection_started > 0 and self._openai_websocket_connected > 0:
+            metrics["early_connection_to_websocket_connected_ms"] = int(
+                (self._openai_websocket_connected - self._early_connection_started) * 1000
             )
 
         if self._openai_connection_started > 0 and self._openai_websocket_connected > 0:
@@ -260,6 +281,21 @@ class CallLatencyTracker:
         if self._twilio_stream_started > 0 and self._openai_connection_started > 0:
             metrics["stream_to_connection_attempt_ms"] = int(
                 (self._openai_connection_started - self._twilio_stream_started) * 1000
+            )
+
+        if self._early_connection_started > 0 and self._early_connection_completed > 0:
+            metrics["early_connection_latency_ms"] = int(
+                (self._early_connection_completed - self._early_connection_started) * 1000
+            )
+
+        if self._twilio_stream_started > 0 and self._early_connection_started > 0:
+            metrics["twilio_stream_to_early_connection_started_ms"] = int(
+                (self._early_connection_started - self._twilio_stream_started) * 1000
+            )
+
+        if self._early_connection_started > 0 and self._openai_websocket_connected > 0:
+            metrics["early_connection_to_websocket_connected_ms"] = int(
+                (self._openai_websocket_connected - self._early_connection_started) * 1000
             )
 
         if self._openai_connection_started > 0 and self._openai_websocket_connected > 0:

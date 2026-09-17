@@ -2,10 +2,29 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.realtime.session import RealtimeSession
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class EarlyConnection:
+    """Tracks an OpenAI Realtime connection started before the Twilio Media Stream.
+
+    Created in the voice webhook to begin the WebSocket connection early,
+    allowing the ~1.5s connection latency to overlap with Twilio call setup.
+    """
+
+    call_sid: str
+    caller_phone: str
+    connection_task: asyncio.Task[RealtimeSession] = field(repr=False)
+    session: RealtimeSession | None = field(default=None, repr=False)
 
 
 @dataclass
