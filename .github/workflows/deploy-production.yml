@@ -92,13 +92,15 @@ jobs:
 
       - name: Print deployment info
         run: |
+          DEPLOY_URL="${{ steps.deploy.outputs.url }}"
+          MEDIA_STREAM_HOST="$(echo "$DEPLOY_URL" | sed 's|https://||')"
           echo "=========================================="
           echo "  Production Deployment Complete"
           echo "=========================================="
-          echo "  Service URL: ${{ steps.deploy.outputs.url }}"
-          echo "  Health URL:  ${{ steps.deploy.outputs.url }}/health"
+          echo "  Service URL: $DEPLOY_URL"
+          echo "  Health URL:  $DEPLOY_URL/health"
           echo "=========================================="
           echo ""
           echo "Configure Twilio webhooks:"
-          echo "  Voice webhook: ${{ steps.deploy.outputs.url }}/api/v1/twilio/voice"
-          echo "  Media Stream:  wss://${{ steps.deploy.outputs.url | sed 's|https://||' }}/api/v1/twilio/media-stream"
+          echo "  Voice webhook: $DEPLOY_URL/api/v1/twilio/voice"
+          echo "  Media Stream:  wss://${MEDIA_STREAM_HOST}/api/v1/twilio/media-stream"
