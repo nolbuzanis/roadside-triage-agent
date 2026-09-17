@@ -1,8 +1,10 @@
+import asyncio
 import logging
 import sys
+import time
 
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 
 from app.api.twilio import router as twilio_router
 from app.api.webhooks import router as webhooks_router
@@ -51,5 +53,43 @@ async def validate_settings() -> None:
 
 
 @app.get("/health")
-async def health():
-    return {"status": "ok"}
+async def health(check_db: bool = Query(default=False)):
+    """Health check endpoint.
+
+    Returns basic process status by default. Pass ``?check_db=true`` to also
+    verify Supabase connectivity (adds latency from a single row read).
+    """
+    start = time.monotonic()
+    status = "ok"
+    error_msg: str | None = None
+
+    try:
+        get_settings()
+    except Exception as exc:
+        logger.warning("Health check: configuration invalid", error=str(exc))
+        status = "error"
+        error_msg = "configuration_invalid"
+
+    if status == "ok" and check_db:
+
+        async def _check_db() -> None:
+            from app.services.tickets import _get_supabase
+
+            supabase = _get_supabase()
+            supabase.table("breakdown_tickets").select("id").limit(1).execute()
+
+        try:
+            await asyncio.wait_for(_check_db(), timeout=5.0)
+        except Exception as exc:
+            logger.warning("Health check: database unreachable", error=str(exc))
+            status = "degraded"
+
+    result: dict[str, object] = {
+        "status": status,
+        "response_time_ms": round((time.monotonic() - start) * 1000, 1),
+    }
+    if error_msg:
+        result["error"] = error_msg
+    if check_db and status != "error":
+        result["database"] = "ok" if status == "ok" else "error"
+    return result
