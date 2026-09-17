@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-import logging
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
+import structlog
 import websockets
 import websockets.exceptions
 from websockets.asyncio.client import ClientConnection
@@ -15,7 +15,7 @@ from websockets.asyncio.client import ClientConnection
 from app.core.config import get_settings
 from app.realtime.latency import CallLatencyTracker
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 REALTIME_URL = "wss://api.openai.com/v1/realtime"
 
@@ -66,7 +66,7 @@ class RealtimeSession:
         """
         await self._connect_websocket()
         await self._configure_session()
-        logger.info("OpenAI Realtime session configured: call_sid=%s", self.call_sid)
+        logger.info("OpenAI Realtime session configured", call_sid=self.call_sid)
 
         if self.greeting:
             await self._trigger_greeting()
@@ -87,7 +87,7 @@ class RealtimeSession:
         await self._configure_session()
         self.latency_tracker.record_event("early_connection_completed")
         logger.info(
-            "OpenAI Realtime session configured (early): call_sid=%s", self.call_sid
+            "OpenAI Realtime session configured (early)", call_sid=self.call_sid
         )
 
     async def set_stream_sid_and_greet(self, stream_sid: str) -> None:
@@ -111,9 +111,9 @@ class RealtimeSession:
         }
 
         logger.info(
-            "Connecting to OpenAI Realtime: call_sid=%s, model=%s",
-            self.call_sid,
-            model,
+            "Connecting to OpenAI Realtime",
+            call_sid=self.call_sid,
+            model=model,
         )
 
         assert self.latency_tracker is not None
@@ -176,15 +176,15 @@ class RealtimeSession:
     async def _send(self, event: dict[str, Any]) -> None:
         """Send a JSON event to the OpenAI WebSocket."""
         if self._ws is None or not self._connected:
-            logger.warning("Cannot send event, WebSocket not connected: %s", event.get("type"))
+            logger.warning("Cannot send event, WebSocket not connected", event_type=event.get("type"))
             return
         try:
             await self._ws.send(json.dumps(event))
         except websockets.exceptions.ConnectionClosed:
-            logger.warning("WebSocket closed while sending: call_sid=%s", self.call_sid)
+            logger.warning("WebSocket closed while sending", call_sid=self.call_sid)
             self._connected = False
         except Exception:
-            logger.exception("Error sending event: call_sid=%s", self.call_sid)
+            logger.exception("Error sending event", call_sid=self.call_sid)
 
     async def send_audio(self, audio_b64: str) -> None:
         """Forward base64-encoded audio from Twilio to OpenAI."""
@@ -211,12 +211,12 @@ class RealtimeSession:
                 await self._handle_event(event)
         except websockets.exceptions.ConnectionClosed as e:
             logger.info(
-                "OpenAI WebSocket closed: call_sid=%s, code=%s",
-                self.call_sid,
-                e.code,
+                "OpenAI WebSocket closed",
+                call_sid=self.call_sid,
+                code=e.code,
             )
         except Exception as e:
-            logger.exception("Error in event loop: call_sid=%s", self.call_sid)
+            logger.exception("Error in event loop", call_sid=self.call_sid)
             if self.on_error:
                 await self.on_error(e)
         finally:
@@ -227,16 +227,20 @@ class RealtimeSession:
         event_type = event.get("type", "")
 
         if event_type == "session.created":
-            logger.info("OpenAI session created: call_sid=%s", self.call_sid)
             # Extract session ID if present
             assert self.latency_tracker is not None
             session_id = event.get("session", {}).get("id")
             if session_id:
                 self.latency_tracker.openai_session_id = session_id
+            logger.info(
+                "OpenAI session created",
+                call_sid=self.call_sid,
+                openai_session_id=session_id,
+            )
             self.latency_tracker.record_event("openai_session_created")
 
         elif event_type == "session.updated":
-            logger.debug("OpenAI session updated: call_sid=%s", self.call_sid)
+            logger.debug("OpenAI session updated", call_sid=self.call_sid)
             assert self.latency_tracker is not None
             self.latency_tracker.record_event("openai_session_updated")
 
@@ -260,10 +264,10 @@ class RealtimeSession:
             error_msg = event.get("error", {}).get("message", "Unknown error")
             error_code = event.get("error", {}).get("code", "unknown")
             logger.error(
-                "OpenAI error: call_sid=%s, code=%s, message=%s",
-                self.call_sid,
-                error_code,
-                error_msg,
+                "OpenAI error",
+                call_sid=self.call_sid,
+                error_code=error_code,
+                error_message=error_msg,
             )
             if self.on_error:
                 await self.on_error(RuntimeError(f"OpenAI error [{error_code}]: {error_msg}"))
@@ -278,10 +282,10 @@ class RealtimeSession:
             "response.output_audio.done",
         ):
             # Lifecycle/acknowledgment events — log at debug level
-            logger.debug("OpenAI event: %s, call_sid=%s", event_type, self.call_sid)
+            logger.debug("OpenAI event", event_type=event_type, call_sid=self.call_sid)
 
         else:
-            logger.debug("Unhandled OpenAI event: %s, call_sid=%s", event_type, self.call_sid)
+            logger.debug("Unhandled OpenAI event", event_type=event_type, call_sid=self.call_sid)
 
     async def _handle_function_call(self, item: dict[str, Any]) -> None:
         """Handle a function_call output item from the model."""
@@ -290,10 +294,10 @@ class RealtimeSession:
         arguments = item.get("arguments", "{}")
 
         logger.info(
-            "Tool call: call_sid=%s, function=%s, call_id=%s",
-            self.call_sid,
-            func_name,
-            call_id,
+            "Tool call",
+            call_sid=self.call_sid,
+            function=func_name,
+            tool_call_id=call_id,
         )
 
         # Record tool call started
@@ -306,16 +310,16 @@ class RealtimeSession:
                 result = await self.on_tool_call(call_id, func_name, arguments)
             except Exception as e:
                 logger.exception(
-                    "Tool call error: call_sid=%s, function=%s",
-                    self.call_sid,
-                    func_name,
+                    "Tool call error",
+                    call_sid=self.call_sid,
+                    function=func_name,
                 )
                 result = json.dumps({"error": str(e)})
         else:
             logger.warning(
-                "No tool handler registered: call_sid=%s, function=%s",
-                self.call_sid,
-                func_name,
+                "No tool handler registered",
+                call_sid=self.call_sid,
+                function=func_name,
             )
             result = json.dumps({"error": "No tool handler registered"})
 
@@ -336,7 +340,7 @@ class RealtimeSession:
 
     async def close(self) -> None:
         """Cleanly close the OpenAI Realtime session and WebSocket."""
-        logger.info("Closing OpenAI Realtime session: call_sid=%s", self.call_sid)
+        logger.info("Closing OpenAI Realtime session", call_sid=self.call_sid)
         self._connected = False
 
         # Record call ended and log latency metrics
@@ -348,7 +352,7 @@ class RealtimeSession:
             try:
                 await self._ws.close()
             except Exception:
-                logger.debug("Error closing WebSocket: call_sid=%s", self.call_sid)
+                logger.debug("Error closing WebSocket", call_sid=self.call_sid)
             self._ws = None
 
     @property

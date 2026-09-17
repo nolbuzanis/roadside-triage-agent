@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 
+import structlog
 from fastapi import APIRouter, Header, HTTPException, Request
 
 from app.core.config import get_settings
 from app.services.notifier import notify_dispatcher
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 router = APIRouter()
 
@@ -50,7 +50,7 @@ async def ticket_created_webhook(
         logger.warning("Webhook missing call_id")
         raise HTTPException(status_code=400, detail="Missing call_id")
 
-    logger.info("Ticket webhook received: call_id=%s", call_id)
+    logger.info("Ticket webhook received", call_id=call_id)
 
     # Fire-and-forget: notification must not delay the webhook response
     # and must not fail the ticket insert.

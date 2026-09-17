@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import logging
-
+import structlog
 from twilio.rest import Client as TwilioClient  # type: ignore[import-untyped]
 
 from app.core.config import get_settings
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 def transfer_call(*, call_sid: str, destination_phone: str) -> bool:
@@ -27,16 +26,16 @@ def transfer_call(*, call_sid: str, destination_phone: str) -> bool:
     try:
         call = client.calls(call_sid).update(twiml=twiml)
         logger.info(
-            "Emergency transfer initiated: call_sid=%s, destination=%s, status=%s",
-            call_sid,
-            destination_phone,
-            call.status,
+            "Emergency transfer initiated",
+            call_sid=call_sid,
+            destination=destination_phone,
+            status=call.status,
         )
         return True
     except Exception:
         logger.exception(
-            "Emergency transfer failed: call_sid=%s, destination=%s",
-            call_sid,
-            destination_phone,
+            "Emergency transfer failed",
+            call_sid=call_sid,
+            destination=destination_phone,
         )
         return False
