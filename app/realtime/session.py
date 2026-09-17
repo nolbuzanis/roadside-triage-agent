@@ -166,7 +166,7 @@ class RealtimeSession:
             "item": {
                 "type": "message",
                 "role": "assistant",
-                "content": [{"type": "text", "text": self.greeting}],
+                "content": [{"type": "output_text", "text": self.greeting}],
             },
         })
         await self._send({"type": "response.create"})
