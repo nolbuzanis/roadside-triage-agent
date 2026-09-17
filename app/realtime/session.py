@@ -123,7 +123,7 @@ class RealtimeSession:
             "item": {
                 "type": "message",
                 "role": "assistant",
-                "content": [{"type": "audio", "audio": self.greeting}],
+                "content": [{"type": "text", "text": self.greeting}],
             },
         })
         await self._send({"type": "response.create"})
