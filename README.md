@@ -134,3 +134,388 @@ Twilio SMS
    v
 Dispatcher
 ```
+
+---
+
+## Production Deployment (Google Cloud Run)
+
+This section covers deploying the application to production on Google Cloud Run with GitHub Actions for continuous deployment.
+
+### Prerequisites for Production
+
+- **Google Cloud Platform account** with billing enabled
+- **GitHub repository** with admin access
+- **Terraform or gcloud CLI** for initial GCP resource setup
+
+### Architecture
+
+```
+GitHub main
+    ↓
+GitHub Actions
+    ↓
+Google Cloud authentication via Workload Identity Federation
+    ↓
+Container build
+    ↓
+Artifact Registry
+    ↓
+Cloud Run
+    ↓
+FastAPI
+    ├── /api/v1/twilio/voice
+    └── /api/v1/twilio/media-stream
+            ↓
+       OpenAI Realtime
+
+Cloud Run
+    ↓
+Secret Manager
+    ↓
+OpenAI / Twilio / Supabase credentials
+```
+
+### 1. GCP Project Setup
+
+#### Enable Required APIs
+
+```bash
+gcloud services enable \
+  run.googleapis.com \
+  artifactregistry.googleapis.com \
+  secretmanager.googleapis.com \
+  iam.googleapis.com \
+  cloudscheduler.googleapis.com
+```
+
+#### Create Artifact Registry Repository
+
+```bash
+gcloud artifacts repositories create roadside-agent \
+  --repository-format=docker \
+  --location=us-central1 \
+  --description="Roadside Triage Agent container images"
+```
+
+### 2. Secret Manager Setup
+
+Create secrets for all required environment variables:
+
+```bash
+SECRETS=(
+  "SUPABASE_URL"
+  "SUPABASE_SERVICE_ROLE_KEY"
+  "OPENAI_API_KEY"
+  "OPENAI_REALTIME_MODEL"
+  "TWILIO_ACCOUNT_SID"
+  "TWILIO_AUTH_TOKEN"
+  "TWILIO_PHONE_NUMBER"
+  "DISPATCHER_ALERT_PHONE"
+  "EMERGENCY_TRANSFER_PHONE"
+)
+
+for SECRET in "${SECRETS[@]}"; do
+  gcloud secrets create $SECRET --replication-policy="automatic"
+done
+```
+
+#### Add Secret Values
+
+```bash
+# Example for SUPABASE_URL
+echo -n "https://your-project.supabase.co" | \
+  gcloud secrets versions add SUPABASE_URL --data-file=-
+
+# Repeat for all secrets
+```
+
+### 3. Service Accounts
+
+#### Runtime Service Account (Cloud Run)
+
+```bash
+gcloud iam service-accounts create roadside-agent-runtime \
+  --display-name="Roadside Agent Runtime Service Account"
+```
+
+Grant Secret Manager access:
+
+```bash
+SECRETS=(
+  "SUPABASE_URL"
+  "SUPABASE_SERVICE_ROLE_KEY"
+  "OPENAI_API_KEY"
+  "OPENAI_REALTIME_MODEL"
+  "TWILIO_ACCOUNT_SID"
+  "TWILIO_AUTH_TOKEN"
+  "TWILIO_PHONE_NUMBER"
+  "DISPATCHER_ALERT_PHONE"
+  "EMERGENCY_TRANSFER_PHONE"
+)
+
+PROJECT_ID=$(gcloud config get-value project)
+
+for SECRET in "${SECRETS[@]}"; do
+  gcloud secrets add-iam-policy-binding $SECRET \
+    --member="serviceAccount:roadside-agent-runtime@${PROJECT_ID}.iam.gserviceaccount.com" \
+    --role="roles/secretmanager.secretAccessor"
+done
+```
+
+#### Deployment Service Account (GitHub Actions)
+
+```bash
+gcloud iam service-accounts create github-cloud-run-deployer \
+  --display-name="GitHub Actions Cloud Run Deployer"
+```
+
+Grant required roles:
+
+```bash
+PROJECT_ID=$(gcloud config get-value project)
+DEPLOYER_SA="github-cloud-run-deployer@${PROJECT_ID}.iam.gserviceaccount.com"
+
+# Cloud Run Admin
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:$DEPLOYER_SA" \
+  --role="roles/run.admin"
+
+# Service Account User (to use the runtime SA)
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:$DEPLOYER_SA" \
+  --role="roles/iam.serviceAccountUser"
+
+# Artifact Registry Writer
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:$DEPLOYER_SA" \
+  --role="roles/artifactregistry.writer"
+```
+
+### 4. Workload Identity Federation
+
+#### Create Workload Identity Pool
+
+```bash
+gcloud iam workload-identity-pools create "github-pool" \
+  --location="global" \
+  --display-name="GitHub Actions Pool"
+```
+
+#### Create Workload Identity Provider
+
+```bash
+gcloud iam workload-identity-pools providers create-oidc "github-provider" \
+  --location="global" \
+  --workload-identity-pool="github-pool" \
+  --display-name="GitHub Actions Provider" \
+  --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner,attribute.ref=assertion.ref" \
+  --issuer-uri="https://token.actions.githubusercontent.com"
+```
+
+#### Configure Provider Attributes
+
+For the repository to authenticate, configure the provider to accept claims from your specific repository:
+
+```bash
+gcloud iam workload-identity-pools providers describe "github-provider" \
+  --location="global" \
+  --workload-identity-pool="github-pool" \
+  --format="value(name)"
+```
+
+#### Grant GitHub SA Access
+
+```bash
+PROJECT_ID=$(gcloud config get-value project)
+DEPLOYER_SA="github-cloud-run-deployer@${PROJECT_ID}.iam.gserviceaccount.com"
+POOL_NUMBER=$(gcloud iam workload-identity-pools describe "github-pool" --location="global" --format="value(name)")
+
+gcloud iam service-accounts add-iam-policy-binding $DEPLOYER_SA \
+  --role="roles/iam.workloadIdentityUser" \
+  --member="principalSet://iam.googleapis.com/${POOL_NUMBER}/attribute.repository/YOUR_ORG/YOUR_REPO"
+```
+
+### 5. GitHub Repository Configuration
+
+#### Required Repository Variables
+
+Set these in **Settings → Secrets and variables → Actions → Variables**:
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `GCP_PROJECT_ID` | Google Cloud project ID | `my-project-id` |
+| `GCP_REGION` | Cloud Run region | `us-central1` |
+| `RUNTIME_SA` | Runtime service account email | `roadside-agent-runtime@my-project.iam.gserviceaccount.com` |
+
+#### Required Repository Secrets
+
+Set these in **Settings → Secrets and variables → Actions → Secrets**:
+
+| Secret | Description |
+|--------|-------------|
+| `WIF_PROVIDER` | Workload Identity Federation provider resource name |
+| `WIF_SERVICE_ACCOUNT` | Deployment service account email |
+
+Example values:
+```
+WIF_PROVIDER: projects/123456789/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+WIF_SERVICE_ACCOUNT: github-cloud-run-deployer@my-project.iam.gserviceaccount.com
+```
+
+### 6. Deployment Workflow
+
+The GitHub Actions workflow (`.github/workflows/deploy-production.yml`) automatically:
+
+1. Runs tests on every push to `main`
+2. Builds the Docker container
+3. Pushes to Artifact Registry
+4. Deploys to Cloud Run
+5. Verifies the deployment with a health check
+6. Outputs the production URL
+
+#### Triggering a Deployment
+
+```bash
+# Deploy by merging a PR to main
+git checkout main
+git merge feature/your-feature
+git push origin main
+
+# Or deploy directly (if on main)
+git push origin main
+```
+
+### 7. Cloud Run Configuration
+
+The service is deployed with:
+
+| Setting | Value |
+|---------|-------|
+| Platform | Managed |
+| Region | Configurable (default: us-central1) |
+| Authentication | Required (no unauthenticated access) |
+| Concurrency | 8 requests per instance |
+| Max instances | 10 |
+| Min instances | 0 (scales to zero) |
+| Request timeout | 300 seconds (5 minutes) |
+
+### 8. Production URLs
+
+After deployment, your service will be available at:
+
+```
+https://roadside-agent-<hash>-<region>.a.run.app
+```
+
+#### Configure Twilio Webhooks
+
+In the Twilio Console, configure your phone number:
+
+1. **Voice webhook** (POST):
+   ```
+   https://roadside-agent-<hash>-<region>.a.run.app/api/v1/twilio/voice
+   ```
+
+2. **Media Stream** (WebSocket - configured in TwiML):
+   ```
+   wss://roadside-agent-<hash>-<region>.a.run.app/api/v1/twilio/media-stream
+   ```
+
+### 9. Health Check
+
+Verify the deployment is healthy:
+
+```bash
+curl https://roadside-agent-<hash>-<region>.a.run.app/health
+# Expected: {"status":"ok"}
+```
+
+### 10. Manual Redeployment
+
+To manually redeploy without a code change:
+
+```bash
+# Using gcloud CLI
+gcloud run deploy roadside-agent \
+  --image us-central1-docker.pkg.dev/PROJECT_ID/roadside-agent/roadside-agent:COMMIT_SHA \
+  --region us-central1 \
+  --platform managed
+
+# Or re-run the latest image
+gcloud run deploy roadside-agent \
+  --image us-central1-docker.pkg.dev/PROJECT_ID/roadside-agent/roadside-agent:latest \
+  --region us-central1 \
+  --platform managed
+```
+
+### 11. Important Limitations
+
+#### In-Memory Call State
+
+The application currently maintains per-call state in memory (`CallStateManager`). This means:
+
+- Each Cloud Run instance handles calls independently
+- Call state is not shared between instances
+- If an instance is restarted, active calls on that instance will lose state
+- Multiple concurrent calls will be distributed across instances
+
+For the initial production deployment, this is acceptable. If you need multi-instance call state sharing, consider adding Redis or another external state store.
+
+#### WebSocket Connections
+
+Cloud Run supports WebSockets, but:
+
+- WebSocket connections are subject to the request timeout (configured to 300 seconds)
+- Long-running calls may be disconnected if they exceed the timeout
+- Reconnection logic should be handled by the client (Twilio)
+
+### 12. Monitoring
+
+#### View Logs
+
+```bash
+gcloud logs read "resource.type=cloud_run_revision AND resource.labels.service_name=roadside-agent" \
+  --limit=50 \
+  --format="json"
+```
+
+#### View Metrics
+
+In the Google Cloud Console, navigate to:
+- **Cloud Run → roadside-agent → Metrics**
+
+Key metrics to monitor:
+- Request count
+- Request latency
+- Instance count
+- Error rate
+
+### 13. Cost Optimization
+
+- **Scale to zero**: The service scales to zero when not in use
+- **Concurrency**: Set to 8 to handle multiple requests per instance
+- **Max instances**: Set to 10 to prevent excessive scaling
+
+For production workloads, adjust these values based on your traffic patterns.
+
+---
+
+## Environment Variables Reference
+
+### Local Development
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `SUPABASE_URL` | Yes | Supabase project URL |
+| `SUPABASE_SERVICE_ROLE_KEY` | Yes | Supabase service-role key |
+| `OPENAI_API_KEY` | Yes | OpenAI API key |
+| `OPENAI_REALTIME_MODEL` | Yes | Realtime model name |
+| `TWILIO_ACCOUNT_SID` | Yes | Twilio Account SID |
+| `TWILIO_AUTH_TOKEN` | Yes | Twilio Auth Token |
+| `TWILIO_PHONE_NUMBER` | Yes | Twilio phone number |
+| `DISPATCHER_ALERT_PHONE` | Yes | Dispatcher SMS destination |
+| `EMERGENCY_TRANSFER_PHONE` | Yes | Emergency transfer number |
+
+### Production (Secret Manager)
+
+Same variables as above, stored in Google Secret Manager and injected into Cloud Run at runtime.
