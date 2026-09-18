@@ -99,7 +99,7 @@ jobs:
             --platform managed \
             --allow-unauthenticated \
             --service-account ${{ vars.RUNTIME_SA }} \
-            --set-secrets "SUPABASE_URL=SUPABASE_URL:latest,SUPABASE_SERVICE_ROLE_KEY=SUPABASE_SERVICE_ROLE_KEY:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest,OPENAI_REALTIME_MODEL=OPENAI_REALTIME_MODEL:latest,TWILIO_ACCOUNT_SID=TWILIO_ACCOUNT_SID:latest,TWILIO_AUTH_TOKEN=TWILIO_AUTH_TOKEN:latest,TWILIO_PHONE_NUMBER=TWILIO_PHONE_NUMBER:latest,DISPATCHER_ALERT_PHONE=DISPATCHER_ALERT_PHONE:latest,EMERGENCY_TRANSFER_PHONE=EMERGENCY_TRANSFER_PHONE:latest" \
+            --set-secrets "SUPABASE_URL=SUPABASE_URL:latest,SUPABASE_SERVICE_ROLE_KEY=SUPABASE_SERVICE_ROLE_KEY:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest,OPENAI_REALTIME_MODEL=OPENAI_REALTIME_MODEL:latest,TWILIO_ACCOUNT_SID=TWILIO_ACCOUNT_SID:latest,TWILIO_AUTH_TOKEN=TWILIO_AUTH_TOKEN:latest,TWILIO_PHONE_NUMBER=TWILIO_PHONE_NUMBER:latest,DISPATCHER_ALERT_PHONE=DISPATCHER_ALERT_PHONE:latest,EMERGENCY_TRANSFER_PHONE=EMERGENCY_TRANSFER_PHONE:latest,WEBHOOK_SECRET=WEBHOOK_SECRET:latest" \
             --timeout 300 \
             --concurrency 8 \
             --max-instances 10 \
@@ -138,10 +138,12 @@ jobs:
           echo "  Voice webhook: $DEPLOY_URL/api/v1/twilio/voice"
           echo "  Media Stream:  wss://${MEDIA_STREAM_HOST}/api/v1/twilio/media-stream"
 
-      - name: Configure Supabase webhook URL
+      - name: Configure Supabase webhook settings
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
         run: |
           WEBHOOK_URL="${{ steps.deploy.outputs.url }}/api/v1/webhooks/ticket-created"
           psql "$SUPABASE_DB_URL" \
-            -c "ALTER DATABASE SET \"app.settings.webhook_url\" = '$WEBHOOK_URL';"
+            -c "ALTER DATABASE SET \"app.settings.webhook_url\" = '$WEBHOOK_URL';" \
+            -c "ALTER DATABASE SET \"app.settings.webhook_secret\" = '$WEBHOOK_SECRET';"
