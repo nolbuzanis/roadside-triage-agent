@@ -24,7 +24,7 @@ from app.services.tickets import create_ticket, update_ticket_hazard
 
 logger = structlog.get_logger(__name__)
 
-_background_tasks: set[asyncio.Task[None]] = set()
+_background_tasks: set[asyncio.Task[object]] = set()
 
 # Pending early OpenAI connections, keyed by Twilio CallSid.
 # Created in the voice webhook; consumed in the media stream handler.
