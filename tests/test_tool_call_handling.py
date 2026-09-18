@@ -101,11 +101,12 @@ class TestHandleCreateBreakdownTicket:
     async def test_valid_args_creates_ticket(self) -> None:
         mock_ticket = {"id": "ticket-uuid-123", "call_id": "CA_test"}
         with patch("app.api.twilio.create_ticket", return_value=mock_ticket) as mock_create:
-            result = await handle_create_breakdown_ticket(
-                call_sid="CA_test",
-                caller_phone="+15551234567",
-                arguments='{"location": "Main St", "vehicle": "Honda Civic", "issue": "Won\'t start"}',
-            )
+            with patch("app.api.twilio.notify_dispatcher"):
+                result = await handle_create_breakdown_ticket(
+                    call_sid="CA_test",
+                    caller_phone="+15551234567",
+                    arguments='{"location": "Main St", "vehicle": "Honda Civic", "issue": "Won\'t start"}',
+                )
 
         assert result.status == "created"
         assert result.ticket_id == "ticket-uuid-123"
@@ -172,11 +173,12 @@ class TestHandleCreateBreakdownTicket:
     async def test_call_sid_falls_back_to_unknown(self) -> None:
         mock_ticket = {"id": "t1", "call_id": "unknown"}
         with patch("app.api.twilio.create_ticket", return_value=mock_ticket) as mock_create:
-            result = await handle_create_breakdown_ticket(
-                call_sid="",
-                caller_phone="",
-                arguments='{"location": "A", "vehicle": "B", "issue": "C"}',
-            )
+            with patch("app.api.twilio.notify_dispatcher"):
+                result = await handle_create_breakdown_ticket(
+                    call_sid="",
+                    caller_phone="",
+                    arguments='{"location": "A", "vehicle": "B", "issue": "C"}',
+                )
 
         assert result.status == "created"
         call_kwargs = mock_create.call_args[1]
@@ -189,10 +191,11 @@ class TestHandleCreateBreakdownTicket:
         mock_ticket = {"id": "t1"}
         with patch("app.api.twilio.asyncio.to_thread", wraps=__import__("asyncio").to_thread) as mock_to_thread:
             with patch("app.api.twilio.create_ticket", return_value=mock_ticket):
-                await handle_create_breakdown_ticket(
-                    call_sid="CA_test",
-                    caller_phone="+15551234567",
-                    arguments='{"location": "A", "vehicle": "B", "issue": "C"}',
-                )
+                with patch("app.api.twilio.notify_dispatcher"):
+                    await handle_create_breakdown_ticket(
+                        call_sid="CA_test",
+                        caller_phone="+15551234567",
+                        arguments='{"location": "A", "vehicle": "B", "issue": "C"}',
+                    )
 
-        mock_to_thread.assert_called_once()
+        mock_to_thread.assert_called()

@@ -63,7 +63,6 @@ cp .env.example .env
 | `TWILIO_PHONE_NUMBER`        | Yes      | Your Twilio-provisioned phone number (e.g., `+16045550199`)                                     |
 | `DISPATCHER_ALERT_PHONE`     | Yes      | Cell phone number of the human dispatcher receiving SMS alerts (e.g., `+16045550100`)           |
 | `EMERGENCY_TRANSFER_PHONE`   | Yes      | Emergency transfer destination (911 or local emergency number)                                  |
-| `WEBHOOK_SECRET`             | No       | Shared secret for Supabase database webhook validation (leave empty to skip)                    |
 
 ### 4. Set Up Supabase
 
@@ -679,7 +678,6 @@ For production workloads, adjust these values based on your traffic patterns.
 | `TWILIO_PHONE_NUMBER` | Yes | Twilio phone number |
 | `DISPATCHER_ALERT_PHONE` | Yes | Dispatcher SMS destination |
 | `EMERGENCY_TRANSFER_PHONE` | Yes | Emergency transfer number |
-| `WEBHOOK_SECRET` | No | Supabase webhook validation secret |
 
 ### Production (Secret Manager)
 

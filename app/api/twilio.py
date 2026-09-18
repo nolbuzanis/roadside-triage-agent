@@ -19,11 +19,12 @@ from app.realtime.tools import (
 )
 from app.services.calls import EarlyConnection, call_manager
 from app.services.emergency import transfer_call
+from app.services.notifier import notify_dispatcher
 from app.services.tickets import create_ticket, update_ticket_hazard
 
 logger = structlog.get_logger(__name__)
 
-_background_tasks: set[asyncio.Task[None]] = set()
+_background_tasks: set[asyncio.Task[object]] = set()
 
 # Pending early OpenAI connections, keyed by Twilio CallSid.
 # Created in the voice webhook; consumed in the media stream handler.
@@ -61,6 +62,22 @@ async def handle_create_breakdown_ticket(
             state = call_manager.get(call_sid)
             if state:
                 state.ticket_created = True
+
+        # Dispatch SMS notification in the background (fire-and-forget).
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                notify_dispatcher,
+                call_id=call_sid or "unknown",
+                caller_phone=caller_phone or "unknown",
+                location=args.location,
+                vehicle=args.vehicle,
+                issue=args.issue,
+            ),
+            name=f"notify-{call_sid}",
+        )
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+
         return TicketToolResult(
             status="created",
             ticket_id=ticket.get("id"),
