@@ -97,9 +97,9 @@ jobs:
             --image ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:${{ github.sha }} \
             --region ${{ env.REGION }} \
             --platform managed \
-            --no-allow-unauthenticated \
+            --allow-unauthenticated \
             --service-account ${{ vars.RUNTIME_SA }} \
-            --set-secrets "SUPABASE_URL=SUPABASE_URL:latest,SUPABASE_SERVICE_ROLE_KEY=SUPABASE_SERVICE_ROLE_KEY:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest,OPENAI_REALTIME_MODEL=OPENAI_REALTIME_MODEL:latest,TWILIO_ACCOUNT_SID=TWILIO_ACCOUNT_SID:latest,TWILIO_AUTH_TOKEN=TWILIO_AUTH_TOKEN:latest,TWILIO_PHONE_NUMBER=TWILIO_PHONE_NUMBER:latest,DISPATCHER_ALERT_PHONE=DISPATCHER_ALERT_PHONE:latest,EMERGENCY_TRANSFER_PHONE=EMERGENCY_TRANSFER_PHONE:latest" \
+            --set-secrets "SUPABASE_URL=SUPABASE_URL:latest,SUPABASE_SERVICE_ROLE_KEY=SUPABASE_SERVICE_ROLE_KEY:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest,OPENAI_REALTIME_MODEL=OPENAI_REALTIME_MODEL:latest,TWILIO_ACCOUNT_SID=TWILIO_ACCOUNT_SID:latest,TWILIO_AUTH_TOKEN=TWILIO_AUTH_TOKEN:latest,TWILIO_PHONE_NUMBER=TWILIO_PHONE_NUMBER:latest,DISPATCHER_ALERT_PHONE=DISPATCHER_ALERT_PHONE:latest,EMERGENCY_TRANSFER_PHONE=EMERGENCY_TRANSFER_PHONE:latest,WEBHOOK_SECRET=WEBHOOK_SECRET:latest" \
             --timeout 300 \
             --concurrency 8 \
             --max-instances 10 \
