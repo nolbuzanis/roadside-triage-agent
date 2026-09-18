@@ -39,7 +39,7 @@ async def ticket_created_webhook(
     """
     settings = get_settings()
 
-    if settings.WEBHOOK_SECRET and x_webhook_secret != settings.WEBHOOK_SECRET:
+    if x_webhook_secret != settings.WEBHOOK_SECRET:
         logger.warning("Invalid webhook secret")
         raise HTTPException(status_code=403, detail="Forbidden")
 

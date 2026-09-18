@@ -32,11 +32,12 @@ class TestTicketCreatedWebhook:
         mock_settings: MagicMock,
         mock_dispatch: AsyncMock,
     ) -> None:
-        mock_settings.return_value = MagicMock(WEBHOOK_SECRET="")
+        mock_settings.return_value = MagicMock(WEBHOOK_SECRET="test_secret")
 
         response = client.post(
             "/api/v1/webhooks/ticket-created",
             json=TICKET_PAYLOAD,
+            headers={"X-Webhook-Secret": "test_secret"},
         )
 
         assert response.status_code == 200
@@ -47,11 +48,12 @@ class TestTicketCreatedWebhook:
         self,
         mock_settings: MagicMock,
     ) -> None:
-        mock_settings.return_value = MagicMock(WEBHOOK_SECRET="")
+        mock_settings.return_value = MagicMock(WEBHOOK_SECRET="test_secret")
 
         response = client.post(
             "/api/v1/webhooks/ticket-created",
             json={"location": "123 Main St"},
+            headers={"X-Webhook-Secret": "test_secret"},
         )
 
         assert response.status_code == 400
