@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 env:
   PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
@@ -28,7 +29,7 @@ jobs:
 
   migrate:
     needs: check-changes
-    if: needs.check-changes.outputs.supabase == 'true'
+    if: needs.check-changes.outputs.supabase == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
