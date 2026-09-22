@@ -73,6 +73,7 @@ class RealtimeSession:
     closing_response_id: str | None = field(default=None, init=False, repr=False)
     _closing_interrupted: bool = field(default=False, init=False, repr=False)
     _caller_speaking: bool = field(default=False, init=False, repr=False)
+    _transfer_requested: bool = field(default=False, init=False, repr=False)
     _ticket_id: str | None = field(default=None, init=False, repr=False)
     _response_create_reasons: deque[str] = field(default_factory=deque, init=False, repr=False)
     _hangup_grace_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
@@ -246,16 +247,18 @@ class RealtimeSession:
         event: dict[str, Any] = {"type": "response.create"}
         if instructions:
             event["response"] = {"instructions": instructions}
-        # Track the reason per created response so response.created events can
-        # be attributed back to their trigger (e.g. the post-ticket closing).
-        self._response_create_reasons.append(reason)
         logger.info(
             "response_create_sent",
             reason=reason,
             call_id=self.call_sid,
             response_source=response_source,
         )
-        await self._send(event)
+        sent = await self._send(event)
+        # Track the reason only for sends that actually went out, so a failed
+        # send cannot shift the response.created attribution queue and cause an
+        # unrelated response to be mistaken for the closing response.
+        if sent:
+            self._response_create_reasons.append(reason)
 
     @staticmethod
     def _extract_assistant_text(response: dict[str, Any]) -> str:
@@ -318,18 +321,21 @@ class RealtimeSession:
                 expected_text=expected,
             )
 
-    async def _send(self, event: dict[str, Any]) -> None:
-        """Send a JSON event to the OpenAI WebSocket."""
+    async def _send(self, event: dict[str, Any]) -> bool:
+        """Send a JSON event to the OpenAI WebSocket. Returns True when sent."""
         if self._ws is None or not self._connected:
             logger.warning("Cannot send event, WebSocket not connected", event_type=event.get("type"))
-            return
+            return False
         try:
             await self._ws.send(json.dumps(event))
+            return True
         except websockets.exceptions.ConnectionClosed:
             logger.warning("WebSocket closed while sending", call_sid=self.call_sid)
             self._connected = False
+            return False
         except Exception:
             logger.exception("Error sending event", call_sid=self.call_sid)
+            return False
 
     async def send_audio(self, audio_b64: str) -> None:
         """Forward base64-encoded audio from Twilio to OpenAI."""
@@ -530,6 +536,17 @@ class RealtimeSession:
         assert self.latency_tracker is not None
         self.latency_tracker.record_event("tool_call_started", tool_call_id=call_id)
 
+        # An emergency transfer takes ownership of the call. Flag it BEFORE
+        # awaiting the handler so the closing-flow hangup can never terminate
+        # a transfer that is in flight or about to start.
+        if func_name == "transfer_to_emergency" and not self._transfer_requested:
+            self._transfer_requested = True
+            logger.info(
+                "transfer_requested_hangup_suppressed",
+                call_sid=self.call_sid,
+                tool_call_id=call_id,
+            )
+
         result = ""
         if self.on_tool_call:
             try:
@@ -653,15 +670,18 @@ class RealtimeSession:
         response_id = response.get("id")
         status = response.get("status")
 
-        is_closing_response = (
-            response_id == self.closing_response_id
-            if self.closing_response_id is not None
-            else True  # response.created not observed yet; first done after start wins
-        )
+        if self.closing_response_id is None:
+            # The closing response.created was never observed; fail safe by
+            # never completing the flow, so an unrelated response.done can
+            # never trigger the hangup.
+            logger.info(
+                "closing_response_id_unobserved",
+                call_sid=self.call_sid,
+                response_id=response_id,
+            )
+            return
 
-        if is_closing_response:
-            if self.closing_response_id is None:
-                self.closing_response_id = response_id
+        if response_id == self.closing_response_id:
             if status == "completed":
                 self.closing_response_completed = True
                 logger.info(
@@ -702,10 +722,15 @@ class RealtimeSession:
         """Start the grace-then-hangup sequence once the closing flow is safe.
 
         Deferred while the caller is speaking so the call is never disconnected
-        in the middle of caller speech. Re-armed from speech_stopped/committed
-        once it is safe again. At most one grace task exists at a time.
+        in the middle of caller speech, and suppressed entirely once an emergency
+        transfer has been requested so the transfer is never terminated.
+        Re-armed from speech_stopped/committed once it is safe again. At most
+        one grace task exists at a time.
         """
         if self.hangup_started or not self.closing_response_completed:
+            return
+        if self._transfer_requested:
+            logger.info("hangup_suppressed_transfer", call_sid=self.call_sid)
             return
         if self._caller_speaking:
             logger.info("hangup_deferred_caller_speaking", call_sid=self.call_sid)
@@ -719,6 +744,11 @@ class RealtimeSession:
         try:
             await asyncio.sleep(CLOSING_HANGUP_GRACE_SECONDS)
             if self.hangup_started or not self.closing_response_completed:
+                return
+            if self._transfer_requested:
+                # An emergency transfer was requested during the grace period;
+                # transferring the call away must win over our hangup.
+                logger.info("hangup_suppressed_transfer", call_sid=self.call_sid)
                 return
             if self._caller_speaking:
                 logger.info("hangup_deferred_caller_speaking", call_sid=self.call_sid)

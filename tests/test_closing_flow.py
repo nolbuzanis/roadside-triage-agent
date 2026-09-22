@@ -25,6 +25,7 @@ TOOL_ITEM = {
 SUCCESS_RESULT = '{"status": "created", "ticket_id": "tkt_abc"}'
 ERROR_RESULT = '{"status": "error", "error": "Unable to create the ticket"}'
 TRANSFER_ITEM = {
+    "type": "function_call",
     "call_id": "call_em_1",
     "name": "transfer_to_emergency",
     "arguments": '{"reason": "Car on fire"}',
@@ -290,6 +291,37 @@ class TestHangupWaitsForClosing:
         assert entries[0]["call_sid"] == "CA_completed_log"
         assert entries[0]["response_id"] == "resp_done_1"
         assert entries[0]["ticket_id"] == "tkt_abc"
+
+    async def test_unobserved_closing_id_fails_safe(
+        self, no_grace: None, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Without the closing response.created, no unrelated done may hang up."""
+        on_closing_finished = AsyncMock()
+        session = _make_session(on_closing_finished=on_closing_finished)
+        await _connect_session(session)
+
+        with caplog.at_level("INFO"):
+            await _run_successful_ticket(session)
+            assert session.closing_response_id is None
+
+            await session._handle_event({
+                "type": "response.done",
+                "response": {"id": "resp_any", "status": "completed", "output": []},
+            })
+
+        assert session.closing_response_completed is False
+        assert session._hangup_grace_task is None
+        on_closing_finished.assert_not_called()
+        assert _events_named(caplog, "closing_response_id_unobserved")
+
+    async def test_failed_send_does_not_enqueue_closing_reason(self) -> None:
+        session = _make_session()
+        # Not connected: _send fails, so the reason must not be queued.
+        await session._send_response_create(
+            reason="post_ticket_closing",
+            response_source="test",
+        )
+        assert len(session._response_create_reasons) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -604,6 +636,77 @@ class TestEmergencyUnaffected:
         on_closing_finished.assert_not_called()
         assert session.hangup_started is False
 
+    async def test_transfer_suppresses_hangup_after_closing_completes(
+        self, no_grace: None, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Once the transfer tool is observed, the closing hangup never fires."""
+        on_closing_finished = AsyncMock()
+        session = _make_session(on_closing_finished=on_closing_finished)
+        await _connect_session(session)
+
+        with caplog.at_level("INFO"):
+            await _run_successful_ticket(session)
+            session.on_tool_call = AsyncMock(return_value=TRANSFER_RESULT)
+            await session._handle_function_call(dict(TRANSFER_ITEM))
+
+            await _finish_closing_response(session)
+            # Completion tries to arm, but the transfer flag suppresses it.
+            assert session.closing_response_completed is True
+            assert session._hangup_grace_task is None
+            assert session.hangup_started is False
+            on_closing_finished.assert_not_called()
+            assert _events_named(caplog, "hangup_suppressed_transfer")
+
+    async def test_transfer_in_same_response_as_closing_completion_never_hangs_up(
+        self, no_grace: None, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The race: closing completes and the transfer tool runs in one response.done."""
+        on_closing_finished = AsyncMock()
+        session = _make_session(on_closing_finished=on_closing_finished)
+        await _connect_session(session)
+
+        # Open the greeting gate.
+        await session._handle_event({
+            "type": "response.done",
+            "response": {"id": "resp_greeting", "status": "completed", "output": []},
+        })
+        await _run_successful_ticket(session)
+        await session._handle_event({
+            "type": "response.created",
+            "response": {"id": "resp_closing", "status": "in_progress"},
+        })
+
+        # Caller barges in with an emergency: closing is cancelled.
+        await session._handle_event({"type": "input_audio_buffer.speech_started"})
+        await session._handle_event({
+            "type": "response.done",
+            "response": {"id": "resp_closing", "status": "cancelled", "output": []},
+        })
+        await session._handle_event({"type": "input_audio_buffer.speech_stopped"})
+
+        # The follow-up response both completes the closing flow AND carries the
+        # emergency transfer function call. The closing completion arms the grace
+        # task first; the transfer flag must still suppress the eventual hangup.
+        session.on_tool_call = AsyncMock(return_value=TRANSFER_RESULT)
+        with caplog.at_level("INFO"):
+            await session._handle_event({
+                "type": "response.done",
+                "response": {
+                    "id": "resp_follow",
+                    "status": "completed",
+                    "output": [dict(TRANSFER_ITEM)],
+                },
+            })
+
+        assert session.closing_response_completed is True
+        session.on_tool_call.assert_called_once()
+        assert _events_named(caplog, "transfer_requested_hangup_suppressed")
+
+        assert session._hangup_grace_task is not None
+        await session._hangup_grace_task
+        on_closing_finished.assert_not_called()
+        assert session.hangup_started is False
+
 
 # ---------------------------------------------------------------------------
 # Twilio hangup handler (app.api.twilio.handle_closing_finished)
@@ -614,8 +717,24 @@ class TestHandleClosingFinished:
     @pytest.fixture(autouse=True)
     def _clean_call_manager(self) -> object:
         yield
-        for sid in ("CA_active", "CA_gone"):
+        for sid in ("CA_active", "CA_gone", "CA_xfer"):
             call_manager.remove(sid)
+
+    async def test_transferred_call_is_not_hung_up(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        call_manager.create(twilio_call_id="CA_xfer", caller_phone="+15550000002")
+        state = call_manager.get("CA_xfer")
+        assert state is not None
+        state.transfer_state = "transferred"
+
+        with patch("app.api.twilio.hangup_call", return_value=True) as mock_hangup:
+            with caplog.at_level("INFO"):
+                await handle_closing_finished("CA_xfer")
+
+        mock_hangup.assert_not_called()
+        assert _events_named(caplog, "call_hangup_skipped_transferred")
+        assert _events_named(caplog, "call_hangup_started") == []
 
     async def test_active_call_is_hung_up(
         self, caplog: pytest.LogCaptureFixture

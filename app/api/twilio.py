@@ -176,15 +176,25 @@ async def handle_closing_finished(call_sid: str) -> None:
 
     Invoked by the RealtimeSession once the closing response has completed and
     the grace period has elapsed without the caller speaking. Skips the Twilio
-    call when the call already disconnected naturally (state cleaned up), so a
-    normal disconnect is never treated as an error.
+    call when the call already disconnected naturally (state cleaned up) or when
+    an emergency transfer owns the call, so neither case is treated as an error
+    and a live transfer is never terminated.
     """
     if not call_sid:
         logger.warning("call_hangup_skipped_missing_call_sid")
         return
 
-    if call_manager.get(call_sid) is None:
+    state = call_manager.get(call_sid)
+    if state is None:
         logger.info("call_hangup_skipped_call_ended", call_sid=call_sid)
+        return
+
+    if state.transfer_state != "none":
+        logger.info(
+            "call_hangup_skipped_transferred",
+            call_sid=call_sid,
+            transfer_state=state.transfer_state,
+        )
         return
 
     logger.info("call_hangup_started", call_sid=call_sid)
