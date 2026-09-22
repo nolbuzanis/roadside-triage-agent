@@ -102,7 +102,7 @@ def test_instructions_require_use_of_transfer_tool() -> None:
 
 def test_greeting_constant_value() -> None:
     """The greeting constant must be the exact expected string."""
-    assert OPENING_GREETING == "Thanks for calling roadside assistance. How can I help?"
+    assert OPENING_GREETING == "This is roadside assistance. How can I help?"
 
 
 def test_instructions_include_greeting_section() -> None:
@@ -115,7 +115,7 @@ def test_instructions_reference_greeting_constant() -> None:
     assert OPENING_GREETING in ROADSIDE_ASSISTANT_INSTRUCTIONS
 
 
-def test_instructions_forbid_paraphrasing_greeting() -> None:
-    """Instructions must tell the model not to paraphrase the greeting."""
+def test_instructions_forbid_repeating_greeting() -> None:
+    """Instructions must tell the model not to repeat or substitute the greeting."""
     lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
-    assert "do not paraphrase" in lower or "do not rephrase" in lower
+    assert "never repeat it" in lower or "never remove" in lower or "never add" in lower
