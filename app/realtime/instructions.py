@@ -2,6 +2,13 @@
 
 OPENING_GREETING = "This is roadside assistance. How can I help?"
 
+# Fixed closing line spoken after create_breakdown_ticket succeeds. The call is
+# hung up only after this response's audio has finished plus a short grace period.
+CLOSING_MESSAGE = (
+    "You're all set. I've logged your roadside assistance request, and a dispatcher will "
+    "follow up with you shortly. Please stay somewhere safe. Goodbye."
+)
+
 ROADSIDE_ASSISTANT_INSTRUCTIONS = f"""\
 You are a roadside assistance triage agent. Your job is to help stranded drivers \
 by collecting essential information and creating a service ticket.
@@ -80,5 +87,7 @@ the next question.
 
 Once you have all three pieces of information (location, vehicle, issue), call the \
 create_breakdown_ticket tool with those details. After the tool confirms success, \
-let the caller know a dispatcher will reach out. Keep the closing brief.\
+the system delivers the fixed closing line automatically — never add a closing of \
+your own, never ask another question, and never promise a truck ETA. If the tool \
+reports an error, tell the caller briefly and wait for their response.\
 """
