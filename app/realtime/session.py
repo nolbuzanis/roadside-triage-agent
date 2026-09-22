@@ -51,6 +51,8 @@ class RealtimeSession:
     _ws: ClientConnection | None = field(default=None, init=False, repr=False)
     _connected: bool = field(default=False, init=False, repr=False)
     latency_tracker: CallLatencyTracker | None = field(default=None, init=False, repr=False)
+    _greeting_response_done: bool = field(default=False, init=False, repr=False)
+    _user_turn_during_greeting: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize the latency tracker for this call."""
@@ -139,7 +141,10 @@ class RealtimeSession:
             "audio": {
                 "input": {
                     "format": {"type": "audio/pcmu"},
-                    "turn_detection": {"type": "server_vad"},
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "create_response": False,
+                    },
                 },
                 "output": {
                     "format": {"type": "audio/pcmu"},
@@ -169,9 +174,23 @@ class RealtimeSession:
                 "content": [{"type": "output_text", "text": self.greeting}],
             },
         })
-        await self._send({"type": "response.create"})
+        logger.info("greeting_item_created", call_sid=self.call_sid)
+        await self._send_response_create(
+            reason="initial_greeting",
+            response_source="app.realtime.session._trigger_greeting",
+        )
         assert self.latency_tracker is not None
         self.latency_tracker.record_event("response_create_sent")
+
+    async def _send_response_create(self, *, reason: str, response_source: str) -> None:
+        """Send a client-triggered response.create and log it with attribution."""
+        logger.info(
+            "response_create_sent",
+            reason=reason,
+            call_id=self.call_sid,
+            response_source=response_source,
+        )
+        await self._send({"type": "response.create"})
 
     async def _send(self, event: dict[str, Any]) -> None:
         """Send a JSON event to the OpenAI WebSocket."""
@@ -233,16 +252,54 @@ class RealtimeSession:
             if session_id:
                 self.latency_tracker.openai_session_id = session_id
             logger.info(
-                "OpenAI session created",
+                "session.created",
                 call_sid=self.call_sid,
                 openai_session_id=session_id,
             )
             self.latency_tracker.record_event("openai_session_created")
 
         elif event_type == "session.updated":
-            logger.debug("OpenAI session updated", call_sid=self.call_sid)
+            logger.info("session.updated", call_sid=self.call_sid)
             assert self.latency_tracker is not None
             self.latency_tracker.record_event("openai_session_updated")
+
+        elif event_type == "conversation.item.created":
+            item = event.get("item", {})
+            logger.info(
+                "conversation.item.created",
+                call_sid=self.call_sid,
+                item_id=item.get("id"),
+                item_type=item.get("type"),
+                role=item.get("role"),
+            )
+
+        elif event_type == "input_audio_buffer.speech_started":
+            logger.info(
+                "input_audio_buffer.speech_started",
+                call_sid=self.call_sid,
+            )
+
+        elif event_type == "input_audio_buffer.speech_stopped":
+            logger.info(
+                "input_audio_buffer.speech_stopped",
+                call_sid=self.call_sid,
+            )
+
+        elif event_type == "input_audio_buffer.committed":
+            logger.info(
+                "input_audio_buffer.committed",
+                call_sid=self.call_sid,
+                item_id=event.get("item_id"),
+            )
+            if self._greeting_response_done:
+                # Normal turn-taking: the caller has finished speaking, so
+                # produce exactly one assistant response for that turn.
+                await self._send_response_create(
+                    reason="caller_turn_complete",
+                    response_source="app.realtime.session._handle_event[input_audio_buffer.committed]",
+                )
+            else:
+                self._user_turn_during_greeting = True
 
         elif event_type == "response.output_audio.delta":
             audio_b64 = event.get("delta", "")
@@ -253,8 +310,45 @@ class RealtimeSession:
                 if self.on_audio_delta:
                     await self.on_audio_delta(audio_b64)
 
+        elif event_type == "response.created":
+            response = event.get("response", {})
+            logger.info(
+                "response.created",
+                call_sid=self.call_sid,
+                response_id=response.get("id"),
+                status=response.get("status"),
+            )
+
+        elif event_type == "response.output_audio.done":
+            logger.info(
+                "response.output_audio.done",
+                call_sid=self.call_sid,
+                item_id=event.get("item_id"),
+            )
+
         elif event_type == "response.done":
             response = event.get("response", {})
+            response_id = response.get("id")
+            status = response.get("status")
+            logger.info(
+                "response.done",
+                call_sid=self.call_sid,
+                response_id=response_id,
+                status=status,
+            )
+
+            # The greeting gates all further response creation: no assistant
+            # output may begin before the fixed greeting finishes streaming and
+            # the caller has actually spoken.
+            if not self._greeting_response_done:
+                self._greeting_response_done = True
+                if self._user_turn_during_greeting:
+                    self._user_turn_during_greeting = False
+                    await self._send_response_create(
+                        reason="caller_turn_complete",
+                        response_source="app.realtime.session._handle_event[response.done]",
+                    )
+
             output = response.get("output", [])
             for item in output:
                 if item.get("type") == "function_call":
@@ -273,13 +367,8 @@ class RealtimeSession:
                 await self.on_error(RuntimeError(f"OpenAI error [{error_code}]: {error_msg}"))
 
         elif event_type in (
-            "input_audio_buffer.speech_started",
-            "input_audio_buffer.speech_stopped",
-            "input_audio_buffer.committed",
-            "response.created",
             "response.output_audio_transcript.delta",
             "response.output_audio_transcript.done",
-            "response.output_audio.done",
         ):
             # Lifecycle/acknowledgment events — log at debug level
             logger.debug("OpenAI event", event_type=event_type, call_sid=self.call_sid)
@@ -336,7 +425,15 @@ class RealtimeSession:
                 "output": result,
             },
         })
-        await self._send({"type": "response.create"})
+        logger.info(
+            "function_call_output_item_created",
+            call_sid=self.call_sid,
+            tool_call_id=call_id,
+        )
+        await self._send_response_create(
+            reason="tool_result",
+            response_source="app.realtime.session._handle_function_call",
+        )
 
     async def close(self) -> None:
         """Cleanly close the OpenAI Realtime session and WebSocket."""
