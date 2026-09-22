@@ -215,9 +215,11 @@ class RealtimeSession:
     ) -> None:
         """Send a client-triggered response.create and log it with attribution.
 
-        ``instructions`` is an optional per-response instruction override that
-        scopes what the model may say for this single turn. It does not replace
-        the session-level system prompt.
+        ``instructions`` is an optional per-response instruction override.
+        When present, it replaces the session-level instructions for this
+        response only (per Realtime API override semantics), scoping what the
+        model may say for this single turn; subsequent responses fall back to
+        the session configuration.
         """
         event: dict[str, Any] = {"type": "response.create"}
         if instructions:

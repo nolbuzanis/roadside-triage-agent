@@ -384,20 +384,23 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
 
                 if early_connection is not None:
                     # Await the early connection task
+                    early_task: asyncio.Task[None] | None = None
                     try:
                         session = await early_connection.connection_task
                         # Attach callbacks that need the WebSocket
                         session.on_audio_delta = send_audio_to_twilio
                         session.on_tool_call = handle_tool_call
                         session.on_error = handle_session_error
-                        # Set the stream SID and start draining OpenAI events
-                        # BEFORE triggering the greeting so the greeting audio
-                        # and its response.done are always observed.
-                        session.stream_sid = stream_sid or "unknown"
-                        process_task = asyncio.create_task(
+                        # Start draining OpenAI events BEFORE the greeting so
+                        # the greeting audio and its response.done are always
+                        # observed, then deliver the deferred greeting.
+                        early_task = asyncio.create_task(
                             session.process_events()
                         )
-                        await session.trigger_greeting()
+                        process_task = early_task
+                        await session.set_stream_sid_and_greet(
+                            stream_sid or "unknown"
+                        )
                         logger.info(
                             "Reused early OpenAI connection", call_sid=call_sid
                         )
@@ -406,7 +409,17 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                             "Early connection failed, falling back",
                             call_sid=call_sid,
                         )
-                        session = None
+                        if early_task is not None:
+                            early_task.cancel()
+                            try:
+                                await early_task
+                            except asyncio.CancelledError:
+                                pass
+                            if process_task is early_task:
+                                process_task = None
+                        if session is not None:
+                            await session.close()
+                            session = None
 
                 if session is None:
                     # Fallback: create session from scratch (no early connection

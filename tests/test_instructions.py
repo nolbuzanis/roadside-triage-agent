@@ -118,4 +118,5 @@ def test_instructions_reference_greeting_constant() -> None:
 def test_instructions_forbid_repeating_greeting() -> None:
     """Instructions must tell the model not to repeat or substitute the greeting."""
     lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
-    assert "never repeat it" in lower or "never remove" in lower or "never add" in lower
+    assert "never repeat it" in lower
+    assert "never use a greeting of your own" in lower
