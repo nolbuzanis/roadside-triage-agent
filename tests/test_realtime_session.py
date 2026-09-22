@@ -174,15 +174,13 @@ class TestSessionSetup:
 
         sent_events = [json.loads(c[0][0]) for c in ws.send.call_args_list]
         types = [e["type"] for e in sent_events]
-        assert "conversation.item.create" in types
+        assert "conversation.item.create" not in types
         assert "response.create" in types
         assert types.count("response.create") == 1
 
-        item_create = next(e for e in sent_events if e["type"] == "conversation.item.create")
-        assert item_create["item"]["type"] == "message"
-        assert item_create["item"]["role"] == "assistant"
-        assert item_create["item"]["content"][0]["type"] == "output_text"
-        assert item_create["item"]["content"][0]["text"] == "Hello there!"
+        response_create = next(e for e in sent_events if e["type"] == "response.create")
+        instructions = response_create["response"]["instructions"]
+        assert "Hello there!" in instructions
 
     async def test_connect_skips_greeting_when_empty(self) -> None:
         session = _make_session(greeting="")
@@ -781,7 +779,7 @@ class TestGreetingTurnControl:
         entry = json.loads(entries[0].message)
         assert entry["reason"] == "initial_greeting"
         assert entry["call_id"] == "CA_attribution"
-        assert entry["response_source"] == "app.realtime.session._trigger_greeting"
+        assert entry["response_source"] == "app.realtime.session.trigger_greeting"
 
     async def test_tool_result_response_create_is_logged_with_attribution(
         self, caplog: pytest.LogCaptureFixture
@@ -813,3 +811,137 @@ class TestGreetingTurnControl:
         assert entry["reason"] == "tool_result"
         assert entry["call_id"] == "CA_tool_attr"
         assert entry["response_source"] == "app.realtime.session._handle_function_call"
+
+    async def test_matching_greeting_response_is_verified(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        session = _make_session(
+            greeting="Hello there!",
+            call_sid="CA_greet_match",
+        )
+        ws = _make_ws()
+        await _connect_session(session, ws)
+
+        with caplog.at_level("INFO"):
+            await session._handle_event({
+                "type": "response.done",
+                "response": {
+                    "id": "resp_greeting",
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [
+                                {"type": "output_audio", "transcript": "Hello there."},
+                            ],
+                        },
+                    ],
+                },
+            })
+
+        entries = [
+            r
+            for r in caplog.records
+            if json.loads(r.message).get("event") == "greeting_delivery_verified"
+        ]
+        assert len(entries) == 1
+        entry = json.loads(entries[0].message)
+        assert entry["matched"] is True
+        assert entry["call_sid"] == "CA_greet_match"
+        assert entry["expected_text"] == "Hello there!"
+
+    async def test_skipped_greeting_response_logs_error(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        session = _make_session(
+            greeting="Hello there!",
+            call_sid="CA_greet_miss",
+        )
+        ws = _make_ws()
+        await _connect_session(session, ws)
+
+        with caplog.at_level("ERROR"):
+            await session._handle_event({
+                "type": "response.done",
+                "response": {
+                    "id": "resp_greeting",
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [
+                                {"type": "output_audio", "transcript": "Where is your vehicle located?"},
+                            ],
+                        },
+                    ],
+                },
+            })
+
+        entries = [
+            r
+            for r in caplog.records
+            if json.loads(r.message).get("event") == "greeting_delivery_mismatch"
+        ]
+        assert len(entries) == 1
+        entry = json.loads(entries[0].message)
+        assert entry["matched"] is False
+        assert entry["call_sid"] == "CA_greet_miss"
+        assert "Where is your vehicle located?" in entry["delivered_text"]
+        assert entry["expected_text"] == "Hello there!"
+
+    async def test_trigger_greeting_is_idempotent(self) -> None:
+        session = _make_session(greeting="Hello there!")
+        ws = _make_ws()
+        await _connect_session(session, ws)
+        before = _response_create_count(ws)
+
+        await session.trigger_greeting()
+
+        assert _response_create_count(ws) == before
+
+    async def test_cancelled_greeting_response_is_not_a_mismatch(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        session = _make_session(
+            greeting="Hello there!",
+            call_sid="CA_greet_cancel",
+        )
+        ws = _make_ws()
+        await _connect_session(session, ws)
+
+        with caplog.at_level("INFO"):
+            await session._handle_event({
+                "type": "response.done",
+                "response": {
+                    "id": "resp_greeting",
+                    "status": "cancelled",
+                    "output": [],
+                },
+            })
+
+        mismatch_entries = [
+            r
+            for r in caplog.records
+            if json.loads(r.message).get("event") == "greeting_delivery_mismatch"
+        ]
+        assert len(mismatch_entries) == 0
+
+        cancels = [
+            r
+            for r in caplog.records
+            if json.loads(r.message).get("event") == "greeting_response_not_completed"
+        ]
+        assert len(cancels) == 1
+        assert json.loads(cancels[0].message)["status"] == "cancelled"
+
+    async def test_trigger_greeting_refuses_when_not_configured(self) -> None:
+        session = _make_session(greeting="")
+        ws = _make_ws()
+        await _connect_session(session, ws)
+        before = _response_create_count(ws)
+
+        await session.trigger_greeting()
+
+        assert _response_create_count(ws) == before

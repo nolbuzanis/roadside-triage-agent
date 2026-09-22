@@ -384,13 +384,20 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
 
                 if early_connection is not None:
                     # Await the early connection task
+                    early_task: asyncio.Task[None] | None = None
                     try:
                         session = await early_connection.connection_task
                         # Attach callbacks that need the WebSocket
                         session.on_audio_delta = send_audio_to_twilio
                         session.on_tool_call = handle_tool_call
                         session.on_error = handle_session_error
-                        # Set stream_sid and send the deferred greeting
+                        # Start draining OpenAI events BEFORE the greeting so
+                        # the greeting audio and its response.done are always
+                        # observed, then deliver the deferred greeting.
+                        early_task = asyncio.create_task(
+                            session.process_events()
+                        )
+                        process_task = early_task
                         await session.set_stream_sid_and_greet(
                             stream_sid or "unknown"
                         )
@@ -402,7 +409,17 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                             "Early connection failed, falling back",
                             call_sid=call_sid,
                         )
-                        session = None
+                        if early_task is not None:
+                            early_task.cancel()
+                            try:
+                                await early_task
+                            except asyncio.CancelledError:
+                                pass
+                            if process_task is early_task:
+                                process_task = None
+                        if session is not None:
+                            await session.close()
+                            session = None
 
                 if session is None:
                     # Fallback: create session from scratch (no early connection
@@ -446,14 +463,14 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                         )
                         session = None
                 else:
-                    # Early connection succeeded — create call state and start
-                    # event processing
+                    # Early connection succeeded — create call state.
+                    # Event processing was already started above, BEFORE the
+                    # greeting, so it must not be started a second time.
                     call_state = call_manager.create(
                         twilio_call_id=call_sid or "unknown",
                         caller_phone=caller_phone or "unknown",
                     )
                     call_state.stream_sid = stream_sid
-                    process_task = asyncio.create_task(session.process_events())
 
             elif event == "media":
                 if session and session.is_connected:

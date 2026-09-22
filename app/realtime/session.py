@@ -53,6 +53,7 @@ class RealtimeSession:
     latency_tracker: CallLatencyTracker | None = field(default=None, init=False, repr=False)
     _greeting_response_done: bool = field(default=False, init=False, repr=False)
     _user_turn_during_greeting: bool = field(default=False, init=False, repr=False)
+    _greeting_triggered: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize the latency tracker for this call."""
@@ -71,7 +72,7 @@ class RealtimeSession:
         logger.info("OpenAI Realtime session configured", call_sid=self.call_sid)
 
         if self.greeting:
-            await self._trigger_greeting()
+            await self.trigger_greeting()
 
     async def connect_early(self) -> None:
         """Start the OpenAI connection before the Twilio Media Stream arrives.
@@ -100,7 +101,7 @@ class RealtimeSession:
         """
         self.stream_sid = stream_sid
         if self.greeting:
-            await self._trigger_greeting()
+            await self.trigger_greeting()
 
     async def _connect_websocket(self) -> None:
         """Open the WebSocket connection to OpenAI Realtime API."""
@@ -164,33 +165,133 @@ class RealtimeSession:
         assert self.latency_tracker is not None
         self.latency_tracker.record_event("session_update_sent")
 
-    async def _trigger_greeting(self) -> None:
-        """Inject the opening greeting and trigger the model to speak it."""
-        await self._send({
-            "type": "conversation.item.create",
-            "item": {
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": self.greeting}],
-            },
-        })
-        logger.info("greeting_item_created", call_sid=self.call_sid)
+    async def trigger_greeting(self) -> None:
+        """Explicitly trigger the model to deliver the fixed opening line.
+
+        This is the single, dedicated in-code trigger for the opening. It does
+        NOT rely on the model spontaneously speaking from the system prompt:
+        it sends a response.create carrying per-response instructions that
+        require the model to speak exactly ``self.greeting`` and nothing else.
+
+        The greeting is NOT pre-injected as an assistant conversation item.
+        Injecting an assistant message would add it to conversation history as
+        if already spoken, causing the model's response to skip the greeting
+        and begin intake instead. Making the greeting the model's actual output
+        under explicit per-response instructions keeps the opening deterministic.
+
+        Guarded so exactly one greeting response is ever created per call.
+        """
+        if self._greeting_triggered:
+            logger.warning("greeting_already_triggered", call_sid=self.call_sid)
+            return
+        if not self.greeting:
+            logger.warning("greeting_not_configured", call_sid=self.call_sid)
+            return
+        self._greeting_triggered = True
+
+        directive = (
+            "The call is starting now. Speak the opening line exactly as "
+            "written, in this order, and then stop:\n\n"
+            f'"{self.greeting}"\n\n'
+            "Do not add any words, do not paraphrase or rephrase it, do not "
+            "ask a question, and do not begin collecting information. Say "
+            "nothing after the opening line and wait silently for the caller "
+            "to speak."
+        )
         await self._send_response_create(
             reason="initial_greeting",
-            response_source="app.realtime.session._trigger_greeting",
+            response_source="app.realtime.session.trigger_greeting",
+            instructions=directive,
         )
         assert self.latency_tracker is not None
         self.latency_tracker.record_event("response_create_sent")
 
-    async def _send_response_create(self, *, reason: str, response_source: str) -> None:
-        """Send a client-triggered response.create and log it with attribution."""
+    async def _send_response_create(
+        self,
+        *,
+        reason: str,
+        response_source: str,
+        instructions: str | None = None,
+    ) -> None:
+        """Send a client-triggered response.create and log it with attribution.
+
+        ``instructions`` is an optional per-response instruction override.
+        When present, it replaces the session-level instructions for this
+        response only (per Realtime API override semantics), scoping what the
+        model may say for this single turn; subsequent responses fall back to
+        the session configuration.
+        """
+        event: dict[str, Any] = {"type": "response.create"}
+        if instructions:
+            event["response"] = {"instructions": instructions}
         logger.info(
             "response_create_sent",
             reason=reason,
             call_id=self.call_sid,
             response_source=response_source,
         )
-        await self._send({"type": "response.create"})
+        await self._send(event)
+
+    @staticmethod
+    def _extract_assistant_text(response: dict[str, Any]) -> str:
+        """Concatenate the assistant's spoken text from a response.done payload."""
+        parts: list[str] = []
+        output = response.get("output") or []
+        for item in output:
+            if not isinstance(item, dict) or item.get("type") != "message":
+                continue
+            for content in item.get("content") or []:
+                if not isinstance(content, dict):
+                    continue
+                text = content.get("text") or content.get("transcript")
+                if text:
+                    parts.append(str(text))
+        return " ".join(parts).strip()
+
+    @staticmethod
+    def _normalize_for_greeting_match(text: str) -> str:
+        """Normalize transcript text: lowercase, only alphanumerics."""
+        return "".join(ch for ch in text.lower() if ch.isalnum())
+
+    def _verify_greeting_response(self, response: dict[str, Any]) -> None:
+        """Fail loudly when a completed greeting response did not speak exactly the opening.
+
+        Runs once when the first (greeting) response completes. If the model
+        skipped the greeting or delivered something else, the structured error
+        log makes the skip observable instead of silently continuing. Responses
+        that did not complete (e.g. the caller barged in and cancelled the
+        greeting) are logged at info level, not treated as a skipped opening.
+        """
+        if not self.greeting:
+            return
+        status = response.get("status")
+        if status != "completed":
+            logger.info(
+                "greeting_response_not_completed",
+                call_sid=self.call_sid,
+                status=status or "unknown",
+            )
+            return
+        delivered = self._extract_assistant_text(response)
+        expected = self.greeting
+        matched = self._normalize_for_greeting_match(delivered) == self._normalize_for_greeting_match(
+            expected
+        )
+        if matched:
+            logger.info(
+                "greeting_delivery_verified",
+                call_sid=self.call_sid,
+                matched=True,
+                expected_text=expected,
+            )
+        else:
+            logger.error(
+                "greeting_delivery_mismatch",
+                call_sid=self.call_sid,
+                matched=False,
+                delivered_text=delivered,
+                expected_text=expected,
+            )
 
     async def _send(self, event: dict[str, Any]) -> None:
         """Send a JSON event to the OpenAI WebSocket."""
@@ -342,6 +443,7 @@ class RealtimeSession:
             # the caller has actually spoken.
             if not self._greeting_response_done:
                 self._greeting_response_done = True
+                self._verify_greeting_response(response)
                 if self._user_turn_during_greeting:
                     self._user_turn_during_greeting = False
                     await self._send_response_create(
