@@ -147,12 +147,13 @@ class TestSetStreamSidAndGreet:
 
         sent_events = [json.loads(c[0][0]) for c in ws.send.call_args_list]
         types = [e["type"] for e in sent_events]
-        assert "conversation.item.create" in types
+        assert "conversation.item.create" not in types
         assert "response.create" in types
         assert types.count("response.create") == 1
 
-        item_create = next(e for e in sent_events if e["type"] == "conversation.item.create")
-        assert item_create["item"]["content"][0]["text"] == "Hello there!"
+        response_create = next(e for e in sent_events if e["type"] == "response.create")
+        instructions = response_create["response"]["instructions"]
+        assert "Hello there!" in instructions
 
     async def test_skips_greeting_when_empty(self) -> None:
         session = _make_session(greeting="")
@@ -439,10 +440,10 @@ class TestRaceConditionEarlyCompletesFirst:
         # Simulate media stream start
         await session.set_stream_sid_and_greet("MZ_stream")
 
-        # Greeting should have been sent
+        # Greeting should have been sent as the model's explicit response
         sent_events = [json.loads(c[0][0]) for c in ws.send.call_args_list]
         types = [e["type"] for e in sent_events]
-        assert "conversation.item.create" in types
+        assert "conversation.item.create" not in types
         assert "response.create" in types
 
     async def test_audio_can_be_sent_after_stream_arrives(self) -> None:

@@ -390,10 +390,14 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                         session.on_audio_delta = send_audio_to_twilio
                         session.on_tool_call = handle_tool_call
                         session.on_error = handle_session_error
-                        # Set stream_sid and send the deferred greeting
-                        await session.set_stream_sid_and_greet(
-                            stream_sid or "unknown"
+                        # Set the stream SID and start draining OpenAI events
+                        # BEFORE triggering the greeting so the greeting audio
+                        # and its response.done are always observed.
+                        session.stream_sid = stream_sid or "unknown"
+                        process_task = asyncio.create_task(
+                            session.process_events()
                         )
+                        await session.trigger_greeting()
                         logger.info(
                             "Reused early OpenAI connection", call_sid=call_sid
                         )
@@ -446,14 +450,14 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                         )
                         session = None
                 else:
-                    # Early connection succeeded — create call state and start
-                    # event processing
+                    # Early connection succeeded — create call state.
+                    # Event processing was already started above, BEFORE the
+                    # greeting, so it must not be started a second time.
                     call_state = call_manager.create(
                         twilio_call_id=call_sid or "unknown",
                         caller_phone=caller_phone or "unknown",
                     )
                     call_state.stream_sid = stream_sid
-                    process_task = asyncio.create_task(session.process_events())
 
             elif event == "media":
                 if session and session.is_connected:
