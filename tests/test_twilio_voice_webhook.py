@@ -257,6 +257,30 @@ def test_stream_url_is_websocket(mock_validate: MagicMock) -> None:
     assert "wss://" in body or "ws://" in body
 
 
+@patch("app.api.twilio._validate_twilio_request")
+def test_stream_url_uses_host_header_not_request_url(mock_validate: MagicMock) -> None:
+    """The stream URL should use the Host header, not the internal request URL."""
+    mock_validate.return_value = True
+
+    response = client.post(
+        "/api/v1/twilio/voice",
+        data=TWILIO_PARAMS,
+        headers={
+            "X-Twilio-Signature": "valid_signature",
+            "Host": "roadside-agent-946792421750.us-central1.run.app",
+            "x-forwarded-proto": "https",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.text
+    assert "wss://roadside-agent-946792421750.us-central1.run.app/api/v1/twilio/media-stream" in body
+    # Must NOT contain internal addresses
+    assert "0.0.0.0" not in body
+    assert "localhost" not in body
+    assert "127.0.0.1" not in body
+
+
 def test_reconstruct_url_without_forwarded_headers() -> None:
     """URL reconstruction should fall back to request.url when headers are absent."""
     from app.api.twilio import _reconstruct_twilio_url
@@ -297,6 +321,67 @@ def test_reconstruct_url_missing_host_header() -> None:
     url = _reconstruct_twilio_url(mock_request)
 
     assert url == "https:///api/v1/twilio/voice"
+
+
+def test_build_ws_url_uses_forwarded_headers() -> None:
+    """Media Stream WS URL should use Host and x-forwarded-proto headers."""
+    from app.api.twilio import _build_media_stream_ws_url
+
+    mock_request = MagicMock()
+    mock_request.headers = {
+        "host": "roadside-agent-946792421750.us-central1.run.app",
+        "x-forwarded-proto": "https",
+    }
+
+    url = _build_media_stream_ws_url(mock_request)
+
+    assert url == "wss://roadside-agent-946792421750.us-central1.run.app/api/v1/twilio/media-stream"
+
+
+def test_build_ws_url_with_ngrok_host() -> None:
+    """Media Stream WS URL should work with ngrok host."""
+    from app.api.twilio import _build_media_stream_ws_url
+
+    mock_request = MagicMock()
+    mock_request.headers = {
+        "host": "abc123.ngrok-free.app",
+        "x-forwarded-proto": "https",
+    }
+
+    url = _build_media_stream_ws_url(mock_request)
+
+    assert url == "wss://abc123.ngrok-free.app/api/v1/twilio/media-stream"
+
+
+def test_build_ws_url_falls_back_to_request_url() -> None:
+    """Media Stream WS URL should fall back to request.url when headers are absent."""
+    from app.api.twilio import _build_media_stream_ws_url
+
+    mock_request = MagicMock()
+    mock_request.headers = {}
+    mock_request.url.scheme = "http"
+    mock_request.url.hostname = "localhost"
+
+    url = _build_media_stream_ws_url(mock_request)
+
+    assert url == "ws://localhost/api/v1/twilio/media-stream"
+
+
+def test_build_ws_url_no_internal_port() -> None:
+    """Media Stream WS URL should not include port from request.url."""
+    from app.api.twilio import _build_media_stream_ws_url
+
+    mock_request = MagicMock()
+    mock_request.headers = {
+        "host": "roadside-agent-946792421750.us-central1.run.app",
+        "x-forwarded-proto": "https",
+    }
+    mock_request.url.port = 8080  # internal port should be ignored
+
+    url = _build_media_stream_ws_url(mock_request)
+
+    assert url == "wss://roadside-agent-946792421750.us-central1.run.app/api/v1/twilio/media-stream"
+    assert ":8080" not in url
 
 
 @patch("app.api.twilio._validate_twilio_request")

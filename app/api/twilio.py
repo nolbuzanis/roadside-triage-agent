@@ -219,6 +219,21 @@ def _reconstruct_twilio_url(request: Request) -> str:
     return f"{proto}://{host}{path}"
 
 
+def _build_media_stream_ws_url(request: Request) -> str:
+    """Build the public WSS URL for the Twilio Media Stream endpoint.
+
+    Cloud Run terminates TLS and forwards plain HTTP internally, so
+    request.url.scheme is "http" and request.url.hostname is the
+    internal address (e.g. 0.0.0.0).  We must reconstruct the public
+    URL from the Host and X-Forwarded-Proto headers that Cloud Run
+    sets on the incoming request.
+    """
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("host", request.url.hostname or "")
+    ws_scheme = "wss" if proto == "https" else "ws"
+    return f"{ws_scheme}://{host}/api/v1/twilio/media-stream"
+
+
 def _validate_twilio_request(url: str, signature: str, params: dict[str, str]) -> bool:
     """Validate that a request was signed by Twilio using the auth token."""
     validator = _get_validator()
@@ -261,10 +276,13 @@ async def twilio_voice_webhook(request: Request) -> PlainTextResponse:
         connection_task=connection_task,
     )
 
-    host = request.url.hostname
-    port = request.url.port or (443 if request.url.scheme == "https" else 80)
-    ws_protocol = "wss" if request.url.scheme == "https" else "ws"
-    ws_url = f"{ws_protocol}://{host}:{port}/api/v1/twilio/media-stream"
+    ws_url = _build_media_stream_ws_url(request)
+
+    logger.info(
+        "TwiML response",
+        call_sid=call_sid,
+        media_stream_url=ws_url,
+    )
 
     response = VoiceResponse()
     connect = response.connect()
@@ -272,7 +290,9 @@ async def twilio_voice_webhook(request: Request) -> PlainTextResponse:
     stream.parameter(name="call_sid", value=call_sid)
     stream.parameter(name="caller_phone", value=caller_phone)
 
-    return PlainTextResponse(str(response), media_type="application/xml")
+    twiml = str(response)
+    logger.debug("TwiML body", call_sid=call_sid, twiml=twiml)
+    return PlainTextResponse(twiml, media_type="application/xml")
 
 
 @router.websocket("/twilio/media-stream")
