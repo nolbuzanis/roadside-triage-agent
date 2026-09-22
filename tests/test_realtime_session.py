@@ -126,6 +126,7 @@ class TestSessionSetup:
         assert "rate" not in session_config["audio"]["input"]["format"]
         assert session_config["audio"]["output"]["voice"] == "marin"
         assert session_config["audio"]["input"]["turn_detection"]["type"] == "server_vad"
+        assert session_config["audio"]["input"]["turn_detection"]["create_response"] is False
 
     async def test_connect_includes_instructions_when_provided(self) -> None:
         session = _make_session(instructions="Be helpful.")
@@ -175,6 +176,7 @@ class TestSessionSetup:
         types = [e["type"] for e in sent_events]
         assert "conversation.item.create" in types
         assert "response.create" in types
+        assert types.count("response.create") == 1
 
         item_create = next(e for e in sent_events if e["type"] == "conversation.item.create")
         assert item_create["item"]["type"] == "message"
@@ -593,3 +595,221 @@ class TestEventDispatching:
         session = _make_session()
         await _connect_session(session)
         await session._handle_event({"type": "some.future.event"})
+
+
+# ---------------------------------------------------------------------------
+# Greeting gating and turn control
+# ---------------------------------------------------------------------------
+
+
+def _response_create_count(ws: AsyncMock) -> int:
+    """Return how many response.create events were sent over the mock WebSocket."""
+    return sum(
+        1
+        for c in ws.send.call_args_list
+        if json.loads(c[0][0]).get("type") == "response.create"
+    )
+
+
+class TestGreetingTurnControl:
+    """Tests enforcing exactly one greeting and no unsolicited second response."""
+
+    async def test_session_config_disables_automatic_responses(self) -> None:
+        session = _make_session()
+        ws = _make_ws()
+        await _connect_session(session, ws)
+
+        first_call_json = ws.send.call_args_list[0][0][0]
+        event = json.loads(first_call_json)
+        turn_detection = event["session"]["audio"]["input"]["turn_detection"]
+        assert turn_detection["type"] == "server_vad"
+        assert turn_detection["create_response"] is False
+
+    async def test_greeting_creates_exactly_one_response(self) -> None:
+        session = _make_session(greeting="Hello there!")
+        ws = _make_ws()
+        await _connect_session(session, ws)
+
+        assert _response_create_count(ws) == 1
+
+    async def test_no_response_created_by_session_ready_events(self) -> None:
+        session = _make_session(greeting="Hello there!")
+        ws = _make_ws()
+        await _connect_session(session, ws)
+        before = _response_create_count(ws)
+
+        # Server acknowledges readiness but no caller speech has occurred.
+        await session._handle_event({"type": "session.created"})
+        await session._handle_event({"type": "session.updated"})
+        await session._handle_event({"type": "conversation.item.created"})
+        await session._handle_event({"type": "response.created"})
+        await session._handle_event({"type": "input_audio_buffer.speech_started"})
+        await session._handle_event({"type": "input_audio_buffer.speech_stopped"})
+
+        assert _response_create_count(ws) == before
+
+    async def test_input_committed_during_greeting_creates_no_response(self) -> None:
+        session = _make_session(greeting="Hello there!")
+        ws = _make_ws()
+        await _connect_session(session, ws)
+        before = _response_create_count(ws)
+
+        # A spurious/early user commit before the greeting completes must NOT
+        # produce a second assistant response.
+        await session._handle_event({
+            "type": "input_audio_buffer.committed",
+            "item_id": "item_early",
+        })
+
+        assert _response_create_count(ws) == before
+        assert session._user_turn_during_greeting is True
+
+    async def test_caller_turn_after_greeting_creates_one_response(self) -> None:
+        session = _make_session(greeting="Hello there!")
+        ws = _make_ws()
+        await _connect_session(session, ws)
+
+        await session._handle_event({
+            "type": "response.done",
+            "response": {"id": "resp_greeting", "output": []},
+        })
+        before = _response_create_count(ws)
+
+        await session._handle_event({
+            "type": "input_audio_buffer.committed",
+            "item_id": "item_user",
+        })
+
+        assert _response_create_count(ws) == before + 1
+
+    async def test_commit_during_greeting_answered_after_greeting_done(self) -> None:
+        session = _make_session(greeting="Hello there!")
+        ws = _make_ws()
+        await _connect_session(session, ws)
+
+        await session._handle_event({
+            "type": "input_audio_buffer.committed",
+            "item_id": "item_barge_in",
+        })
+        assert session._user_turn_during_greeting is True
+        before = _response_create_count(ws)
+
+        await session._handle_event({
+            "type": "response.done",
+            "response": {"id": "resp_greeting", "output": []},
+        })
+
+        assert _response_create_count(ws) == before + 1
+        assert session._user_turn_during_greeting is False
+
+    async def test_second_response_done_after_greeting_creates_no_response(self) -> None:
+        session = _make_session(greeting="Hello there!")
+        ws = _make_ws()
+        await _connect_session(session, ws)
+
+        await session._handle_event({
+            "type": "response.done",
+            "response": {"id": "resp_greeting", "output": []},
+        })
+        before = _response_create_count(ws)
+
+        # A later response completion without any caller speech must not
+        # create another assistant response.
+        await session._handle_event({
+            "type": "response.done",
+            "response": {"id": "resp_later", "output": []},
+        })
+
+        assert _response_create_count(ws) == before
+
+    async def test_greeting_state_is_isolated_per_session(self) -> None:
+        session_a = _make_session(
+            greeting="Hello A!",
+            call_sid="CA_call_a",
+            caller_phone="+15550000001",
+        )
+        session_b = _make_session(
+            greeting="Hello B!",
+            call_sid="CA_call_b",
+            caller_phone="+15550000002",
+        )
+        ws_a = _make_ws()
+        ws_b = _make_ws()
+        await _connect_session(session_a, ws_a)
+        await _connect_session(session_b, ws_b)
+
+        # Session B's greeting is already complete; Session A's is not.
+        await session_b._handle_event({
+            "type": "response.done",
+            "response": {"id": "resp_b", "output": []},
+        })
+        before_a = _response_create_count(ws_a)
+        before_b = _response_create_count(ws_b)
+
+        await session_a._handle_event({
+            "type": "input_audio_buffer.committed",
+            "item_id": "item_a",
+        })
+        await session_b._handle_event({
+            "type": "input_audio_buffer.committed",
+            "item_id": "item_b",
+        })
+
+        assert _response_create_count(ws_a) == before_a
+        assert _response_create_count(ws_b) == before_b + 1
+        assert session_a._user_turn_during_greeting is True
+        assert session_b._user_turn_during_greeting is False
+
+    async def test_greeting_response_create_is_logged_with_attribution(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        session = _make_session(
+            greeting="Hello there!",
+            call_sid="CA_attribution",
+        )
+        ws = _make_ws()
+        with caplog.at_level("INFO"):
+            await _connect_session(session, ws)
+
+        entries = [
+            r
+            for r in caplog.records
+            if json.loads(r.message).get("event") == "response_create_sent"
+            and "response_source" in json.loads(r.message)
+        ]
+        assert len(entries) == 1
+        entry = json.loads(entries[0].message)
+        assert entry["reason"] == "initial_greeting"
+        assert entry["call_id"] == "CA_attribution"
+        assert entry["response_source"] == "app.realtime.session._trigger_greeting"
+
+    async def test_tool_result_response_create_is_logged_with_attribution(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        on_tool_call = AsyncMock(return_value='{"status": "created"}')
+        session = _make_session(
+            call_sid="CA_tool_attr",
+            on_tool_call=on_tool_call,
+        )
+        ws = _make_ws()
+        await _connect_session(session, ws)
+        ws.reset_mock()
+
+        with caplog.at_level("INFO"):
+            await session._handle_function_call({
+                "call_id": "call_abc",
+                "name": "create_breakdown_ticket",
+                "arguments": "{}",
+            })
+
+        entries = [
+            r
+            for r in caplog.records
+            if json.loads(r.message).get("event") == "response_create_sent"
+            and "response_source" in json.loads(r.message)
+        ]
+        assert len(entries) == 1
+        entry = json.loads(entries[0].message)
+        assert entry["reason"] == "tool_result"
+        assert entry["call_id"] == "CA_tool_attr"
+        assert entry["response_source"] == "app.realtime.session._handle_function_call"

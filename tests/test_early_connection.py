@@ -149,6 +149,7 @@ class TestSetStreamSidAndGreet:
         types = [e["type"] for e in sent_events]
         assert "conversation.item.create" in types
         assert "response.create" in types
+        assert types.count("response.create") == 1
 
         item_create = next(e for e in sent_events if e["type"] == "conversation.item.create")
         assert item_create["item"]["content"][0]["text"] == "Hello there!"
