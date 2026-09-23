@@ -49,6 +49,7 @@ class MigrationDb:
     dbname: str
     row_count_before_target: int
     row_count_after_target: int
+    intake_status_after_target: dict[str, str]
 
 
 def _migration_split() -> tuple[list[Path], Path, list[Path]]:
@@ -109,6 +110,15 @@ def _row_count(conn: psycopg.Connection[dict[str, Any]]) -> int:
     return int(row["n"])
 
 
+def _intake_status_by_call(conn: psycopg.Connection[dict[str, Any]]) -> dict[str, str]:
+    # Runs immediately after the target migration, before the later rename
+    # and intake_status reconciliation migrations join the chain.
+    rows = conn.execute(
+        "select call_id, intake_status from breakdown_tickets"
+    ).fetchall()
+    return {row["call_id"]: row["intake_status"] for row in rows}
+
+
 def _status_by_call(conn: psycopg.Connection[dict[str, Any]]) -> dict[str, str]:
     # Called only from post-chain assertions, after the table rename has run.
     rows = conn.execute(
@@ -140,6 +150,7 @@ def migration_db() -> Iterator[MigrationDb]:
         row_count_before = _row_count(conn)
         conn.execute(target.read_text())
         row_count_after = _row_count(conn)
+        intake_after_target = _intake_status_by_call(conn)
         for path in after:
             conn.execute(path.read_text())
         yield MigrationDb(
@@ -148,6 +159,7 @@ def migration_db() -> Iterator[MigrationDb]:
             dbname=dbname,
             row_count_before_target=row_count_before,
             row_count_after_target=row_count_after,
+            intake_status_after_target=intake_after_target,
         )
     finally:
         if conn is not None:
@@ -204,6 +216,15 @@ class TestBackfillPreservesData:
     def test_row_count_unchanged(self, migration_db: MigrationDb) -> None:
         assert migration_db.row_count_after_target == migration_db.row_count_before_target
 
+    def test_intake_status_untouched_by_target_backfill(
+        self, migration_db: MigrationDb
+    ) -> None:
+        """Immediately after the target, intake_status is still the insert
+        default: this backfill drives only the free-text `status` column.
+        (The later intake_status reconciliation migration aligns it.)"""
+        for call_id in EXPECTED_STATUS:
+            assert migration_db.intake_status_after_target[call_id] == "in_progress"
+
     def test_intake_and_hazard_data_unchanged(self, migration_db: MigrationDb) -> None:
         row = migration_db.conn.execute(
             """
@@ -222,9 +243,9 @@ class TestBackfillPreservesData:
         assert row["hazard_detected"] is True
         assert row["hazard_reason"] == "Vehicle fire"
         assert row["notification_status"] == "sent"
-        # The backfill drives the free-text `status` column only; the separate
-        # intake_status column is untouched (still its insert default).
-        assert row["intake_status"] == "in_progress"
+        # Final chain state: the later intake_status reconciliation migration
+        # aligns intake_status with the terminal status.
+        assert row["intake_status"] == "escalated"
 
     def test_partial_row_keeps_collected_fields(self, migration_db: MigrationDb) -> None:
         row = migration_db.conn.execute(
