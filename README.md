@@ -100,6 +100,14 @@ Alternatively, you can run the SQL directly in the Supabase SQL Editor (Dashboar
 POST https://<your-domain>/api/v1/twilio/voice
 ```
 
+3. Set the **Call status changes** webhook (status callback) to:
+
+```
+POST https://<your-domain>/api/v1/twilio/status
+```
+
+The status callback finalizes the assistance request when a call ends before the Media Stream connects (caller hangs up, busy, failed, no-answer, canceled). It uses the same Twilio signature validation as the voice webhook, so only still-open rows are marked abandoned — completed and escalated rows are never overwritten.
+
 For local development, use ngrok (see [Running Locally](#running-locally) below).
 
 **Important**: The voice webhook returns TwiML that initiates a bidirectional Media Stream to `/api/v1/twilio/media-stream`. Twilio must be able to reach both the voice webhook URL and the WebSocket endpoint.
@@ -573,7 +581,15 @@ In the Twilio Console, configure your phone number:
    https://roadside-agent-<hash>-<region>.a.run.app/api/v1/twilio/voice
    ```
 
-2. **Media Stream** (WebSocket - configured in TwiML):
+2. **Call status changes** (status callback, POST):
+   ```
+   https://roadside-agent-<hash>-<region>.a.run.app/api/v1/twilio/status
+   ```
+   Finalizes still-open assistance requests on terminal call statuses
+   (`completed`, `busy`, `failed`, `no-answer`, `canceled`) for calls that end
+   before the Media Stream connects.
+
+3. **Media Stream** (WebSocket - configured in TwiML):
    ```
    wss://roadside-agent-<hash>-<region>.a.run.app/api/v1/twilio/media-stream
    ```
