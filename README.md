@@ -91,6 +91,15 @@ This applies the migrations in `supabase/migrations/`:
 
 Alternatively, you can run the SQL directly in the Supabase SQL Editor (Dashboard → SQL Editor).
 
+#### Create the Dispatcher Account (One-Time)
+
+The dispatcher dashboard authenticates with Supabase Auth using a single dispatcher account. Row Level Security grants that authenticated session read-only access to `assistance_requests` (via the `Dispatcher can read assistance requests` policy applied by the migrations); anonymous/public clients stay denied, and the backend keeps writing with the service-role key, which bypasses RLS.
+
+1. In the Supabase Dashboard, open **Authentication → Users** and click **Add user**. Create exactly one confirmed dispatcher account (email + password). This is the only account the MVP dashboard uses.
+2. Disable public sign-ups so no additional accounts can be created: under **Authentication → Sign In / Providers → Email**, turn off **Enable sign ups**. Local development mirrors this in `supabase/config.toml` (`enable_signup = false`).
+3. From **Settings → API**, note the **Project URL** and the **anon/publishable key**. These two values are the only Supabase credentials a browser dashboard may contain.
+4. Never place `SUPABASE_SERVICE_ROLE_KEY` (or any other backend secret) in frontend code or frontend environment variables. The service-role key stays server-side only: `.env` locally, Secret Manager in production.
+
 ### 5. Configure Twilio Phone Number
 
 1. Purchase a phone number in the [Twilio Console](https://console.twilio.com/)
