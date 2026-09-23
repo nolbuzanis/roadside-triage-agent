@@ -1140,3 +1140,223 @@ The MVP is complete when all of the following work:
 - Real-time fleet management
 - More sophisticated call analytics
 - Provider abstraction/fallback between realtime voice vendors
+
+---
+
+# Dispatcher Dashboard — Minimal P0 Sequence
+
+Target experience:
+
+```text
+single dispatcher password
+→ open dashboard
+→ see active assistance requests
+→ see past requests
+→ receive live INSERT / UPDATE changes
+```
+
+The dashboard should remain intentionally small. It is a read-only operational view over the existing `assistance_requests` table.
+
+Items below are listed in dependency order (A → B → C → D → E).
+
+---
+
+## P0 — Reconcile `intake_status` lifecycle
+
+Before the dashboard depends on request lifecycle state, make `intake_status` trustworthy. The application currently drives lifecycle through `status`, while `intake_status` can remain `in_progress` indefinitely.
+
+- Choose `intake_status` as the canonical call/intake lifecycle field
+- Update each lifecycle transition so `intake_status` becomes:
+  - `in_progress` when the request is created
+  - `completed` when all required intake fields are collected
+  - `abandoned` when an incomplete call terminates
+  - `escalated` when emergency transfer begins
+- Keep `status` reserved for future dispatcher/business workflow state
+- Backfill or migrate existing rows so `intake_status` matches their actual lifecycle
+- Do not change notification, closing, emergency-transfer, or Twilio behavior beyond keeping the lifecycle field accurate
+
+### Acceptance Criteria
+
+- No normal application path leaves a terminal request with `intake_status = 'in_progress'`
+- Completed calls have `intake_status = 'completed'`
+- Incomplete terminated calls have `intake_status = 'abandoned'`
+- Emergency requests have `intake_status = 'escalated'`
+- Existing production rows are migrated to a truthful `intake_status`
+- `status` remains available for future dispatcher workflow semantics
+- Full backend test suite passes
+
+### Dependencies
+
+- none
+
+### Status
+
+- [ ] Not started
+
+---
+
+## P0 — Configure single-dispatcher authentication and read access
+
+Add the minimum authentication/security required for a private dispatcher dashboard. Use Supabase Auth with one dispatcher account; do not build multi-user management, roles, invitations, or organization support.
+
+- Create one dispatcher Supabase Auth user for the MVP
+- Allow authenticated dispatcher sessions to `SELECT` from `assistance_requests`
+- Preserve backend service-role write access
+- Keep anonymous/public access denied
+- Do not expose `SUPABASE_SERVICE_ROLE_KEY` to the browser
+- Browser configuration may contain only the public Supabase URL and publishable/anon key
+- Document the one-time dispatcher-user setup
+
+### Acceptance Criteria
+
+- Unauthenticated clients cannot read `assistance_requests`
+- The dispatcher account can authenticate and read assistance requests
+- Authenticated dashboard access uses the public Supabase client key, never the service-role key
+- Backend insert/update behavior is unchanged
+- Existing RLS protections for anonymous users remain enforced
+- Authentication setup is documented
+
+### Dependencies
+
+- P0 — Reconcile `intake_status` lifecycle
+
+### Status
+
+- [ ] Not started
+
+---
+
+## P0 — Build minimal dispatcher dashboard with initial request history
+
+Create a small Vite + React + TypeScript dispatcher UI. The first version is read-only and should prioritize clarity over features.
+
+- Create a minimal frontend application using:
+  - Vite
+  - React
+  - TypeScript
+  - `@supabase/supabase-js`
+- Add a simple password-protected entry flow backed by the single Supabase Auth dispatcher account
+- After authentication, load recent `assistance_requests` ordered newest-first
+- Render two sections:
+  - **Active Calls** — `intake_status = 'in_progress'`
+  - **Past Requests** — `intake_status IN ('completed', 'abandoned', 'escalated')`
+- Show at minimum:
+  - started/created time
+  - caller phone
+  - location
+  - vehicle
+  - issue
+  - intake status
+- Display missing active-call fields as `Collecting…`
+- Display missing fields on terminal requests as `Not collected`
+- Make escalated/emergency requests visually distinct
+- Keep the UI read-only
+- Do not add maps, dispatch assignment, editing, search, analytics, transcripts, or driver tracking
+
+### Acceptance Criteria
+
+- Unauthenticated visitors see only the authentication screen
+- Successful dispatcher authentication opens the dashboard
+- Refreshing an authenticated dashboard restores the session
+- Active calls and past requests are separated correctly using `intake_status`
+- Partial requests render clearly without blank/undefined values
+- Completed, abandoned, and escalated requests remain visible in history
+- No service-role credentials or other backend secrets appear in the frontend bundle
+- Dashboard works at normal desktop and tablet widths
+
+### Dependencies
+
+- P0 — Configure single-dispatcher authentication and read access
+
+### Status
+
+- [ ] Not started
+
+---
+
+## P0 — Add Supabase Realtime assistance-request updates
+
+Make the dashboard update automatically as calls arrive and intake progresses. Use Supabase Realtime directly from the dispatcher browser rather than adding a custom FastAPI WebSocket or polling API.
+
+- Subscribe to `INSERT` and `UPDATE` events for `assistance_requests`
+- On `INSERT`, add the new request to the local dashboard state
+- On `UPDATE`, replace/merge the matching request by `id`
+- When `intake_status` changes from `in_progress` to a terminal state, move the request from Active Calls to Past Requests without requiring refresh
+- Prevent duplicate rows when the initial query and realtime subscription overlap
+- Show a small connection/live indicator so the dispatcher can tell whether realtime updates are connected
+- Clean up the realtime subscription when the authenticated dashboard unmounts or signs out
+- Do not add polling unless needed as a documented fallback
+
+### Acceptance Criteria
+
+- A newly created assistance request appears without refreshing the page
+- Progressive location / vehicle / issue updates appear without refreshing
+- A completed request automatically moves from Active Calls to Past Requests
+- Abandoned and escalated requests move to Past Requests correctly
+- Realtime events do not create duplicate cards
+- Refreshing the page returns to the same database-backed state
+- Signing out removes the realtime subscription and returns to the authentication screen
+
+### Dependencies
+
+- P0 — Build minimal dispatcher dashboard with initial request history
+
+### Status
+
+- [ ] Not started
+
+---
+
+## P0 — Deploy the dispatcher dashboard
+
+Deploy the dashboard behind a stable production URL using the simplest approach compatible with the existing GCP/GitHub deployment setup. Keep frontend deployment independent from the voice-service runtime where practical.
+
+- Choose the smallest deployment target that supports the static Vite build
+- Configure production frontend environment variables for:
+  - Supabase URL
+  - Supabase public/publishable key
+- Never inject backend/service-role secrets into the frontend build
+- Add a GitHub Actions deployment workflow triggered from `main`, or extend the existing deployment workflow if that remains clean and independently reviewable
+- Verify the production dashboard can authenticate, load history, and receive realtime updates
+- Document the production dashboard URL and deployment steps
+
+### Acceptance Criteria
+
+- Merging the dashboard deployment changes to `main` produces a deployed dashboard
+- Production URL is stable
+- Dispatcher authentication works in production
+- Existing assistance requests load successfully
+- A live phone call appears in Active Calls without manual refresh
+- Progressive updates appear during the call
+- Completed/abandoned/escalated requests move to Past Requests
+- No private backend secrets are present in the deployed frontend
+- Voice-agent Cloud Run deployment remains unaffected
+
+### Dependencies
+
+- P0 — Add Supabase Realtime assistance-request updates
+
+### Status
+
+- [ ] Not started
+
+---
+
+## Explicitly Out of Scope for This Sequence
+
+The first dispatcher dashboard does **not** include:
+
+- multiple dispatcher users
+- roles / permissions beyond one authenticated dispatcher account
+- request editing
+- acknowledge / dispatch / resolve actions
+- maps
+- truck assignment
+- ETA calculation
+- search / filtering
+- analytics
+- transcripts
+- fleet management
+- a dedicated `/api/v1/assistance-requests` backend endpoint
+
+Those should only be introduced after real dispatcher usage demonstrates a need.
