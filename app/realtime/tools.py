@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, model_validator
 
 
@@ -46,13 +48,16 @@ class EmergencyTransferResult(BaseModel):
     error: str | None = None
 
 
-CREATE_BREAKDOWN_TICKET_TOOL = {
+CREATE_BREAKDOWN_TICKET_TOOL: dict[str, Any] = {
     "type": "function",
     "name": "create_breakdown_ticket",
     "description": (
-        "Create a roadside assistance breakdown ticket after collecting the caller's "
-        "location, vehicle details, and issue description. Call this only after you "
-        "have all three pieces of information."
+        "Save the caller's roadside assistance details progressively. Call with "
+        "whatever fields are available (location, vehicle, issue) as soon as the "
+        "caller provides them, and call again to update previously saved details. "
+        "Do not wait until all three fields are collected before the first call, "
+        "and never invent missing values. Once all three fields are saved the "
+        "result status is 'created' and the call can close."
     ),
     "parameters": {
         "type": "object",
@@ -70,7 +75,7 @@ CREATE_BREAKDOWN_TICKET_TOOL = {
                 "description": "Description of the breakdown or problem",
             },
         },
-        "required": ["location", "vehicle", "issue"],
+        "required": [],
     },
 }
 

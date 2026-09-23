@@ -21,11 +21,20 @@ from app.services.calls import EarlyConnection, call_manager
 from app.services.emergency import transfer_call
 from app.services.hangup import hangup_call
 from app.services.notifier import notify_dispatcher
-from app.services.tickets import create_ticket, is_intake_complete, update_ticket_hazard
+from app.services.tickets import (
+    create_ticket,
+    is_intake_complete,
+    start_assistance_request,
+    update_ticket_hazard,
+)
 
 logger = structlog.get_logger(__name__)
 
 _background_tasks: set[asyncio.Task[object]] = set()
+
+# Bound the early assistance-request insert so a stalled Supabase call can
+# never hang the TwiML response (Twilio expects a voice webhook reply in ~15s).
+_ASSISTANCE_REQUEST_START_TIMEOUT_SECONDS = 5.0
 
 # Pending early OpenAI connections, keyed by Twilio CallSid.
 # Created in the voice webhook; consumed in the media stream handler.
@@ -327,10 +336,39 @@ async def twilio_voice_webhook(request: Request) -> PlainTextResponse:
         _start_early_openai_connection(call_sid=call_sid, caller_phone=caller_phone),
         name=f"early-openai-{call_sid}",
     )
+
+    # Idempotently create the open assistance-request row for this call.
+    # Failure or timeout is logged loudly but must never block the call path.
+    assistance_request_id: str | None = None
+    try:
+        assistance_request = await asyncio.wait_for(
+            asyncio.to_thread(
+                start_assistance_request,
+                call_id=call_sid,
+                caller_phone=caller_phone,
+            ),
+            timeout=_ASSISTANCE_REQUEST_START_TIMEOUT_SECONDS,
+        )
+        assistance_request_id = assistance_request.get("id")
+        logger.info(
+            "assistance_request_started",
+            call_sid=call_sid,
+            assistance_request_id=assistance_request_id,
+        )
+    except TimeoutError:
+        logger.error(
+            "assistance_request_start_failed",
+            call_sid=call_sid,
+            reason="timeout",
+        )
+    except Exception:
+        logger.exception("assistance_request_start_failed", call_sid=call_sid)
+
     _pending_connections[call_sid] = EarlyConnection(
         call_sid=call_sid,
         caller_phone=caller_phone,
         connection_task=connection_task,
+        assistance_request_id=assistance_request_id,
     )
 
     ws_url = _build_media_stream_ws_url(request)
@@ -487,6 +525,10 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                         caller_phone=caller_phone or "unknown",
                     )
                     call_state.stream_sid = stream_sid
+                    if early_connection is not None:
+                        call_state.assistance_request_id = (
+                            early_connection.assistance_request_id
+                        )
 
                     session = RealtimeSession(
                         call_sid=call_sid or "unknown",
@@ -530,6 +572,10 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                         caller_phone=caller_phone or "unknown",
                     )
                     call_state.stream_sid = stream_sid
+                    if early_connection is not None:
+                        call_state.assistance_request_id = (
+                            early_connection.assistance_request_id
+                        )
 
             elif event == "media":
                 if session and session.is_connected:

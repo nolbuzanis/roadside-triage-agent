@@ -26,6 +26,7 @@ class EarlyConnection:
     caller_phone: str
     connection_task: asyncio.Task[RealtimeSession] = field(repr=False)
     session: RealtimeSession | None = field(default=None, repr=False)
+    assistance_request_id: str | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -38,6 +39,7 @@ class CallState:
     openai_session_id: str | None = None
     transfer_state: str = "none"
     ticket_created: bool = False
+    assistance_request_id: str | None = None
 
 
 class CallStateManager:

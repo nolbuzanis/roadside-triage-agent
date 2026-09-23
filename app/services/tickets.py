@@ -29,6 +29,48 @@ def is_intake_complete(ticket: dict[str, Any]) -> bool:
     return all(ticket.get(field) for field in ("location", "vehicle", "issue"))
 
 
+def start_assistance_request(
+    *,
+    call_id: str,
+    caller_phone: str,
+) -> dict[str, Any]:
+    """Idempotently create the open assistance-request row for a valid inbound call.
+
+    Inserts {call_id, caller_phone} with status "in_progress" and null intake
+    fields when the row is missing; returns the existing row unchanged when the
+    same call_id already has one (Twilio webhook retries/duplicates). Concurrent
+    duplicate inserts resolve via the unique call_id constraint (SQLSTATE 23505).
+
+    Returns the inserted/existing row as a dict.
+    """
+    supabase = _get_supabase()
+    table = supabase.table("breakdown_tickets")
+
+    existing = table.select("*").eq("call_id", call_id).execute()
+    if existing.data:
+        return dict(existing.data[0])  # type: ignore[arg-type]
+
+    row: dict[str, Any] = {
+        "call_id": call_id,
+        "caller_phone": caller_phone,
+        "status": "in_progress",
+        "notification_status": "pending",
+    }
+
+    try:
+        result = table.insert(row).execute()
+    except APIError as exc:
+        if exc.code != "23505":
+            raise
+        raced = table.select("*").eq("call_id", call_id).execute()
+        if not raced.data:
+            raise
+        logger.info("Assistance request insert race resolved", call_id=call_id)
+        return dict(raced.data[0])  # type: ignore[arg-type]
+
+    return dict(result.data[0]) if result.data else row  # type: ignore[arg-type]
+
+
 def create_ticket(
     *,
     call_id: str,
@@ -72,7 +114,7 @@ def create_ticket(
         "call_id": call_id,
         "caller_phone": caller_phone,
         **provided,
-        "status": "pending",
+        "status": "in_progress",
         "notification_status": "pending",
     }
     if session_id:

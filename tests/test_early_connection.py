@@ -313,6 +313,18 @@ class TestCallStateUpdates:
         assert ec.call_sid == "CA_test"
         assert ec.caller_phone == "+15551234567"
         assert ec.session is None
+        assert ec.assistance_request_id is None
+        await task
+
+    async def test_early_connection_with_assistance_request_id(self) -> None:
+        task = asyncio.create_task(asyncio.sleep(0))
+        ec = EarlyConnection(
+            call_sid="CA_test",
+            caller_phone="+15551234567",
+            connection_task=task,  # type: ignore[arg-type]
+            assistance_request_id="req-abc",
+        )
+        assert ec.assistance_request_id == "req-abc"
         await task
 
     async def test_early_connection_with_session(self) -> None:
@@ -330,6 +342,18 @@ class TestCallStateUpdates:
     def test_call_state_stream_sid_optional(self) -> None:
         state = CallState(twilio_call_id="CA_test", caller_phone="+15551234567")
         assert state.stream_sid is None
+
+    def test_call_state_assistance_request_id_defaults_to_none(self) -> None:
+        state = CallState(twilio_call_id="CA_test", caller_phone="+15551234567")
+        assert state.assistance_request_id is None
+
+    def test_call_state_assistance_request_id_settable(self) -> None:
+        state = CallState(
+            twilio_call_id="CA_test",
+            caller_phone="+15551234567",
+            assistance_request_id="req-xyz",
+        )
+        assert state.assistance_request_id == "req-xyz"
 
     def test_call_state_with_stream_sid(self) -> None:
         state = CallState(

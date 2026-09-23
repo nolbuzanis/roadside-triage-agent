@@ -54,6 +54,20 @@ def test_instructions_reference_ticket_tool() -> None:
     assert "create_breakdown_ticket" in ROADSIDE_ASSISTANT_INSTRUCTIONS
 
 
+def test_instructions_direct_progressive_saving() -> None:
+    """Must instruct saving each field as it is collected, not only at the end."""
+    lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
+    assert "as soon as" in lower
+    assert "call the tool again" in lower or "call again" in lower
+
+
+def test_instructions_require_all_three_fields_before_close() -> None:
+    """Still collect all three fields before the closing flow triggers."""
+    lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
+    assert "all three pieces of information" in lower
+    assert '"created"' in ROADSIDE_ASSISTANT_INSTRUCTIONS
+
+
 def test_instructions_prohibit_inventing_information() -> None:
     """Must not invent or assume information."""
     assert "invent" in ROADSIDE_ASSISTANT_INSTRUCTIONS.lower() or "assume" in ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
