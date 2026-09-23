@@ -64,9 +64,9 @@ class RealtimeSession:
     _greeting_triggered: bool = field(default=False, init=False, repr=False)
 
     # Per-call closing-flow state:
-    # ticket_created -> closing_response_started -> closing_response_completed
+    # intake_completed -> closing_response_started -> closing_response_completed
     # -> hangup_started. The sequence runs at most once per call.
-    ticket_created: bool = field(default=False, init=False, repr=False)
+    intake_completed: bool = field(default=False, init=False, repr=False)
     closing_response_started: bool = field(default=False, init=False, repr=False)
     closing_response_completed: bool = field(default=False, init=False, repr=False)
     hangup_started: bool = field(default=False, init=False, repr=False)
@@ -74,7 +74,7 @@ class RealtimeSession:
     _closing_interrupted: bool = field(default=False, init=False, repr=False)
     _caller_speaking: bool = field(default=False, init=False, repr=False)
     _transfer_requested: bool = field(default=False, init=False, repr=False)
-    _ticket_id: str | None = field(default=None, init=False, repr=False)
+    _assistance_request_id: str | None = field(default=None, init=False, repr=False)
     _response_create_reasons: deque[str] = field(default_factory=deque, init=False, repr=False)
     _hangup_grace_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
 
@@ -456,7 +456,7 @@ class RealtimeSession:
                 status=response.get("status"),
             )
             reason = self._response_create_reasons.popleft() if self._response_create_reasons else None
-            if reason == "post_ticket_closing":
+            if reason == "post_intake_closing":
                 self.closing_response_id = response_id
 
         elif event_type == "response.output_audio.done":
@@ -585,23 +585,23 @@ class RealtimeSession:
             tool_call_id=call_id,
         )
 
-        if func_name == "create_breakdown_ticket":
-            if self.ticket_created:
-                # Duplicate/retried ticket tool after a successful creation:
+        if func_name == "update_assistance_request":
+            if self.intake_completed:
+                # Duplicate/retried intake tool after a successful completion:
                 # the closing flow owns the end of the conversation, so no new
                 # response is created for the repeat call.
                 logger.info(
-                    "duplicate_ticket_tool_call_ignored",
+                    "duplicate_assistance_request_tool_call_ignored",
                     call_sid=self.call_sid,
                     tool_call_id=call_id,
                 )
                 return
-            ticket_data = self._parse_ticket_result(result)
-            if ticket_data is not None and ticket_data.get("status") == "created":
-                self.ticket_created = True
+            request_data = self._parse_assistance_request_result(result)
+            if request_data is not None and request_data.get("status") == "created":
+                self.intake_completed = True
                 await self._start_closing_response(
                     tool_call_id=call_id,
-                    ticket_id=ticket_data.get("ticket_id"),
+                    assistance_request_id=request_data.get("assistance_request_id"),
                 )
                 return
 
@@ -611,16 +611,18 @@ class RealtimeSession:
         )
 
     @staticmethod
-    def _parse_ticket_result(result: str) -> dict[str, Any] | None:
-        """Parse a create_breakdown_ticket tool result, or None if unparseable."""
+    def _parse_assistance_request_result(result: str) -> dict[str, Any] | None:
+        """Parse an update_assistance_request tool result, or None if unparseable."""
         try:
             data = json.loads(result)
         except (TypeError, ValueError):
             return None
         return data if isinstance(data, dict) else None
 
-    async def _start_closing_response(self, *, tool_call_id: str, ticket_id: str | None) -> None:
-        """Trigger the fixed post-ticket closing line. Runs at most once per call.
+    async def _start_closing_response(
+        self, *, tool_call_id: str, assistance_request_id: str | None
+    ) -> None:
+        """Trigger the fixed post-intake closing line. Runs at most once per call.
 
         Sends a response.create carrying per-response instructions that require
         the model to speak exactly ``CLOSING_MESSAGE`` and nothing else, mirroring
@@ -631,10 +633,10 @@ class RealtimeSession:
             logger.warning("closing_response_already_started", call_sid=self.call_sid)
             return
         self.closing_response_started = True
-        self._ticket_id = ticket_id
+        self._assistance_request_id = assistance_request_id
 
         directive = (
-            "The roadside ticket has been created. Speak the closing line exactly as "
+            "The assistance request has been saved. Speak the closing line exactly as "
             "written, in this order, and then stop:\n\n"
             f'"{CLOSING_MESSAGE}"\n\n'
             "Do not add any words, do not paraphrase or rephrase it, do not ask a "
@@ -642,24 +644,24 @@ class RealtimeSession:
             "line. The call is ending now."
         )
         await self._send_response_create(
-            reason="post_ticket_closing",
+            reason="post_intake_closing",
             response_source="app.realtime.session._start_closing_response",
             instructions=directive,
         )
         logger.info(
             "closing_response_started",
             call_sid=self.call_sid,
-            reason="post_ticket_closing",
+            reason="post_intake_closing",
             response_source="app.realtime.session._start_closing_response",
             tool_call_id=tool_call_id,
-            ticket_id=ticket_id,
+            assistance_request_id=assistance_request_id,
         )
 
     async def _handle_closing_response_done(self, response: dict[str, Any]) -> None:
         """Advance the closing flow when its tagged response reaches a terminal state.
 
         The closing response is identified by the response_id captured when its
-        response.create (reason=post_ticket_closing) was acknowledged. An
+        response.create (reason=post_intake_closing) was acknowledged. An
         unrelated assistant response never completes the closing flow. If the
         caller barged in and cancelled the closing response, the flow waits for
         the follow-up turn to finish before allowing the hangup.
@@ -690,7 +692,7 @@ class RealtimeSession:
                     response_id=response_id,
                     status=status,
                     interrupted=self._closing_interrupted,
-                    ticket_id=self._ticket_id,
+                    assistance_request_id=self._assistance_request_id,
                 )
                 self._maybe_arm_hangup()
             else:
@@ -700,7 +702,7 @@ class RealtimeSession:
                     call_sid=self.call_sid,
                     response_id=response_id,
                     status=status or "unknown",
-                    ticket_id=self._ticket_id,
+                    assistance_request_id=self._assistance_request_id,
                 )
             return
 
@@ -714,7 +716,7 @@ class RealtimeSession:
                 response_id=response_id,
                 status=status,
                 interrupted=True,
-                ticket_id=self._ticket_id,
+                assistance_request_id=self._assistance_request_id,
             )
             self._maybe_arm_hangup()
 

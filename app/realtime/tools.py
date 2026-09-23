@@ -7,8 +7,8 @@ from typing import Any
 from pydantic import BaseModel, model_validator
 
 
-class TicketArgs(BaseModel):
-    """Validated arguments for the create_breakdown_ticket tool.
+class AssistanceRequestArgs(BaseModel):
+    """Validated arguments for the update_assistance_request tool.
 
     All intake fields are optional so partial saves are accepted; at least
     one non-empty field is required (there must be something to save).
@@ -19,17 +19,17 @@ class TicketArgs(BaseModel):
     issue: str | None = None
 
     @model_validator(mode="after")
-    def _require_something_to_save(self) -> TicketArgs:
+    def _require_something_to_save(self) -> AssistanceRequestArgs:
         if not (self.location or self.vehicle or self.issue):
             raise ValueError("at least one of location, vehicle, or issue is required")
         return self
 
 
-class TicketToolResult(BaseModel):
+class AssistanceRequestToolResult(BaseModel):
     """Result returned to the OpenAI Realtime model after a tool call."""
 
     status: str
-    ticket_id: str | None = None
+    assistance_request_id: str | None = None
     message: str | None = None
     error: str | None = None
 
@@ -48,9 +48,9 @@ class EmergencyTransferResult(BaseModel):
     error: str | None = None
 
 
-CREATE_BREAKDOWN_TICKET_TOOL: dict[str, Any] = {
+UPDATE_ASSISTANCE_REQUEST_TOOL: dict[str, Any] = {
     "type": "function",
-    "name": "create_breakdown_ticket",
+    "name": "update_assistance_request",
     "description": (
         "Save the caller's roadside assistance details progressively. Call with "
         "whatever fields are available (location, vehicle, issue) as soon as the "
@@ -103,4 +103,4 @@ TRANSFER_TO_EMERGENCY_TOOL = {
     },
 }
 
-REALTIME_TOOLS = [CREATE_BREAKDOWN_TICKET_TOOL, TRANSFER_TO_EMERGENCY_TOOL]
+REALTIME_TOOLS = [UPDATE_ASSISTANCE_REQUEST_TOOL, TRANSFER_TO_EMERGENCY_TOOL]

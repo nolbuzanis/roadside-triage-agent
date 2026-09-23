@@ -1,4 +1,4 @@
-"""Ticket persistence service using Supabase."""
+"""Assistance-request persistence service using Supabase."""
 
 from __future__ import annotations
 
@@ -24,9 +24,9 @@ def _get_supabase() -> Client:
     return _client
 
 
-def is_intake_complete(ticket: dict[str, Any]) -> bool:
-    """Return True when the ticket row has non-empty location, vehicle, and issue."""
-    return all(ticket.get(field) for field in ("location", "vehicle", "issue"))
+def is_intake_complete(request: dict[str, Any]) -> bool:
+    """Return True when the assistance-request row has non-empty location, vehicle, and issue."""
+    return all(request.get(field) for field in ("location", "vehicle", "issue"))
 
 
 def start_assistance_request(
@@ -44,7 +44,7 @@ def start_assistance_request(
     Returns the inserted/existing row as a dict.
     """
     supabase = _get_supabase()
-    table = supabase.table("breakdown_tickets")
+    table = supabase.table("assistance_requests")
 
     existing = table.select("*").eq("call_id", call_id).execute()
     if existing.data:
@@ -80,7 +80,7 @@ def create_ticket(
     issue: str | None = None,
     session_id: str | None = None,
 ) -> dict[str, Any]:
-    """Create or merge-upsert a breakdown ticket in Supabase, keyed by call_id.
+    """Create or merge-upsert an assistance request in Supabase, keyed by call_id.
 
     Inserts a new row when missing; when the row exists, merges only the
     non-empty provided intake fields (omitted/empty fields are preserved and
@@ -104,7 +104,7 @@ def create_ticket(
         raise ValueError("nothing to save: at least one intake field is required")
 
     supabase = _get_supabase()
-    table = supabase.table("breakdown_tickets")
+    table = supabase.table("assistance_requests")
 
     existing = table.select("*").eq("call_id", call_id).execute()
     if existing.data:
@@ -128,18 +128,18 @@ def create_ticket(
         raced = table.select("*").eq("call_id", call_id).execute()
         if not raced.data:
             raise
-        logger.info("Ticket insert race resolved", call_id=call_id)
+        logger.info("Assistance request insert race resolved", call_id=call_id)
         return _merge_into_existing(table, call_id, dict(raced.data[0]), provided)  # type: ignore[arg-type]
 
-    ticket: dict[str, Any] = dict(result.data[0]) if result.data else row  # type: ignore[arg-type]
+    request: dict[str, Any] = dict(result.data[0]) if result.data else row  # type: ignore[arg-type]
 
     logger.info(
-        "Ticket created",
-        ticket_id=ticket.get("id"),
+        "Assistance request created",
+        assistance_request_id=request.get("id"),
         call_id=call_id,
         location=provided.get("location"),
     )
-    return ticket
+    return request
 
 
 def _merge_into_existing(
@@ -156,8 +156,8 @@ def _merge_into_existing(
     table.update(provided).eq("call_id", call_id).execute()
     merged = {**existing, **provided}
     logger.info(
-        "Ticket updated",
-        ticket_id=existing.get("id"),
+        "Assistance request updated",
+        assistance_request_id=existing.get("id"),
         call_id=call_id,
         fields=sorted(provided),
     )
@@ -169,32 +169,32 @@ def update_ticket_hazard(
     call_id: str,
     hazard_reason: str,
 ) -> None:
-    """Mark a ticket as escalated due to hazard detection.
+    """Mark an assistance request as escalated due to hazard detection.
 
     Non-blocking: logs failures but does not raise.
     """
     try:
         supabase = _get_supabase()
-        supabase.table("breakdown_tickets").update(
+        supabase.table("assistance_requests").update(
             {
                 "hazard_detected": True,
                 "hazard_reason": hazard_reason,
                 "status": "escalated",
             }
         ).eq("call_id", call_id).execute()
-        logger.info("Ticket escalated", call_id=call_id, reason=hazard_reason)
+        logger.info("Assistance request escalated", call_id=call_id, reason=hazard_reason)
     except Exception:
         logger.exception("Failed to update hazard state", call_id=call_id)
 
 
 def update_notification_status(*, call_id: str, status: str) -> None:
-    """Update the notification_status field on a ticket.
+    """Update the notification_status field on the assistance request.
 
     Non-blocking: logs failures but does not raise.
     """
     try:
         supabase = _get_supabase()
-        supabase.table("breakdown_tickets").update(
+        supabase.table("assistance_requests").update(
             {"notification_status": status}
         ).eq("call_id", call_id).execute()
         logger.info("Notification status updated", call_id=call_id, status=status)
@@ -217,7 +217,7 @@ def complete_intake(*, call_id: str) -> None:
     try:
         supabase = _get_supabase()
         result = (
-            supabase.table("breakdown_tickets")
+            supabase.table("assistance_requests")
             .update({"status": "completed"})
             .eq("call_id", call_id)
             .in_("status", [*_OPEN_STATUSES, "abandoned"])
@@ -247,7 +247,7 @@ def abandon_if_open(*, call_id: str) -> None:
     try:
         supabase = _get_supabase()
         result = (
-            supabase.table("breakdown_tickets")
+            supabase.table("assistance_requests")
             .update({"status": "abandoned"})
             .eq("call_id", call_id)
             .in_("status", list(_OPEN_STATUSES))

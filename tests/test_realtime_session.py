@@ -288,13 +288,13 @@ class TestToolCallEvents:
 
         await session._handle_function_call({
             "call_id": "call_abc",
-            "name": "create_breakdown_ticket",
+            "name": "update_assistance_request",
             "arguments": '{"location": "Main St", "vehicle": "Honda", "issue": "Flat tire"}',
         })
 
         on_tool_call.assert_called_once_with(
             "call_abc",
-            "create_breakdown_ticket",
+            "update_assistance_request",
             '{"location": "Main St", "vehicle": "Honda", "issue": "Flat tire"}',
         )
 
@@ -307,7 +307,7 @@ class TestToolCallEvents:
 
         await session._handle_function_call({
             "call_id": "call_abc",
-            "name": "create_breakdown_ticket",
+            "name": "update_assistance_request",
             "arguments": "{}",
         })
 
@@ -329,7 +329,7 @@ class TestToolCallEvents:
 
         await session._handle_function_call({
             "call_id": "call_abc",
-            "name": "create_breakdown_ticket",
+            "name": "update_assistance_request",
             "arguments": "{}",
         })
 
@@ -350,7 +350,7 @@ class TestToolCallEvents:
 
         await session._handle_function_call({
             "call_id": "call_abc",
-            "name": "create_breakdown_ticket",
+            "name": "update_assistance_request",
             "arguments": "{}",
         })
 
@@ -375,7 +375,7 @@ class TestToolCallEvents:
                     {
                         "type": "function_call",
                         "call_id": "call_1",
-                        "name": "create_breakdown_ticket",
+                        "name": "update_assistance_request",
                         "arguments": '{"location":"A","vehicle":"B","issue":"C"}',
                     },
                 ],
@@ -785,7 +785,7 @@ class TestGreetingTurnControl:
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         # A failed ticket keeps the generic tool_result response path; a
-        # successful ticket takes the post_ticket_closing path instead.
+        # successful intake takes the post_intake_closing path instead.
         on_tool_call = AsyncMock(return_value='{"status": "error", "error": "boom"}')
         session = _make_session(
             call_sid="CA_tool_attr",
@@ -798,7 +798,7 @@ class TestGreetingTurnControl:
         with caplog.at_level("INFO"):
             await session._handle_function_call({
                 "call_id": "call_abc",
-                "name": "create_breakdown_ticket",
+                "name": "update_assistance_request",
                 "arguments": "{}",
             })
 

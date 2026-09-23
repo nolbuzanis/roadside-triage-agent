@@ -1,4 +1,4 @@
-"""Tests for tool-call handling: handle_create_breakdown_ticket and handle_tool_call."""
+"""Tests for tool-call handling: handle_update_assistance_request and handle_tool_call."""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
-from app.api.twilio import _background_tasks, handle_create_breakdown_ticket
+from app.api.twilio import _background_tasks, handle_update_assistance_request
 from app.realtime.tools import (
-    CREATE_BREAKDOWN_TICKET_TOOL,
-    TicketArgs,
-    TicketToolResult,
+    UPDATE_ASSISTANCE_REQUEST_TOOL,
+    AssistanceRequestArgs,
+    AssistanceRequestToolResult,
 )
 
 
@@ -25,44 +25,44 @@ def _mock_complete_intake() -> Generator[MagicMock]:
         yield mock_complete
 
 # ---------------------------------------------------------------------------
-# CREATE_BREAKDOWN_TICKET_TOOL schema tests
+# UPDATE_ASSISTANCE_REQUEST_TOOL schema tests
 # ---------------------------------------------------------------------------
 
 
-class TestCreateBreakdownTicketToolSchema:
+class TestUpdateAssistanceRequestToolSchema:
     """Tests for the model-facing tool schema (progressive persistence)."""
 
     def test_all_intake_fields_are_optional(self) -> None:
-        params = CREATE_BREAKDOWN_TICKET_TOOL["parameters"]
+        params = UPDATE_ASSISTANCE_REQUEST_TOOL["parameters"]
         assert params["required"] == []
 
     def test_all_intake_fields_are_exposed(self) -> None:
-        props = CREATE_BREAKDOWN_TICKET_TOOL["parameters"]["properties"]
+        props = UPDATE_ASSISTANCE_REQUEST_TOOL["parameters"]["properties"]
         assert set(props) == {"location", "vehicle", "issue"}
 
     def test_description_encourages_progressive_saving(self) -> None:
-        description = CREATE_BREAKDOWN_TICKET_TOOL["description"].lower()
+        description = UPDATE_ASSISTANCE_REQUEST_TOOL["description"].lower()
         assert "as soon as" in description
         assert "call again" in description
 
     def test_description_requires_all_three_before_close(self) -> None:
-        description = CREATE_BREAKDOWN_TICKET_TOOL["description"].lower()
+        description = UPDATE_ASSISTANCE_REQUEST_TOOL["description"].lower()
         assert "all three" in description
-        assert "'created'" in CREATE_BREAKDOWN_TICKET_TOOL["description"]
+        assert "'created'" in UPDATE_ASSISTANCE_REQUEST_TOOL["description"]
 
     def test_tool_name_unchanged(self) -> None:
-        assert CREATE_BREAKDOWN_TICKET_TOOL["name"] == "create_breakdown_ticket"
+        assert UPDATE_ASSISTANCE_REQUEST_TOOL["name"] == "update_assistance_request"
 
 # ---------------------------------------------------------------------------
-# TicketArgs model tests
+# AssistanceRequestArgs model tests
 # ---------------------------------------------------------------------------
 
 
-class TestTicketArgs:
-    """Tests for the TicketArgs Pydantic model."""
+class TestAssistanceRequestArgs:
+    """Tests for the AssistanceRequestArgs Pydantic model."""
 
     def test_valid_args(self) -> None:
-        args = TicketArgs.model_validate_json(
+        args = AssistanceRequestArgs.model_validate_json(
             '{"location": "Main St", "vehicle": "Toyota Camry", "issue": "Flat tire"}'
         )
         assert args.location == "Main St"
@@ -70,21 +70,21 @@ class TestTicketArgs:
         assert args.issue == "Flat tire"
 
     def test_partial_args_are_valid(self) -> None:
-        args = TicketArgs.model_validate_json('{"location": "Main St"}')
+        args = AssistanceRequestArgs.model_validate_json('{"location": "Main St"}')
         assert args.location == "Main St"
         assert args.vehicle is None
         assert args.issue is None
 
     def test_all_fields_missing_raises_validation_error(self) -> None:
         with pytest.raises(ValidationError):
-            TicketArgs.model_validate_json("{}")
+            AssistanceRequestArgs.model_validate_json("{}")
 
     def test_all_empty_fields_raise_validation_error(self) -> None:
         with pytest.raises(ValidationError):
-            TicketArgs.model_validate_json('{"location": "", "vehicle": "", "issue": ""}')
+            AssistanceRequestArgs.model_validate_json('{"location": "", "vehicle": "", "issue": ""}')
 
     def test_empty_and_nonempty_mix_is_valid(self) -> None:
-        args = TicketArgs.model_validate_json(
+        args = AssistanceRequestArgs.model_validate_json(
             '{"location": "", "vehicle": "Toyota Camry", "issue": ""}'
         )
         assert args.location == ""
@@ -93,56 +93,56 @@ class TestTicketArgs:
 
     def test_invalid_json_raises(self) -> None:
         with pytest.raises(ValidationError):
-            TicketArgs.model_validate_json("not json")
+            AssistanceRequestArgs.model_validate_json("not json")
 
     def test_extra_fields_are_ignored(self) -> None:
-        args = TicketArgs.model_validate_json(
+        args = AssistanceRequestArgs.model_validate_json(
             '{"location": "A", "vehicle": "B", "issue": "C", "extra": "ignored"}'
         )
         assert args.location == "A"
 
 
 # ---------------------------------------------------------------------------
-# TicketToolResult model tests
+# AssistanceRequestToolResult model tests
 # ---------------------------------------------------------------------------
 
 
-class TestTicketToolResult:
-    """Tests for the TicketToolResult Pydantic model."""
+class TestAssistanceRequestToolResult:
+    """Tests for the AssistanceRequestToolResult Pydantic model."""
 
     def test_success_result(self) -> None:
-        result = TicketToolResult(
+        result = AssistanceRequestToolResult(
             status="created",
-            ticket_id="abc-123",
-            message="Ticket created successfully.",
+            assistance_request_id="abc-123",
+            message="Assistance request saved successfully.",
         )
         data = result.model_dump()
         assert data["status"] == "created"
-        assert data["ticket_id"] == "abc-123"
-        assert data["message"] == "Ticket created successfully."
+        assert data["assistance_request_id"] == "abc-123"
+        assert data["message"] == "Assistance request saved successfully."
         assert data["error"] is None
 
     def test_error_result(self) -> None:
-        result = TicketToolResult(status="error", error="Unable to create the ticket")
+        result = AssistanceRequestToolResult(status="error", error="Unable to save the assistance request")
         data = result.model_dump()
         assert data["status"] == "error"
-        assert data["ticket_id"] is None
+        assert data["assistance_request_id"] is None
         assert data["message"] is None
-        assert data["error"] == "Unable to create the ticket"
+        assert data["error"] == "Unable to save the assistance request"
 
     def test_model_dump_json_is_valid_json(self) -> None:
-        result = TicketToolResult(status="created", ticket_id="x")
+        result = AssistanceRequestToolResult(status="created", assistance_request_id="x")
         parsed = json.loads(result.model_dump_json())
         assert parsed["status"] == "created"
-        assert parsed["ticket_id"] == "x"
+        assert parsed["assistance_request_id"] == "x"
 
 
 # ---------------------------------------------------------------------------
-# handle_create_breakdown_ticket tests
+# handle_update_assistance_request tests
 # ---------------------------------------------------------------------------
 
 
-class TestHandleCreateBreakdownTicket:
+class TestHandleUpdateAssistanceRequest:
     """Tests for the async tool-specific handler."""
 
     _COMPLETE_TICKET: ClassVar[dict] = {
@@ -160,14 +160,14 @@ class TestHandleCreateBreakdownTicket:
             "app.api.twilio.create_ticket", return_value=dict(self._COMPLETE_TICKET)
         ) as mock_create:
             with patch("app.api.twilio.notify_dispatcher") as mock_notify:
-                result = await handle_create_breakdown_ticket(
+                result = await handle_update_assistance_request(
                     call_sid="CA_test",
                     caller_phone="+15551234567",
                     arguments='{"location": "Main St", "vehicle": "Honda Civic", "issue": "Won\'t start"}',
                 )
 
         assert result.status == "created"
-        assert result.ticket_id == "ticket-uuid-123"
+        assert result.assistance_request_id == "ticket-uuid-123"
         assert result.message is not None
         assert "close the call" in result.message
         assert result.error is None
@@ -189,7 +189,7 @@ class TestHandleCreateBreakdownTicket:
 
     @pytest.mark.asyncio
     async def test_invalid_json_arguments_returns_error(self) -> None:
-        result = await handle_create_breakdown_ticket(
+        result = await handle_update_assistance_request(
             call_sid="CA_test",
             caller_phone="+15551234567",
             arguments="not valid json",
@@ -197,11 +197,11 @@ class TestHandleCreateBreakdownTicket:
 
         assert result.status == "error"
         assert result.error == "Invalid arguments"
-        assert result.ticket_id is None
+        assert result.assistance_request_id is None
 
     @pytest.mark.asyncio
     async def test_no_fields_returns_error(self) -> None:
-        result = await handle_create_breakdown_ticket(
+        result = await handle_update_assistance_request(
             call_sid="CA_test",
             caller_phone="+15551234567",
             arguments="{}",
@@ -222,18 +222,18 @@ class TestHandleCreateBreakdownTicket:
         }
         with patch("app.api.twilio.create_ticket", return_value=partial_ticket):
             with patch("app.api.twilio.notify_dispatcher") as mock_notify:
-                result = await handle_create_breakdown_ticket(
+                result = await handle_update_assistance_request(
                     call_sid="CA_partial",
                     caller_phone="+15551234567",
                     arguments='{"location": "Main St"}',
                 )
 
         assert result.status == "updated"
-        assert result.ticket_id == "ticket-uuid-2"
+        assert result.assistance_request_id == "ticket-uuid-2"
         mock_notify.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_partial_save_does_not_log_ticket_created(
+    async def test_partial_save_does_not_log_intake_completed(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         partial_ticket = {
@@ -247,7 +247,7 @@ class TestHandleCreateBreakdownTicket:
         with patch("app.api.twilio.create_ticket", return_value=partial_ticket):
             with patch("app.api.twilio.notify_dispatcher"):
                 with caplog.at_level("INFO"):
-                    result = await handle_create_breakdown_ticket(
+                    result = await handle_update_assistance_request(
                         call_sid="CA_partial2",
                         caller_phone="+15551234567",
                         arguments='{"vehicle": "Honda Civic"}',
@@ -259,8 +259,8 @@ class TestHandleCreateBreakdownTicket:
             for r in caplog.records
             if r.message.startswith("{")
         ]
-        assert "ticket_created" not in events
-        assert "ticket_updated" in events
+        assert "intake_completed" not in events
+        assert "assistance_request_updated" in events
 
     @pytest.mark.asyncio
     async def test_retried_completion_does_not_resend_sms(self) -> None:
@@ -274,7 +274,7 @@ class TestHandleCreateBreakdownTicket:
         }
         with patch("app.api.twilio.create_ticket", return_value=notified_ticket):
             with patch("app.api.twilio.notify_dispatcher") as mock_notify:
-                result = await handle_create_breakdown_ticket(
+                result = await handle_update_assistance_request(
                     call_sid="CA_retry",
                     caller_phone="+15551234567",
                     arguments='{"location": "A", "vehicle": "B", "issue": "C"}',
@@ -286,20 +286,20 @@ class TestHandleCreateBreakdownTicket:
     @pytest.mark.asyncio
     async def test_create_ticket_failure_returns_safe_error(self) -> None:
         with patch("app.api.twilio.create_ticket", side_effect=RuntimeError("DB connection failed")):
-            result = await handle_create_breakdown_ticket(
+            result = await handle_update_assistance_request(
                 call_sid="CA_test",
                 caller_phone="+15551234567",
                 arguments='{"location": "Main St", "vehicle": "Honda Civic", "issue": "Flat tire"}',
             )
 
         assert result.status == "error"
-        assert result.error == "Unable to create the ticket"
-        assert result.ticket_id is None
+        assert result.error == "Unable to save the assistance request"
+        assert result.assistance_request_id is None
 
     @pytest.mark.asyncio
     async def test_create_ticket_failure_does_not_expose_exception_details(self) -> None:
         with patch("app.api.twilio.create_ticket", side_effect=RuntimeError("sensitive internal detail")):
-            result = await handle_create_breakdown_ticket(
+            result = await handle_update_assistance_request(
                 call_sid="CA_test",
                 caller_phone="+15551234567",
                 arguments='{"location": "X", "vehicle": "Y", "issue": "Z"}',
@@ -320,7 +320,7 @@ class TestHandleCreateBreakdownTicket:
         }
         with patch("app.api.twilio.create_ticket", return_value=mock_ticket) as mock_create:
             with patch("app.api.twilio.notify_dispatcher"):
-                result = await handle_create_breakdown_ticket(
+                result = await handle_update_assistance_request(
                     call_sid="",
                     caller_phone="",
                     arguments='{"location": "A", "vehicle": "B", "issue": "C"}',
@@ -344,7 +344,7 @@ class TestHandleCreateBreakdownTicket:
         with patch("app.api.twilio.asyncio.to_thread", wraps=__import__("asyncio").to_thread) as mock_to_thread:
             with patch("app.api.twilio.create_ticket", return_value=mock_ticket):
                 with patch("app.api.twilio.notify_dispatcher"):
-                    await handle_create_breakdown_ticket(
+                    await handle_update_assistance_request(
                         call_sid="CA_test",
                         caller_phone="+15551234567",
                         arguments='{"location": "A", "vehicle": "B", "issue": "C"}',
@@ -361,7 +361,7 @@ class TestHandleCreateBreakdownTicket:
             "app.api.twilio.create_ticket", return_value=dict(self._COMPLETE_TICKET)
         ):
             with patch("app.api.twilio.notify_dispatcher"):
-                result = await handle_create_breakdown_ticket(
+                result = await handle_update_assistance_request(
                     call_sid="CA_test",
                     caller_phone="+15551234567",
                     arguments='{"location": "Main St", "vehicle": "Honda Civic", "issue": "Won\'t start"}',
@@ -385,7 +385,7 @@ class TestHandleCreateBreakdownTicket:
         }
         with patch("app.api.twilio.create_ticket", return_value=partial_ticket):
             with patch("app.api.twilio.notify_dispatcher"):
-                result = await handle_create_breakdown_ticket(
+                result = await handle_update_assistance_request(
                     call_sid="CA_partial",
                     caller_phone="+15551234567",
                     arguments='{"location": "Main St"}',
@@ -409,7 +409,7 @@ class TestHandleCreateBreakdownTicket:
         }
         with patch("app.api.twilio.create_ticket", return_value=notified_ticket):
             with patch("app.api.twilio.notify_dispatcher") as mock_notify:
-                result = await handle_create_breakdown_ticket(
+                result = await handle_update_assistance_request(
                     call_sid="CA_retry_status",
                     caller_phone="+15551234567",
                     arguments='{"location": "A", "vehicle": "B", "issue": "C"}',
@@ -434,7 +434,7 @@ class TestHandleCreateBreakdownTicket:
         }
         with patch("app.api.twilio.create_ticket", return_value=mock_ticket):
             with patch("app.api.twilio.notify_dispatcher"):
-                result = await handle_create_breakdown_ticket(
+                result = await handle_update_assistance_request(
                     call_sid="",
                     caller_phone="",
                     arguments='{"location": "A", "vehicle": "B", "issue": "C"}',

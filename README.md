@@ -1,13 +1,13 @@
 # Roadside Assistance Triage AI Voice Agent (MVP)
 
-An autonomous AI voice agent system built for towing companies to handle inbound non-emergency roadside assistance calls. Powered by OpenAI Realtime and a FastAPI backend, this agent seamlessly gathers critical breakdown details from stranded drivers, persists structured tickets into a Supabase database, and instantly notifies human dispatchers via SMS.
+An autonomous AI voice agent system built for towing companies to handle inbound non-emergency roadside assistance calls. Powered by OpenAI Realtime and a FastAPI backend, this agent seamlessly gathers critical breakdown details from stranded drivers, persists structured assistance requests into a Supabase database, and instantly notifies human dispatchers via SMS.
 
 ## Features
 
 - **Instant Intake**: Zero hold times for stranded callers, ensuring immediate and empathetic response.
 - **Voice-to-Database Pipeline**: Converts natural spoken conversations into structured, validated Supabase records using OpenAI Realtime tool-calling.
 - **Emergency Escalation**: Automatically detects hazard situations (fire, injury, trapped occupants, etc.) and transfers the call to a live human.
-- **Dispatcher Alerts**: Sends instant, structured SMS notifications to dispatchers via Twilio the second a ticket is logged.
+- **Dispatcher Alerts**: Sends instant, structured SMS notifications to dispatchers via Twilio the second an assistance request is logged.
 - **Structured Logging**: JSON-structured logs with call/session correlation IDs for traceability across services.
 
 ---
@@ -80,14 +80,14 @@ The project includes Supabase CLI migrations. With the Supabase CLI installed:
 # Link to your remote project (first time only)
 supabase link --project-ref <your-project-ref>
 
-# Push migrations to create the breakdown_tickets table, RLS policies, and webhooks
+# Push migrations to create the assistance_requests table, RLS policies, and webhooks
 supabase db push
 ```
 
 This applies the migrations in `supabase/migrations/`:
-- `breakdown_tickets` table with all required columns
+- `assistance_requests` table with all required columns
 - Row Level Security policies
-- Ticket insert webhook for dispatcher notifications
+- Assistance-request insert webhook for dispatcher notifications
 
 Alternatively, you can run the SQL directly in the Supabase SQL Editor (Dashboard → SQL Editor).
 
@@ -171,14 +171,14 @@ app/
     webhooks.py                    # Supabase INSERT webhook, dispatcher notification dispatch
   services/
     __init__.py
-    tickets.py                     # Ticket CRUD in Supabase (create, update hazard, update notification)
+    tickets.py                     # Assistance-request CRUD in Supabase (create, update hazard, update notification)
     notifier.py                    # Dispatcher SMS via Twilio
     calls.py                       # Per-call session state (CallState, CallStateManager)
     emergency.py                   # Emergency call transfer via Twilio call control
   realtime/
     __init__.py
     session.py                     # OpenAI Realtime WebSocket session manager
-    tools.py                       # Tool schemas (create_breakdown_ticket, transfer_to_emergency)
+    tools.py                       # Tool schemas (update_assistance_request, transfer_to_emergency)
     instructions.py                # System prompt and opening greeting
     latency.py                     # Structured latency instrumentation
   core/
@@ -188,7 +188,7 @@ tests/
   test_app.py                      # App import smoke test
   test_twilio_voice_webhook.py     # TwiML response, signature validation
   test_realtime_session.py         # Session setup, audio forwarding, tool calls, errors
-  test_ticket_persistence.py       # Ticket CRUD, idempotency, hazard updates
+  test_ticket_persistence.py       # Assistance-request CRUD, idempotency, hazard updates
   test_emergency_transfer.py       # Transfer tool, Twilio call control, escalation recording
   test_webhooks.py                 # Supabase webhook endpoint
   test_tool_call_handling.py       # Pydantic models, tool handler logic
@@ -244,7 +244,7 @@ Dispatcher SMS (Twilio)
 | **Twilio** | PSTN inbound calling, Media Stream audio, dispatcher SMS, emergency call transfer |
 | **FastAPI** | Voice webhook handler, WebSocket bridge, tool dispatch, session state |
 | **OpenAI Realtime** | Live conversational audio/model loop, tool invocation |
-| **Supabase** | Ticket persistence, INSERT webhook for notification dispatch |
+| **Supabase** | Assistance-request persistence, INSERT webhook for notification dispatch |
 | **structlog** | Structured JSON logging with call/session correlation |
 
 ---
@@ -288,8 +288,8 @@ Once your local setup is running and Twilio is configured:
 1. Call your Twilio phone number
 2. The AI assistant greets you and asks for your location
 3. Provide location, vehicle details, and issue
-4. The assistant creates a ticket and confirms
-5. Check Supabase for the new `breakdown_tickets` row
+4. The assistant saves the assistance request and confirms
+5. Check Supabase for the new `assistance_requests` row
 6. Check your dispatcher phone for the SMS alert
 
 ### Emergency Call Flow
@@ -298,7 +298,7 @@ Once your local setup is running and Twilio is configured:
 2. Say something like "My car is on fire" or "I'm bleeding"
 3. The assistant detects the emergency and transfers the call
 4. Verify the call transfers to `EMERGENCY_TRANSFER_PHONE`
-5. If a ticket existed, verify it's marked as `escalated` in Supabase
+5. If a request existed, verify it's marked as `escalated` in Supabase
 
 ---
 
@@ -655,7 +655,7 @@ gcloud logs read "resource.type=cloud_run_revision AND resource.labels.service_n
 All application logs are emitted as structured JSON (via `structlog`) with correlation fields:
 - `call_sid` — Twilio CallSid for correlating across services
 - `openai_session_id` — OpenAI session ID for Realtime API correlation
-- `ticket_id` — Supabase ticket UUID
+- `assistance_request_id` — Supabase assistance-request UUID
 - `sms_sid` — Twilio SMS SID for notification tracking
 
 #### View Metrics
