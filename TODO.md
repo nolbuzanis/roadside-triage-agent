@@ -1341,7 +1341,7 @@ Deploy the Vite + React dispatcher dashboard to Firebase Hosting with a stable p
 
 ### Dependencies
 
-- P1 — Add Supabase Realtime assistance-request updates
+- P0 — Add Supabase Realtime assistance-request updates
 
 ### Status
 
