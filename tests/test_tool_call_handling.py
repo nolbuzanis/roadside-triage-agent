@@ -11,9 +11,39 @@ from pydantic import ValidationError
 
 from app.api.twilio import _background_tasks, handle_create_breakdown_ticket
 from app.realtime.tools import (
+    CREATE_BREAKDOWN_TICKET_TOOL,
     TicketArgs,
     TicketToolResult,
 )
+
+# ---------------------------------------------------------------------------
+# CREATE_BREAKDOWN_TICKET_TOOL schema tests
+# ---------------------------------------------------------------------------
+
+
+class TestCreateBreakdownTicketToolSchema:
+    """Tests for the model-facing tool schema (progressive persistence)."""
+
+    def test_all_intake_fields_are_optional(self) -> None:
+        params = CREATE_BREAKDOWN_TICKET_TOOL["parameters"]
+        assert params["required"] == []
+
+    def test_all_intake_fields_are_exposed(self) -> None:
+        props = CREATE_BREAKDOWN_TICKET_TOOL["parameters"]["properties"]
+        assert set(props) == {"location", "vehicle", "issue"}
+
+    def test_description_encourages_progressive_saving(self) -> None:
+        description = CREATE_BREAKDOWN_TICKET_TOOL["description"].lower()
+        assert "as soon as" in description
+        assert "call again" in description
+
+    def test_description_requires_all_three_before_close(self) -> None:
+        description = CREATE_BREAKDOWN_TICKET_TOOL["description"].lower()
+        assert "all three" in description
+        assert "'created'" in CREATE_BREAKDOWN_TICKET_TOOL["description"]
+
+    def test_tool_name_unchanged(self) -> None:
+        assert CREATE_BREAKDOWN_TICKET_TOOL["name"] == "create_breakdown_ticket"
 
 # ---------------------------------------------------------------------------
 # TicketArgs model tests
