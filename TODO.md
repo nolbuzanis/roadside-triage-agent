@@ -74,16 +74,17 @@ Items below are listed in dependency order (A → B → C → D → E). The doma
 
 ## P0 — Allow nullable intake columns (migration)
 
-Migration-first prerequisite: drop the `NOT NULL` constraints on `location`, `vehicle`, and `issue` so a mostly-empty request row can be inserted at call start. Schema-only change; application code and existing production rows are untouched.
+Migration-first prerequisite: drop the `NOT NULL` constraints on `location`, `vehicle`, and `issue` so a mostly-empty request row can be inserted at call start, and add a dedicated `intake_status` column for the intake lifecycle. Schema-only change; application code, existing production rows, and `status` semantics are untouched.
 
 - Add a forward-only Supabase migration: `alter table breakdown_tickets alter column location drop not null;` (same for `vehicle`, `issue`)
-- Leave `call_id` unique constraint, RLS deny-all policy, defaults, and all existing rows unchanged
+- Add `intake_status text not null default 'in_progress'` with a check constraint (`in_progress` / `completed` / `abandoned` / `escalated`); backfill existing rows as `completed` before enforcing `NOT NULL` so historical rows are never marked `in_progress`
+- Leave `status`, the `call_id` unique constraint, RLS deny-all policy, other defaults, and all existing rows unchanged
 - Apply the migration before any application change that can write null intake fields is deployed
 
 ### Acceptance Criteria
 
-- Migration applies cleanly locally and in production; row count and stored values are unchanged
-- A raw insert with null `location`/`vehicle`/`issue` succeeds; duplicate `call_id` still rejected; anonymous access still denied by RLS
+- Migration applies cleanly locally and in production; row count and stored values are unchanged; historical rows have `intake_status = 'completed'`
+- A raw insert with null `location`/`vehicle`/`issue` succeeds and defaults to `intake_status = 'in_progress'`; invalid `intake_status` values are rejected; duplicate `call_id` still rejected; anonymous access still denied by RLS; `status` behavior unchanged
 - Existing application test suite passes without modification
 
 ### Dependencies
@@ -92,7 +93,7 @@ Migration-first prerequisite: drop the `NOT NULL` constraints on `location`, `ve
 
 ### Status
 
-- [ ] Not started
+- [x] Completed in `feat/nullable-intake-intake-status` PR
 
 ## P0 — Make persistence partial-safe with completion-gated notification
 
