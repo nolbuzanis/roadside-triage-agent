@@ -67,7 +67,15 @@ jobs:
 
   deploy:
     runs-on: ubuntu-latest
-    needs: [check-changes, test]
+    needs: [check-changes, test, migrate]
+    # Run only after tests pass and any migration job has finished (or was
+    # skipped because no migrations changed). This enforces
+    # migration-before-code ordering for order-sensitive migrations.
+    if: >-
+      ${{ always() &&
+          needs.check-changes.result == 'success' &&
+          needs.test.result == 'success' &&
+          (needs.migrate.result == 'success' || needs.migrate.result == 'skipped') }}
     permissions:
       contents: read
       id-token: write
