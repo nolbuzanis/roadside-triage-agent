@@ -19,6 +19,7 @@ from app.realtime.tools import (
 )
 from app.services.calls import EarlyConnection, call_manager
 from app.services.emergency import transfer_call
+from app.services.hangup import hangup_call
 from app.services.notifier import notify_dispatcher
 from app.services.tickets import create_ticket, update_ticket_hazard
 
@@ -62,6 +63,12 @@ async def handle_create_breakdown_ticket(
             state = call_manager.get(call_sid)
             if state:
                 state.ticket_created = True
+
+        logger.info(
+            "ticket_created",
+            call_sid=call_sid,
+            ticket_id=ticket.get("id"),
+        )
 
         # Dispatch SMS notification in the background (fire-and-forget).
         task = asyncio.create_task(
@@ -162,6 +169,41 @@ async def handle_transfer_to_emergency(
 
 
 router = APIRouter()
+
+
+async def handle_closing_finished(call_sid: str) -> None:
+    """Hang up the Twilio call after the closing flow safely finished.
+
+    Invoked by the RealtimeSession once the closing response has completed and
+    the grace period has elapsed without the caller speaking. Skips the Twilio
+    call when the call already disconnected naturally (state cleaned up) or when
+    an emergency transfer owns the call, so neither case is treated as an error
+    and a live transfer is never terminated.
+    """
+    if not call_sid:
+        logger.warning("call_hangup_skipped_missing_call_sid")
+        return
+
+    state = call_manager.get(call_sid)
+    if state is None:
+        logger.info("call_hangup_skipped_call_ended", call_sid=call_sid)
+        return
+
+    if state.transfer_state != "none":
+        logger.info(
+            "call_hangup_skipped_transferred",
+            call_sid=call_sid,
+            transfer_state=state.transfer_state,
+        )
+        return
+
+    logger.info("call_hangup_started", call_sid=call_sid)
+    success = await asyncio.to_thread(hangup_call, call_sid=call_sid)
+    if success:
+        logger.info("call_hangup_completed", call_sid=call_sid)
+    else:
+        logger.warning("call_hangup_failed", call_sid=call_sid)
+
 
 _validator: RequestValidator | None = None
 
@@ -391,6 +433,7 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                         session.on_audio_delta = send_audio_to_twilio
                         session.on_tool_call = handle_tool_call
                         session.on_error = handle_session_error
+                        session.on_closing_finished = handle_closing_finished
                         # Start draining OpenAI events BEFORE the greeting so
                         # the greeting audio and its response.done are always
                         # observed, then deliver the deferred greeting.
@@ -440,6 +483,7 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                         on_audio_delta=send_audio_to_twilio,
                         on_tool_call=handle_tool_call,
                         on_error=handle_session_error,
+                        on_closing_finished=handle_closing_finished,
                     )
 
                     # Record call started and twilio stream started events

@@ -784,7 +784,9 @@ class TestGreetingTurnControl:
     async def test_tool_result_response_create_is_logged_with_attribution(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        on_tool_call = AsyncMock(return_value='{"status": "created"}')
+        # A failed ticket keeps the generic tool_result response path; a
+        # successful ticket takes the post_ticket_closing path instead.
+        on_tool_call = AsyncMock(return_value='{"status": "error", "error": "boom"}')
         session = _make_session(
             call_sid="CA_tool_attr",
             on_tool_call=on_tool_call,

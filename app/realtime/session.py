@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections import deque
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
@@ -13,6 +15,7 @@ import websockets.exceptions
 from websockets.asyncio.client import ClientConnection
 
 from app.core.config import get_settings
+from app.realtime.instructions import CLOSING_MESSAGE
 from app.realtime.latency import CallLatencyTracker
 
 logger = structlog.get_logger(__name__)
@@ -23,6 +26,10 @@ REALTIME_URL = "wss://api.openai.com/v1/realtime"
 # OpenAI Realtime supports g711_ulaw, so we match Twilio's native format
 # to avoid audio conversion overhead.
 TWILIO_AUDIO_RATE = 8000
+
+# Grace period between the closing response finishing and the Twilio hangup,
+# giving Twilio's media pipeline time to drain the final audio.
+CLOSING_HANGUP_GRACE_SECONDS = 0.75
 
 
 @dataclass
@@ -47,6 +54,7 @@ class RealtimeSession:
     on_tool_call: Callable[[str, str, str], Coroutine[Any, Any, str]] | None = None
     on_audio_delta: Callable[[str], Coroutine[Any, Any, None]] | None = None
     on_error: Callable[[Exception], Coroutine[Any, Any, None]] | None = None
+    on_closing_finished: Callable[[str], Coroutine[Any, Any, None]] | None = None
 
     _ws: ClientConnection | None = field(default=None, init=False, repr=False)
     _connected: bool = field(default=False, init=False, repr=False)
@@ -54,6 +62,21 @@ class RealtimeSession:
     _greeting_response_done: bool = field(default=False, init=False, repr=False)
     _user_turn_during_greeting: bool = field(default=False, init=False, repr=False)
     _greeting_triggered: bool = field(default=False, init=False, repr=False)
+
+    # Per-call closing-flow state:
+    # ticket_created -> closing_response_started -> closing_response_completed
+    # -> hangup_started. The sequence runs at most once per call.
+    ticket_created: bool = field(default=False, init=False, repr=False)
+    closing_response_started: bool = field(default=False, init=False, repr=False)
+    closing_response_completed: bool = field(default=False, init=False, repr=False)
+    hangup_started: bool = field(default=False, init=False, repr=False)
+    closing_response_id: str | None = field(default=None, init=False, repr=False)
+    _closing_interrupted: bool = field(default=False, init=False, repr=False)
+    _caller_speaking: bool = field(default=False, init=False, repr=False)
+    _transfer_requested: bool = field(default=False, init=False, repr=False)
+    _ticket_id: str | None = field(default=None, init=False, repr=False)
+    _response_create_reasons: deque[str] = field(default_factory=deque, init=False, repr=False)
+    _hangup_grace_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize the latency tracker for this call."""
@@ -230,7 +253,12 @@ class RealtimeSession:
             call_id=self.call_sid,
             response_source=response_source,
         )
-        await self._send(event)
+        sent = await self._send(event)
+        # Track the reason only for sends that actually went out, so a failed
+        # send cannot shift the response.created attribution queue and cause an
+        # unrelated response to be mistaken for the closing response.
+        if sent:
+            self._response_create_reasons.append(reason)
 
     @staticmethod
     def _extract_assistant_text(response: dict[str, Any]) -> str:
@@ -293,18 +321,21 @@ class RealtimeSession:
                 expected_text=expected,
             )
 
-    async def _send(self, event: dict[str, Any]) -> None:
-        """Send a JSON event to the OpenAI WebSocket."""
+    async def _send(self, event: dict[str, Any]) -> bool:
+        """Send a JSON event to the OpenAI WebSocket. Returns True when sent."""
         if self._ws is None or not self._connected:
             logger.warning("Cannot send event, WebSocket not connected", event_type=event.get("type"))
-            return
+            return False
         try:
             await self._ws.send(json.dumps(event))
+            return True
         except websockets.exceptions.ConnectionClosed:
             logger.warning("WebSocket closed while sending", call_sid=self.call_sid)
             self._connected = False
+            return False
         except Exception:
             logger.exception("Error sending event", call_sid=self.call_sid)
+            return False
 
     async def send_audio(self, audio_b64: str) -> None:
         """Forward base64-encoded audio from Twilio to OpenAI."""
@@ -375,18 +406,22 @@ class RealtimeSession:
             )
 
         elif event_type == "input_audio_buffer.speech_started":
+            self._caller_speaking = True
             logger.info(
                 "input_audio_buffer.speech_started",
                 call_sid=self.call_sid,
             )
 
         elif event_type == "input_audio_buffer.speech_stopped":
+            self._caller_speaking = False
             logger.info(
                 "input_audio_buffer.speech_stopped",
                 call_sid=self.call_sid,
             )
+            self._maybe_arm_hangup()
 
         elif event_type == "input_audio_buffer.committed":
+            self._caller_speaking = False
             logger.info(
                 "input_audio_buffer.committed",
                 call_sid=self.call_sid,
@@ -413,12 +448,16 @@ class RealtimeSession:
 
         elif event_type == "response.created":
             response = event.get("response", {})
+            response_id = response.get("id")
             logger.info(
                 "response.created",
                 call_sid=self.call_sid,
-                response_id=response.get("id"),
+                response_id=response_id,
                 status=response.get("status"),
             )
+            reason = self._response_create_reasons.popleft() if self._response_create_reasons else None
+            if reason == "post_ticket_closing":
+                self.closing_response_id = response_id
 
         elif event_type == "response.output_audio.done":
             logger.info(
@@ -450,6 +489,8 @@ class RealtimeSession:
                         reason="caller_turn_complete",
                         response_source="app.realtime.session._handle_event[response.done]",
                     )
+
+            await self._handle_closing_response_done(response)
 
             output = response.get("output", [])
             for item in output:
@@ -495,6 +536,17 @@ class RealtimeSession:
         assert self.latency_tracker is not None
         self.latency_tracker.record_event("tool_call_started", tool_call_id=call_id)
 
+        # An emergency transfer takes ownership of the call. Flag it BEFORE
+        # awaiting the handler so the closing-flow hangup can never terminate
+        # a transfer that is in flight or about to start.
+        if func_name == "transfer_to_emergency" and not self._transfer_requested:
+            self._transfer_requested = True
+            logger.info(
+                "transfer_requested_hangup_suppressed",
+                call_sid=self.call_sid,
+                tool_call_id=call_id,
+            )
+
         result = ""
         if self.on_tool_call:
             try:
@@ -532,15 +584,192 @@ class RealtimeSession:
             call_sid=self.call_sid,
             tool_call_id=call_id,
         )
+
+        if func_name == "create_breakdown_ticket":
+            if self.ticket_created:
+                # Duplicate/retried ticket tool after a successful creation:
+                # the closing flow owns the end of the conversation, so no new
+                # response is created for the repeat call.
+                logger.info(
+                    "duplicate_ticket_tool_call_ignored",
+                    call_sid=self.call_sid,
+                    tool_call_id=call_id,
+                )
+                return
+            ticket_data = self._parse_ticket_result(result)
+            if ticket_data is not None and ticket_data.get("status") == "created":
+                self.ticket_created = True
+                await self._start_closing_response(
+                    tool_call_id=call_id,
+                    ticket_id=ticket_data.get("ticket_id"),
+                )
+                return
+
         await self._send_response_create(
             reason="tool_result",
             response_source="app.realtime.session._handle_function_call",
         )
 
+    @staticmethod
+    def _parse_ticket_result(result: str) -> dict[str, Any] | None:
+        """Parse a create_breakdown_ticket tool result, or None if unparseable."""
+        try:
+            data = json.loads(result)
+        except (TypeError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    async def _start_closing_response(self, *, tool_call_id: str, ticket_id: str | None) -> None:
+        """Trigger the fixed post-ticket closing line. Runs at most once per call.
+
+        Sends a response.create carrying per-response instructions that require
+        the model to speak exactly ``CLOSING_MESSAGE`` and nothing else, mirroring
+        the deterministic greeting trigger. The hangup is NOT started here — it
+        waits for this response to finish (see _handle_closing_response_done).
+        """
+        if self.closing_response_started:
+            logger.warning("closing_response_already_started", call_sid=self.call_sid)
+            return
+        self.closing_response_started = True
+        self._ticket_id = ticket_id
+
+        directive = (
+            "The roadside ticket has been created. Speak the closing line exactly as "
+            "written, in this order, and then stop:\n\n"
+            f'"{CLOSING_MESSAGE}"\n\n'
+            "Do not add any words, do not paraphrase or rephrase it, do not ask a "
+            "question, do not offer an ETA, and do not say anything after the closing "
+            "line. The call is ending now."
+        )
+        await self._send_response_create(
+            reason="post_ticket_closing",
+            response_source="app.realtime.session._start_closing_response",
+            instructions=directive,
+        )
+        logger.info(
+            "closing_response_started",
+            call_sid=self.call_sid,
+            reason="post_ticket_closing",
+            response_source="app.realtime.session._start_closing_response",
+            tool_call_id=tool_call_id,
+            ticket_id=ticket_id,
+        )
+
+    async def _handle_closing_response_done(self, response: dict[str, Any]) -> None:
+        """Advance the closing flow when its tagged response reaches a terminal state.
+
+        The closing response is identified by the response_id captured when its
+        response.create (reason=post_ticket_closing) was acknowledged. An
+        unrelated assistant response never completes the closing flow. If the
+        caller barged in and cancelled the closing response, the flow waits for
+        the follow-up turn to finish before allowing the hangup.
+        """
+        if not self.closing_response_started or self.closing_response_completed:
+            return
+
+        response_id = response.get("id")
+        status = response.get("status")
+
+        if self.closing_response_id is None:
+            # The closing response.created was never observed; fail safe by
+            # never completing the flow, so an unrelated response.done can
+            # never trigger the hangup.
+            logger.info(
+                "closing_response_id_unobserved",
+                call_sid=self.call_sid,
+                response_id=response_id,
+            )
+            return
+
+        if response_id == self.closing_response_id:
+            if status == "completed":
+                self.closing_response_completed = True
+                logger.info(
+                    "closing_response_completed",
+                    call_sid=self.call_sid,
+                    response_id=response_id,
+                    status=status,
+                    interrupted=self._closing_interrupted,
+                    ticket_id=self._ticket_id,
+                )
+                self._maybe_arm_hangup()
+            else:
+                self._closing_interrupted = True
+                logger.info(
+                    "closing_response_interrupted",
+                    call_sid=self.call_sid,
+                    response_id=response_id,
+                    status=status or "unknown",
+                    ticket_id=self._ticket_id,
+                )
+            return
+
+        # The closing response was barged in; wait for the caller's follow-up
+        # turn to finish so the hangup never lands mid-conversation.
+        if self._closing_interrupted and status == "completed":
+            self.closing_response_completed = True
+            logger.info(
+                "closing_response_completed",
+                call_sid=self.call_sid,
+                response_id=response_id,
+                status=status,
+                interrupted=True,
+                ticket_id=self._ticket_id,
+            )
+            self._maybe_arm_hangup()
+
+    def _maybe_arm_hangup(self) -> None:
+        """Start the grace-then-hangup sequence once the closing flow is safe.
+
+        Deferred while the caller is speaking so the call is never disconnected
+        in the middle of caller speech, and suppressed entirely once an emergency
+        transfer has been requested so the transfer is never terminated.
+        Re-armed from speech_stopped/committed once it is safe again. At most
+        one grace task exists at a time.
+        """
+        if self.hangup_started or not self.closing_response_completed:
+            return
+        if self._transfer_requested:
+            logger.info("hangup_suppressed_transfer", call_sid=self.call_sid)
+            return
+        if self._caller_speaking:
+            logger.info("hangup_deferred_caller_speaking", call_sid=self.call_sid)
+            return
+        if self._hangup_grace_task is not None and not self._hangup_grace_task.done():
+            return
+        self._hangup_grace_task = asyncio.create_task(self._hangup_after_grace())
+
+    async def _hangup_after_grace(self) -> None:
+        """Wait the grace period, re-check safety, then finish the closing flow."""
+        try:
+            await asyncio.sleep(CLOSING_HANGUP_GRACE_SECONDS)
+            if self.hangup_started or not self.closing_response_completed:
+                return
+            if self._transfer_requested:
+                # An emergency transfer was requested during the grace period;
+                # transferring the call away must win over our hangup.
+                logger.info("hangup_suppressed_transfer", call_sid=self.call_sid)
+                return
+            if self._caller_speaking:
+                logger.info("hangup_deferred_caller_speaking", call_sid=self.call_sid)
+                return
+            self.hangup_started = True
+            if self.on_closing_finished:
+                await self.on_closing_finished(self.call_sid)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Closing hangup callback failed", call_sid=self.call_sid)
+
     async def close(self) -> None:
         """Cleanly close the OpenAI Realtime session and WebSocket."""
         logger.info("Closing OpenAI Realtime session", call_sid=self.call_sid)
         self._connected = False
+
+        # Cancel any pending closing-flow grace task so it cannot fire after teardown.
+        if self._hangup_grace_task is not None and not self._hangup_grace_task.done():
+            self._hangup_grace_task.cancel()
+        self._hangup_grace_task = None
 
         # Record call ended and log latency metrics
         assert self.latency_tracker is not None

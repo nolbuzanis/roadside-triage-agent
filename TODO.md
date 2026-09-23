@@ -945,6 +945,10 @@ The MVP is complete when all of the following work:
 
 ## P1
 
+- Gate the post-closing hangup on the caller's follow-up turn: after `closing_response_completed`, a caller question still creates a `caller_turn_complete` response, and the re-armed grace task can fire while the assistant's reply is mid-generation/mid-playback, cutting it off. Acceptance: when the caller speaks after the closing response completes, the hangup waits until that follow-up assistant response reaches a terminal state (or the call ends naturally); no disconnect occurs while a post-closing assistant response is in progress. Verification: unit tests drive closing completion → speech_started/stopped → committed → follow-up `response.created`/`response.done` and assert `on_closing_finished` is not called until the follow-up `response.done` arrives, plus a test asserting the grace task does not fire while a response is outstanding.
+- Verify the spoken closing delivery the same way the greeting is verified: compare the closing response's delivered transcript against `CLOSING_MESSAGE` on completion. Acceptance: matching deliveries log `closing_delivery_verified` and mismatches log `closing_delivery_mismatch` at error level, both with delivered/expected text and `call_sid`; no audio payloads logged. Verification: unit tests feed `response.done` with matching and mismatching transcripts and assert the two log events.
+- Extract a shared Twilio client factory (e.g. `get_twilio_client()`) used by `app/services/emergency.py` and `app/services/hangup.py` so call-control operations do not each construct `TwilioClient(settings...)` independently. Acceptance: a single construction site builds the client from settings; transfer and hangup behavior unchanged. Verification: existing emergency and hangup unit tests pass (patch points updated to the factory); grep shows one `TwilioClient(` construction in `app/`.
+- Live end-to-end regression check for the closing flow: place a real call, complete intake, and confirm the agent speaks exactly the fixed closing line and Twilio hangs up after the audio finishes with no extra questions. Acceptance: for N test calls, the spoken closing matches `CLOSING_MESSAGE` and the call terminates after `closing_response_completed` + grace. Verification: manual telephony test correlating the `ticket_created` → `closing_response_started` → `closing_response_completed` → `call_hangup_started` → `call_hangup_completed` structured log sequence.
 - Migrate FastAPI startup validation from deprecated `@app.on_event("startup")` to `lifespan` context manager
 - Add unit test for `Settings` validation that asserts `ValidationError` when env vars are missing
 - Handle `IntegrityError` in `create_ticket()` for concurrent duplicate `call_id` inserts (atomic idempotent insert)
@@ -965,6 +969,10 @@ The MVP is complete when all of the following work:
 - Call/transcript audit tooling
 - Authentication for dispatcher-facing interfaces
 - Cost and usage monitoring per call
+
+## Recently Completed
+
+- [x] End-of-call flow after successful ticket creation (`feat/end-of-call-flow-after-ticket`): exact fixed closing line after `create_breakdown_ticket` succeeds, then closing `response.done` → 750ms grace → Twilio hangup; per-call closing state (`ticket_created` → `closing_response_started` → `closing_response_completed` → `hangup_started`), duplicate-safe, barge-in-safe, emergency-transfer-safe, with structured closing/hangup logs and coverage in `tests/test_closing_flow.py`.
 
 ## P2
 
