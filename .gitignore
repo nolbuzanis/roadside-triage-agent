@@ -49,3 +49,8 @@ Thumbs.db
 *.html
 *.xml
 *.zip
+
+# Local opencode config
+opencode-quota/
+opencode.jsonc
+tui.jsonc
