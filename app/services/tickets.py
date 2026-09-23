@@ -36,10 +36,11 @@ def start_assistance_request(
 ) -> dict[str, Any]:
     """Idempotently create the open assistance-request row for a valid inbound call.
 
-    Inserts {call_id, caller_phone} with status "in_progress" and null intake
-    fields when the row is missing; returns the existing row unchanged when the
-    same call_id already has one (Twilio webhook retries/duplicates). Concurrent
-    duplicate inserts resolve via the unique call_id constraint (SQLSTATE 23505).
+    Inserts {call_id, caller_phone} with status and intake_status
+    "in_progress" and null intake fields when the row is missing; returns the
+    existing row unchanged when the same call_id already has one (Twilio
+    webhook retries/duplicates). Concurrent duplicate inserts resolve via the
+    unique call_id constraint (SQLSTATE 23505).
 
     Returns the inserted/existing row as a dict.
     """
@@ -54,6 +55,7 @@ def start_assistance_request(
         "call_id": call_id,
         "caller_phone": caller_phone,
         "status": "in_progress",
+        "intake_status": "in_progress",
         "notification_status": "pending",
     }
 
@@ -115,6 +117,7 @@ def create_ticket(
         "caller_phone": caller_phone,
         **provided,
         "status": "in_progress",
+        "intake_status": "in_progress",
         "notification_status": "pending",
     }
     if session_id:
@@ -150,8 +153,8 @@ def _merge_into_existing(
 ) -> dict[str, Any]:
     """Merge non-empty provided intake fields into an existing row.
 
-    Only the provided intake fields are written; status, notification_status,
-    and omitted intake fields are left untouched.
+    Only the provided intake fields are written; status, intake_status,
+    notification_status, and omitted intake fields are left untouched.
     """
     table.update(provided).eq("call_id", call_id).execute()
     merged = {**existing, **provided}
@@ -171,6 +174,7 @@ def update_ticket_hazard(
 ) -> None:
     """Mark an assistance request as escalated due to hazard detection.
 
+    Writes intake_status (canonical intake lifecycle) and status in tandem.
     Non-blocking: logs failures but does not raise.
     """
     try:
@@ -180,6 +184,7 @@ def update_ticket_hazard(
                 "hazard_detected": True,
                 "hazard_reason": hazard_reason,
                 "status": "escalated",
+                "intake_status": "escalated",
             }
         ).eq("call_id", call_id).execute()
         logger.info("Assistance request escalated", call_id=call_id, reason=hazard_reason)
@@ -202,25 +207,28 @@ def update_notification_status(*, call_id: str, status: str) -> None:
         logger.exception("Failed to update notification status", call_id=call_id)
 
 
-# Statuses considered still open in the intake lifecycle.
-_OPEN_STATUSES = ("pending", "in_progress")
+# Canonical intake lifecycle statuses (intake_status column).
+_OPEN_INTAKE_STATUSES = ("in_progress",)
+_COMPLETABLE_INTAKE_STATUSES = ("in_progress", "abandoned")
 
 
 def complete_intake(*, call_id: str) -> None:
-    """Set the assistance request's status to 'completed' when intake completes.
+    """Set the assistance request's intake_status to 'completed' when intake completes.
 
-    Guarded update: only 'pending'/'in_progress' rows and 'abandoned' rows
-    (self-heal for calls in flight during the one-time backfill) are flipped;
-    'escalated' and already-'completed' rows are never overwritten, so retried
-    completions are idempotent. Non-blocking: logs failures but does not raise.
+    Guarded update keyed on the canonical intake_status column: only
+    'in_progress' rows and 'abandoned' rows (self-heal for calls in flight
+    during the one-time backfill) are flipped; 'escalated' and
+    already-'completed' rows are never overwritten, so retried completions
+    are idempotent. `status` is written in tandem. Non-blocking: logs
+    failures but does not raise.
     """
     try:
         supabase = _get_supabase()
         result = (
             supabase.table("assistance_requests")
-            .update({"status": "completed"})
+            .update({"status": "completed", "intake_status": "completed"})
             .eq("call_id", call_id)
-            .in_("status", [*_OPEN_STATUSES, "abandoned"])
+            .in_("intake_status", list(_COMPLETABLE_INTAKE_STATUSES))
             .execute()
         )
         rows_updated = len(result.data or [])
@@ -237,20 +245,21 @@ def complete_intake(*, call_id: str) -> None:
 
 
 def abandon_if_open(*, call_id: str) -> None:
-    """Flip a still-open assistance request's status to 'abandoned'.
+    """Flip a still-open assistance request's intake_status to 'abandoned'.
 
-    Only 'pending'/'in_progress' rows are updated: 'completed' and 'escalated'
-    are never overwritten, and an already-'abandoned' row matches nothing, so
-    duplicate teardowns and retried Twilio status callbacks are idempotent.
-    Non-blocking: logs failures but does not raise.
+    Guarded on the canonical intake_status column: only 'in_progress' rows
+    are updated — 'completed' and 'escalated' are never overwritten, and an
+    already-'abandoned' row matches nothing, so duplicate teardowns and
+    retried Twilio status callbacks are idempotent. `status` is written in
+    tandem. Non-blocking: logs failures but does not raise.
     """
     try:
         supabase = _get_supabase()
         result = (
             supabase.table("assistance_requests")
-            .update({"status": "abandoned"})
+            .update({"status": "abandoned", "intake_status": "abandoned"})
             .eq("call_id", call_id)
-            .in_("status", list(_OPEN_STATUSES))
+            .in_("intake_status", list(_OPEN_INTAKE_STATUSES))
             .execute()
         )
         rows_updated = len(result.data or [])
