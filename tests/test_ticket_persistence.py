@@ -63,7 +63,7 @@ class TestCreateTicketNew:
         table.insert.assert_called_once()
 
     @patch("app.services.tickets._get_supabase")
-    def test_default_status_is_pending(self, mock_get_sb: MagicMock) -> None:
+    def test_default_status_is_in_progress(self, mock_get_sb: MagicMock) -> None:
         sb = _mock_supabase()
         mock_get_sb.return_value = sb
 
@@ -80,7 +80,7 @@ class TestCreateTicketNew:
         table = sb.table.return_value
         insert_call = table.insert.call_args
         row = insert_call[0][0]
-        assert row["status"] == "pending"
+        assert row["status"] == "in_progress"
 
     @patch("app.services.tickets._get_supabase")
     def test_default_notification_status_is_pending(self, mock_get_sb: MagicMock) -> None:
@@ -193,7 +193,7 @@ class TestCreateTicketNew:
         assert row["location"] == "123 Main St"
         assert "vehicle" not in row
         assert "issue" not in row
-        assert row["status"] == "pending"
+        assert row["status"] == "in_progress"
         assert row["notification_status"] == "pending"
 
 
@@ -418,6 +418,190 @@ class TestCreateTicketMergeUpsert:
 
 
 # ---------------------------------------------------------------------------
+# start_assistance_request — idempotent early creation at call start
+# ---------------------------------------------------------------------------
+
+
+def _stateful_supabase() -> tuple[MagicMock, dict[str, dict]]:
+    """Build a mock Supabase client backed by an in-memory row store.
+
+    select().eq().execute() reads from the store keyed by call_id;
+    insert().execute() writes into it. Enables idempotency/retry tests.
+    """
+    rows: dict[str, dict] = {}
+    client = MagicMock()
+    table = MagicMock()
+    client.table.return_value = table
+
+    def _select_execute(*args: object, **kwargs: object) -> MagicMock:
+        call_id = table.eq.call_args[0][1] if table.eq.call_args else None
+        row = rows.get(str(call_id))
+        result = MagicMock()
+        result.data = [row] if row else []
+        return result
+
+    table.select.return_value = table
+    table.eq.return_value = table
+    table.execute.side_effect = _select_execute
+
+    def _insert(row: dict) -> MagicMock:
+        chain = MagicMock()
+
+        def _do_insert(*args: object, **kwargs: object) -> MagicMock:
+            stored = dict(row)
+            stored.setdefault("id", f"uuid-{row['call_id']}")
+            rows[row["call_id"]] = stored
+            result = MagicMock()
+            result.data = [stored]
+            return result
+
+        chain.execute.side_effect = _do_insert
+        return chain
+
+    table.insert.side_effect = _insert
+    return client, rows
+
+
+class TestStartAssistanceRequest:
+    """Tests for idempotent early creation of the assistance-request row."""
+
+    @patch("app.services.tickets._get_supabase")
+    def test_inserts_open_row_with_null_intake_fields(
+        self, mock_get_sb: MagicMock
+    ) -> None:
+        sb = _mock_supabase()
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import start_assistance_request
+
+        start_assistance_request(call_id="CA_early", caller_phone="+15551234567")
+
+        table = sb.table.return_value
+        row = table.insert.call_args[0][0]
+        assert row["call_id"] == "CA_early"
+        assert row["caller_phone"] == "+15551234567"
+        assert row["status"] == "in_progress"
+        assert row["notification_status"] == "pending"
+        assert "location" not in row
+        assert "vehicle" not in row
+        assert "issue" not in row
+
+    @patch("app.services.tickets._get_supabase")
+    def test_existing_row_returned_without_insert(
+        self, mock_get_sb: MagicMock
+    ) -> None:
+        existing = {
+            "id": "uuid-existing",
+            "call_id": "CA_dup",
+            "status": "in_progress",
+            "location": None,
+        }
+        sb = _mock_supabase(existing_data=[existing])
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import start_assistance_request
+
+        row = start_assistance_request(call_id="CA_dup", caller_phone="+15550000000")
+
+        assert row["id"] == "uuid-existing"
+        sb.table.return_value.insert.assert_not_called()
+
+    @patch("app.services.tickets._get_supabase")
+    def test_webhook_retry_yields_exactly_one_row(
+        self, mock_get_sb: MagicMock
+    ) -> None:
+        sb, rows = _stateful_supabase()
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import start_assistance_request
+
+        first = start_assistance_request(call_id="CA_retry", caller_phone="+15551111111")
+        second = start_assistance_request(call_id="CA_retry", caller_phone="+15551111111")
+
+        assert first["id"] == second["id"]
+        assert len(rows) == 1
+        assert sb.table.return_value.insert.call_count == 1
+
+    @patch("app.services.tickets._get_supabase")
+    def test_concurrent_calls_create_isolated_rows(
+        self, mock_get_sb: MagicMock
+    ) -> None:
+        sb, rows = _stateful_supabase()
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import start_assistance_request
+
+        row_a = start_assistance_request(call_id="CA_call_a", caller_phone="+15551111111")
+        row_b = start_assistance_request(call_id="CA_call_b", caller_phone="+15552222222")
+
+        assert len(rows) == 2
+        assert row_a["call_id"] == "CA_call_a"
+        assert row_a["caller_phone"] == "+15551111111"
+        assert row_b["call_id"] == "CA_call_b"
+        assert row_b["caller_phone"] == "+15552222222"
+        assert row_a["id"] != row_b["id"]
+
+    @patch("app.services.tickets._get_supabase")
+    def test_concurrent_insert_race_returns_existing_row(
+        self, mock_get_sb: MagicMock
+    ) -> None:
+        from postgrest.exceptions import APIError
+
+        existing = {"id": "uuid-race", "call_id": "CA_race", "status": "in_progress"}
+        sb = MagicMock()
+        table = MagicMock()
+        sb.table.return_value = table
+
+        empty_result = MagicMock()
+        empty_result.data = []
+        existing_result = MagicMock()
+        existing_result.data = [existing]
+        table.select.return_value = table
+        table.eq.return_value = table
+        table.execute.side_effect = [empty_result, existing_result]
+
+        insert_chain = MagicMock()
+        insert_chain.execute.side_effect = APIError(
+            {"code": "23505", "message": "duplicate key", "details": None, "hint": None}
+        )
+        table.insert.return_value = insert_chain
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import start_assistance_request
+
+        row = start_assistance_request(call_id="CA_race", caller_phone="+15550000000")
+
+        assert row["id"] == "uuid-race"
+        table.update.assert_not_called()
+
+    @patch("app.services.tickets._get_supabase")
+    def test_non_unique_api_error_is_raised(self, mock_get_sb: MagicMock) -> None:
+        from postgrest.exceptions import APIError
+
+        sb = MagicMock()
+        table = MagicMock()
+        sb.table.return_value = table
+
+        empty_result = MagicMock()
+        empty_result.data = []
+        table.select.return_value = table
+        table.eq.return_value = table
+        table.execute.return_value = empty_result
+
+        insert_chain = MagicMock()
+        insert_chain.execute.side_effect = APIError(
+            {"code": "42501", "message": "permission denied", "details": None, "hint": None}
+        )
+        table.insert.return_value = insert_chain
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import start_assistance_request
+
+        with pytest.raises(APIError):
+            start_assistance_request(call_id="CA_perm", caller_phone="+15550000000")
+
+
+# ---------------------------------------------------------------------------
 # is_intake_complete
 # ---------------------------------------------------------------------------
 
@@ -469,7 +653,7 @@ class TestCreateTicketReturnsInserted:
             "location": "X",
             "vehicle": "Y",
             "issue": "Z",
-            "status": "pending",
+            "status": "in_progress",
             "notification_status": "pending",
         }
         # Build mock manually so insert().execute() returns the inserted row.
@@ -497,7 +681,7 @@ class TestCreateTicketReturnsInserted:
         )
 
         assert ticket["id"] == "uuid-new"
-        assert ticket["status"] == "pending"
+        assert ticket["status"] == "in_progress"
 
     @patch("app.services.tickets._get_supabase")
     def test_falls_back_to_row_when_no_data_returned(self, mock_get_sb: MagicMock) -> None:
