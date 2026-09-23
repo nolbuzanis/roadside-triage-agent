@@ -519,6 +519,27 @@ def test_assistance_request_failure_does_not_block_call(
     assert "<Connect>" in response.text
 
 
+@patch("app.api.twilio._ASSISTANCE_REQUEST_START_TIMEOUT_SECONDS", 0.05)
+@patch("app.api.twilio._validate_twilio_request")
+def test_assistance_request_timeout_does_not_block_call(
+    mock_validate: MagicMock, _mock_start_assistance_request: MagicMock
+) -> None:
+    """A stalled Supabase call is timed out; TwiML still returns promptly."""
+    import time
+
+    mock_validate.return_value = True
+    _mock_start_assistance_request.side_effect = lambda **kwargs: time.sleep(0.5)
+
+    response = client.post(
+        "/api/v1/twilio/voice",
+        data=TWILIO_PARAMS,
+        headers=_make_twilio_headers(),
+    )
+
+    assert response.status_code == 200
+    assert "<Connect>" in response.text
+
+
 @patch("app.api.twilio.notify_dispatcher")
 @patch("app.api.twilio._validate_twilio_request")
 def test_webhook_sends_zero_dispatcher_sms(

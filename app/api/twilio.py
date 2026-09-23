@@ -32,6 +32,10 @@ logger = structlog.get_logger(__name__)
 
 _background_tasks: set[asyncio.Task[object]] = set()
 
+# Bound the early assistance-request insert so a stalled Supabase call can
+# never hang the TwiML response (Twilio expects a voice webhook reply in ~15s).
+_ASSISTANCE_REQUEST_START_TIMEOUT_SECONDS = 5.0
+
 # Pending early OpenAI connections, keyed by Twilio CallSid.
 # Created in the voice webhook; consumed in the media stream handler.
 _pending_connections: dict[str, EarlyConnection] = {}
@@ -334,19 +338,28 @@ async def twilio_voice_webhook(request: Request) -> PlainTextResponse:
     )
 
     # Idempotently create the open assistance-request row for this call.
-    # Failure is logged loudly but must never block the call path.
+    # Failure or timeout is logged loudly but must never block the call path.
     assistance_request_id: str | None = None
     try:
-        assistance_request = await asyncio.to_thread(
-            start_assistance_request,
-            call_id=call_sid,
-            caller_phone=caller_phone,
+        assistance_request = await asyncio.wait_for(
+            asyncio.to_thread(
+                start_assistance_request,
+                call_id=call_sid,
+                caller_phone=caller_phone,
+            ),
+            timeout=_ASSISTANCE_REQUEST_START_TIMEOUT_SECONDS,
         )
         assistance_request_id = assistance_request.get("id")
         logger.info(
             "assistance_request_started",
             call_sid=call_sid,
             assistance_request_id=assistance_request_id,
+        )
+    except TimeoutError:
+        logger.error(
+            "assistance_request_start_failed",
+            call_sid=call_sid,
+            reason="timeout",
         )
     except Exception:
         logger.exception("assistance_request_start_failed", call_sid=call_sid)
