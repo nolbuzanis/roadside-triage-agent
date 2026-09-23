@@ -38,7 +38,6 @@ class CallState:
     stream_sid: str | None = None
     openai_session_id: str | None = None
     transfer_state: str = "none"
-    ticket_created: bool = False
     assistance_request_id: str | None = None
 
 

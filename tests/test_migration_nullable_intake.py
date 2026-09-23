@@ -71,6 +71,8 @@ def _seed_historical_rows(conn: psycopg.Connection[dict[str, Any]]) -> None:
 
 
 def _row_count(conn: psycopg.Connection[dict[str, Any]]) -> int:
+    # Runs before and after the target migration but before the later
+    # breakdown_tickets → assistance_requests rename joins the chain.
     row = conn.execute("select count(*) as n from breakdown_tickets").fetchone()
     assert row is not None
     return int(row["n"])
@@ -125,7 +127,7 @@ class TestHistoricalBackfill:
 
     def test_existing_rows_receive_completed(self, migration_db: MigrationDb) -> None:
         rows = migration_db.conn.execute(
-            "select call_id, intake_status from breakdown_tickets where call_id in (%s, %s)",
+            "select call_id, intake_status from assistance_requests where call_id in (%s, %s)",
             (SEED_CALL_PENDING, SEED_CALL_ESCALATED),
         ).fetchall()
         assert len(rows) == 2
@@ -134,7 +136,7 @@ class TestHistoricalBackfill:
     def test_no_historical_row_marked_in_progress(self, migration_db: MigrationDb) -> None:
         row = migration_db.conn.execute(
             """
-            select count(*) as n from breakdown_tickets
+            select count(*) as n from assistance_requests
             where call_id in (%s, %s) and intake_status = 'in_progress'
             """,
             (SEED_CALL_PENDING, SEED_CALL_ESCALATED),
@@ -147,7 +149,7 @@ class TestHistoricalBackfill:
             """
             select location, vehicle, issue, session_id, caller_phone,
                    hazard_detected, hazard_reason, notification_status
-            from breakdown_tickets where call_id = %s
+            from assistance_requests where call_id = %s
             """,
             (SEED_CALL_PENDING,),
         ).fetchone()
@@ -177,7 +179,7 @@ class TestNullableIntake:
         rows = migration_db.conn.execute(
             """
             select column_name, is_nullable from information_schema.columns
-            where table_name = 'breakdown_tickets'
+            where table_name = 'assistance_requests'
               and column_name in ('location', 'vehicle', 'issue')
             """
         ).fetchall()
@@ -188,7 +190,7 @@ class TestNullableIntake:
         call_id = f"CA_NULL_{uuid.uuid4().hex[:8]}"
         row = migration_db.conn.execute(
             """
-            insert into breakdown_tickets
+            insert into assistance_requests
               (call_id, caller_phone, location, vehicle, issue, status)
             values (%s, '+15551112222', null, null, null, 'pending')
             returning call_id, location, vehicle, issue
@@ -214,7 +216,7 @@ class TestIntakeStatusColumn:
         row = migration_db.conn.execute(
             """
             select is_nullable from information_schema.columns
-            where table_name = 'breakdown_tickets' and column_name = 'intake_status'
+            where table_name = 'assistance_requests' and column_name = 'intake_status'
             """
         ).fetchone()
         assert row is not None
@@ -224,7 +226,7 @@ class TestIntakeStatusColumn:
         row = migration_db.conn.execute(
             """
             select column_default from information_schema.columns
-            where table_name = 'breakdown_tickets' and column_name = 'intake_status'
+            where table_name = 'assistance_requests' and column_name = 'intake_status'
             """
         ).fetchone()
         assert row is not None
@@ -234,7 +236,7 @@ class TestIntakeStatusColumn:
         call_id = f"CA_DEFAULT_{uuid.uuid4().hex[:8]}"
         row = migration_db.conn.execute(
             """
-            insert into breakdown_tickets (call_id, status)
+            insert into assistance_requests (call_id, status)
             values (%s, 'pending')
             returning intake_status
             """,
@@ -248,7 +250,7 @@ class TestIntakeStatusColumn:
         call_id = f"CA_ALLOW_{value}_{uuid.uuid4().hex[:6]}"
         row = migration_db.conn.execute(
             """
-            insert into breakdown_tickets (call_id, status, intake_status)
+            insert into assistance_requests (call_id, status, intake_status)
             values (%s, 'pending', %s)
             returning intake_status
             """,
@@ -262,7 +264,7 @@ class TestIntakeStatusColumn:
         with pytest.raises(psycopg.errors.CheckViolation):
             migration_db.conn.execute(
                 """
-                insert into breakdown_tickets (call_id, status, intake_status)
+                insert into assistance_requests (call_id, status, intake_status)
                 values (%s, 'pending', 'bogus')
                 """,
                 (call_id,),
@@ -273,7 +275,7 @@ class TestIntakeStatusColumn:
         with pytest.raises(psycopg.errors.NotNullViolation):
             migration_db.conn.execute(
                 """
-                insert into breakdown_tickets (call_id, status, intake_status)
+                insert into assistance_requests (call_id, status, intake_status)
                 values (%s, 'pending', null)
                 """,
                 (call_id,),
@@ -292,7 +294,7 @@ class TestStatusUnchanged:
         row = migration_db.conn.execute(
             """
             select column_default from information_schema.columns
-            where table_name = 'breakdown_tickets' and column_name = 'status'
+            where table_name = 'assistance_requests' and column_name = 'status'
             """
         ).fetchone()
         assert row is not None
@@ -302,7 +304,7 @@ class TestStatusUnchanged:
         call_id = f"CA_STATUS_{uuid.uuid4().hex[:8]}"
         row = migration_db.conn.execute(
             """
-            insert into breakdown_tickets (call_id)
+            insert into assistance_requests (call_id)
             values (%s)
             returning status
             """,
@@ -314,12 +316,12 @@ class TestStatusUnchanged:
     def test_status_remains_free_text(self, migration_db: MigrationDb) -> None:
         call_id = f"CA_STATUS_FREE_{uuid.uuid4().hex[:8]}"
         migration_db.conn.execute(
-            "insert into breakdown_tickets (call_id, status) values (%s, 'pending')",
+            "insert into assistance_requests (call_id, status) values (%s, 'pending')",
             (call_id,),
         )
         updated = migration_db.conn.execute(
             """
-            update breakdown_tickets set status = 'escalated'
+            update assistance_requests set status = 'escalated'
             where call_id = %s
             returning status
             """,
@@ -333,7 +335,7 @@ class TestStatusUnchanged:
         one-time open-status backfill (full intake → completed); escalated
         and other terminal statuses are never overwritten."""
         rows = migration_db.conn.execute(
-            "select call_id, status from breakdown_tickets where call_id in (%s, %s)",
+            "select call_id, status from assistance_requests where call_id in (%s, %s)",
             (SEED_CALL_PENDING, SEED_CALL_ESCALATED),
         ).fetchall()
         status_by_call = {row["call_id"]: row["status"] for row in rows}
@@ -353,7 +355,7 @@ class TestExistingInvariants:
         with pytest.raises(psycopg.errors.UniqueViolation):
             migration_db.conn.execute(
                 """
-                insert into breakdown_tickets (call_id, location, vehicle, issue, status)
+                insert into assistance_requests (call_id, location, vehicle, issue, status)
                 values (%s, 'A', 'B', 'C', 'pending')
                 """,
                 (SEED_CALL_PENDING,),
@@ -361,7 +363,7 @@ class TestExistingInvariants:
 
     def test_row_level_security_still_enabled(self, migration_db: MigrationDb) -> None:
         row = migration_db.conn.execute(
-            "select relrowsecurity from pg_class where relname = 'breakdown_tickets'"
+            "select relrowsecurity from pg_class where relname = 'assistance_requests'"
         ).fetchone()
         assert row is not None
         assert row["relrowsecurity"] is True
@@ -370,7 +372,7 @@ class TestExistingInvariants:
         row = migration_db.conn.execute(
             """
             select count(*) as n from pg_policies
-            where tablename = 'breakdown_tickets'
+            where tablename = 'assistance_requests'
               and policyname = 'Anonymous cannot access tickets'
             """
         ).fetchone()
@@ -383,24 +385,24 @@ class TestExistingInvariants:
         call_id = f"CA_RLS_{uuid.uuid4().hex[:8]}"
         conn.execute(f'create role "{role}" nologin')
         try:
-            conn.execute(f'grant select, insert on breakdown_tickets to "{role}"')
+            conn.execute(f'grant select, insert on assistance_requests to "{role}"')
             conn.execute(f'set role "{role}"')
             try:
                 with pytest.raises(psycopg.errors.InsufficientPrivilege):
                     conn.execute(
                         """
-                        insert into breakdown_tickets (call_id, location, vehicle, issue, status)
+                        insert into assistance_requests (call_id, location, vehicle, issue, status)
                         values (%s, 'A', 'B', 'C', 'pending')
                         """,
                         (call_id,),
                     )
                 visible = conn.execute(
-                    "select count(*) as n from breakdown_tickets"
+                    "select count(*) as n from assistance_requests"
                 ).fetchone()
                 assert visible is not None
                 assert visible["n"] == 0
             finally:
                 conn.execute("reset role")
         finally:
-            conn.execute(f'revoke all on breakdown_tickets from "{role}"')
+            conn.execute(f'revoke all on assistance_requests from "{role}"')
             conn.execute(f'drop role "{role}"')

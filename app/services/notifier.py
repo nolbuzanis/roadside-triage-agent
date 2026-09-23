@@ -19,16 +19,16 @@ def notify_dispatcher(
     vehicle: str,
     issue: str,
 ) -> bool:
-    """Send an SMS alert to the dispatcher about a new breakdown ticket.
+    """Send an SMS alert to the dispatcher about a new assistance request.
 
     Returns True if Twilio accepted the message, False otherwise.
-    Always updates the notification_status on the ticket.
+    Always updates the notification_status on the request.
     """
     settings = get_settings()
     client = TwilioClient(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
 
     body = (
-        f"New breakdown ticket\n"
+        f"New assistance request\n"
         f"Call: {call_id}\n"
         f"From: {caller_phone}\n"
         f"Location: {location}\n"

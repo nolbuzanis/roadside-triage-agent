@@ -84,7 +84,7 @@ async def health(
             from app.services.tickets import _get_supabase
 
             supabase = _get_supabase()
-            supabase.table("breakdown_tickets").select("id").limit(1).execute()
+            supabase.table("assistance_requests").select("id").limit(1).execute()
 
         try:
             await asyncio.wait_for(asyncio.to_thread(_sync_check_db), timeout=5.0)

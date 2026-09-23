@@ -50,8 +50,8 @@ def test_instructions_enforce_one_question_at_a_time() -> None:
 
 
 def test_instructions_reference_ticket_tool() -> None:
-    """Must reference the create_breakdown_ticket tool."""
-    assert "create_breakdown_ticket" in ROADSIDE_ASSISTANT_INSTRUCTIONS
+    """Must reference the update_assistance_request tool."""
+    assert "update_assistance_request" in ROADSIDE_ASSISTANT_INSTRUCTIONS
 
 
 def test_instructions_direct_progressive_saving() -> None:

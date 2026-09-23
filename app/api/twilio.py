@@ -12,10 +12,10 @@ from app.realtime.instructions import OPENING_GREETING, ROADSIDE_ASSISTANT_INSTR
 from app.realtime.session import RealtimeSession
 from app.realtime.tools import (
     REALTIME_TOOLS,
+    AssistanceRequestArgs,
+    AssistanceRequestToolResult,
     EmergencyTransferArgs,
     EmergencyTransferResult,
-    TicketArgs,
-    TicketToolResult,
 )
 from app.services.calls import EarlyConnection, call_manager
 from app.services.emergency import transfer_call
@@ -43,26 +43,26 @@ _ASSISTANCE_REQUEST_START_TIMEOUT_SECONDS = 5.0
 _pending_connections: dict[str, EarlyConnection] = {}
 
 
-async def handle_create_breakdown_ticket(
+async def handle_update_assistance_request(
     *,
     call_sid: str | None,
     caller_phone: str | None,
     arguments: str,
-) -> TicketToolResult:
-    """Parse, validate, and create a breakdown ticket from a tool call.
+) -> AssistanceRequestToolResult:
+    """Parse, validate, and persist an assistance request from a tool call.
 
     This function bridges the OpenAI Realtime boundary (JSON arguments) to the
-    ticket service (typed Python values). It handles argument validation, calls
-    the ticket service, and returns a typed result.
+    assistance-request service (typed Python values). It handles argument
+    validation, calls the service, and returns a typed result.
     """
     try:
-        args = TicketArgs.model_validate_json(arguments)
+        args = AssistanceRequestArgs.model_validate_json(arguments)
     except ValidationError:
         logger.warning("Invalid tool arguments", call_sid=call_sid)
-        return TicketToolResult(status="error", error="Invalid arguments")
+        return AssistanceRequestToolResult(status="error", error="Invalid arguments")
 
     try:
-        ticket = await asyncio.to_thread(
+        request = await asyncio.to_thread(
             create_ticket,
             call_id=call_sid or "unknown",
             caller_phone=caller_phone or "unknown",
@@ -71,30 +71,27 @@ async def handle_create_breakdown_ticket(
             issue=args.issue,
         )
     except Exception:
-        logger.exception("Failed to create ticket", call_sid=call_sid)
-        return TicketToolResult(status="error", error="Unable to create the ticket")
-
-    if not is_intake_complete(ticket):
-        logger.info(
-            "ticket_updated",
-            call_sid=call_sid,
-            ticket_id=ticket.get("id"),
+        logger.exception("Failed to save assistance request", call_sid=call_sid)
+        return AssistanceRequestToolResult(
+            status="error", error="Unable to save the assistance request"
         )
-        return TicketToolResult(
+
+    if not is_intake_complete(request):
+        logger.info(
+            "assistance_request_updated",
+            call_sid=call_sid,
+            assistance_request_id=request.get("id"),
+        )
+        return AssistanceRequestToolResult(
             status="updated",
-            ticket_id=ticket.get("id"),
+            assistance_request_id=request.get("id"),
             message="Intake details saved.",
         )
 
-    if call_sid:
-        state = call_manager.get(call_sid)
-        if state:
-            state.ticket_created = True
-
     logger.info(
-        "ticket_created",
+        "intake_completed",
         call_sid=call_sid,
-        ticket_id=ticket.get("id"),
+        assistance_request_id=request.get("id"),
     )
 
     # Finalize the intake lifecycle status alongside the completion path.
@@ -104,30 +101,30 @@ async def handle_create_breakdown_ticket(
 
     # Completion-gated SMS: fire only while notification_status is still pending
     # so a retried completing call never re-sends.
-    if ticket.get("notification_status") == "pending":
+    if request.get("notification_status") == "pending":
         task = asyncio.create_task(
             asyncio.to_thread(
                 notify_dispatcher,
                 call_id=call_sid or "unknown",
                 caller_phone=caller_phone or "unknown",
-                location=str(ticket.get("location") or ""),
-                vehicle=str(ticket.get("vehicle") or ""),
-                issue=str(ticket.get("issue") or ""),
+                location=str(request.get("location") or ""),
+                vehicle=str(request.get("vehicle") or ""),
+                issue=str(request.get("issue") or ""),
             ),
             name=f"notify-{call_sid}",
         )
         _background_tasks.add(task)
         task.add_done_callback(_background_tasks.discard)
 
-    return TicketToolResult(
+    return AssistanceRequestToolResult(
         status="created",
-        ticket_id=ticket.get("id"),
-        message="Ticket created successfully. You may now close the call.",
+        assistance_request_id=request.get("id"),
+        message="Assistance request saved successfully. You may now close the call.",
     )
 
 
 async def _record_escalation(*, call_sid: str, arguments: str) -> None:
-    """Record hazard escalation state on the ticket if one exists.
+    """Record hazard escalation state on the assistance request if one exists.
 
     Runs as a background task so it never blocks the live transfer.
     """
@@ -486,13 +483,13 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
         """Thin dispatcher: route tool calls to the appropriate handler."""
         logger.info("Tool call received", call_sid=call_sid, function=func_name)
 
-        if func_name == "create_breakdown_ticket":
-            ticket_result = await handle_create_breakdown_ticket(
+        if func_name == "update_assistance_request":
+            request_result = await handle_update_assistance_request(
                 call_sid=call_sid,
                 caller_phone=caller_phone,
                 arguments=arguments,
             )
-            return ticket_result.model_dump_json()
+            return request_result.model_dump_json()
 
         if func_name == "transfer_to_emergency":
             transfer_result = await handle_transfer_to_emergency(
@@ -502,7 +499,7 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
             return transfer_result.model_dump_json()
 
         logger.warning("Unknown tool", function=func_name)
-        return TicketToolResult(status="error", error="Unknown tool").model_dump_json()
+        return AssistanceRequestToolResult(status="error", error="Unknown tool").model_dump_json()
 
     try:
         while True:

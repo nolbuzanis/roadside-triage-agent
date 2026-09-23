@@ -1,4 +1,4 @@
-"""Tests for the end-of-call closing flow after successful ticket creation."""
+"""Tests for the end-of-call closing flow after successful intake completion."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.api.twilio import handle_closing_finished, handle_create_breakdown_ticket
+from app.api.twilio import handle_closing_finished, handle_update_assistance_request
 from app.realtime.instructions import CLOSING_MESSAGE
 from app.realtime.session import CLOSING_HANGUP_GRACE_SECONDS, RealtimeSession
 from app.services.calls import call_manager
@@ -27,11 +27,11 @@ def _mock_complete_intake() -> Generator[None]:
 
 TOOL_ITEM = {
     "call_id": "call_close_1",
-    "name": "create_breakdown_ticket",
+    "name": "update_assistance_request",
     "arguments": '{"location": "Main St", "vehicle": "Honda", "issue": "Flat tire"}',
 }
-SUCCESS_RESULT = '{"status": "created", "ticket_id": "tkt_abc"}'
-ERROR_RESULT = '{"status": "error", "error": "Unable to create the ticket"}'
+SUCCESS_RESULT = '{"status": "created", "assistance_request_id": "tkt_abc"}'
+ERROR_RESULT = '{"status": "error", "error": "Unable to save the assistance request"}'
 TRANSFER_ITEM = {
     "type": "function_call",
     "call_id": "call_em_1",
@@ -102,8 +102,8 @@ def no_grace() -> object:
         yield
 
 
-async def _run_successful_ticket(session: RealtimeSession) -> None:
-    """Drive a successful create_breakdown_ticket tool call through the session."""
+async def _run_successful_intake(session: RealtimeSession) -> None:
+    """Drive a successful update_assistance_request tool call through the session."""
     on_tool_call = AsyncMock(return_value=SUCCESS_RESULT)
     session.on_tool_call = on_tool_call
     await session._handle_function_call(dict(TOOL_ITEM))
@@ -158,7 +158,7 @@ class TestClosingResponseTriggered:
         session = _make_session()
         ws = await _connect_session(session)
 
-        await _run_successful_ticket(session)
+        await _run_successful_intake(session)
 
         creates = _response_creates(ws)
         assert len(creates) == 1
@@ -169,19 +169,19 @@ class TestClosingResponseTriggered:
         assert "?" not in instructions
         assert "say nothing after" in instructions or "do not say anything after" in instructions
 
-    async def test_successful_ticket_sends_post_ticket_closing_reason(
+    async def test_successful_ticket_sends_post_intake_closing_reason(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         session = _make_session(call_sid="CA_reason_log")
         await _connect_session(session)
 
         with caplog.at_level("INFO"):
-            await _run_successful_ticket(session)
+            await _run_successful_intake(session)
 
         entries = [
             e
             for e in _events_named(caplog, "response_create_sent")
-            if e.get("reason") == "post_ticket_closing"
+            if e.get("reason") == "post_intake_closing"
         ]
         assert len(entries) == 1
         assert entries[0]["call_id"] == "CA_reason_log"
@@ -194,9 +194,9 @@ class TestClosingResponseTriggered:
         await _connect_session(session)
 
         with caplog.at_level("INFO"):
-            await _run_successful_ticket(session)
+            await _run_successful_intake(session)
 
-        assert session.ticket_created is True
+        assert session.intake_completed is True
         assert session.closing_response_started is True
         assert session.closing_response_completed is False
         assert session.hangup_started is False
@@ -204,10 +204,10 @@ class TestClosingResponseTriggered:
         started = _events_named(caplog, "closing_response_started")
         assert len(started) == 1
         assert started[0]["call_sid"] == "CA_flags"
-        assert started[0]["reason"] == "post_ticket_closing"
-        assert started[0]["ticket_id"] == "tkt_abc"
+        assert started[0]["reason"] == "post_intake_closing"
+        assert started[0]["assistance_request_id"] == "tkt_abc"
 
-    async def test_ticket_created_logged_by_handler(self, caplog: pytest.LogCaptureFixture) -> None:
+    async def test_intake_completed_logged_by_handler(self, caplog: pytest.LogCaptureFixture) -> None:
         mock_ticket = {
             "id": "ticket-log-1",
             "call_id": "CA_log",
@@ -219,17 +219,17 @@ class TestClosingResponseTriggered:
         with patch("app.api.twilio.create_ticket", return_value=mock_ticket):
             with patch("app.api.twilio.notify_dispatcher"):
                 with caplog.at_level("INFO"):
-                    result = await handle_create_breakdown_ticket(
+                    result = await handle_update_assistance_request(
                         call_sid="CA_log",
                         caller_phone="+15551234567",
                         arguments='{"location": "A", "vehicle": "B", "issue": "C"}',
                     )
 
         assert result.status == "created"
-        entries = _events_named(caplog, "ticket_created")
+        entries = _events_named(caplog, "intake_completed")
         assert len(entries) == 1
         assert entries[0]["call_sid"] == "CA_log"
-        assert entries[0]["ticket_id"] == "ticket-log-1"
+        assert entries[0]["assistance_request_id"] == "ticket-log-1"
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +245,7 @@ class TestHangupWaitsForClosing:
         session = _make_session(on_closing_finished=on_closing_finished)
         await _connect_session(session)
 
-        await _run_successful_ticket(session)
+        await _run_successful_intake(session)
 
         assert session.closing_response_started is True
         assert session.closing_response_completed is False
@@ -259,7 +259,7 @@ class TestHangupWaitsForClosing:
         session = _make_session(on_closing_finished=on_closing_finished)
         await _connect_session(session)
 
-        await _run_successful_ticket(session)
+        await _run_successful_intake(session)
         await session._handle_event({
             "type": "response.created",
             "response": {"id": "resp_closing", "status": "in_progress"},
@@ -296,7 +296,7 @@ class TestHangupWaitsForClosing:
         await _connect_session(session)
 
         with caplog.at_level("INFO"):
-            await _run_successful_ticket(session)
+            await _run_successful_intake(session)
             await _finish_closing_response(session, response_id="resp_done_1")
             assert session._hangup_grace_task is not None
             await session._hangup_grace_task
@@ -305,7 +305,7 @@ class TestHangupWaitsForClosing:
         assert len(entries) == 1
         assert entries[0]["call_sid"] == "CA_completed_log"
         assert entries[0]["response_id"] == "resp_done_1"
-        assert entries[0]["ticket_id"] == "tkt_abc"
+        assert entries[0]["assistance_request_id"] == "tkt_abc"
 
     async def test_unobserved_closing_id_fails_safe(
         self, no_grace: None, caplog: pytest.LogCaptureFixture
@@ -316,7 +316,7 @@ class TestHangupWaitsForClosing:
         await _connect_session(session)
 
         with caplog.at_level("INFO"):
-            await _run_successful_ticket(session)
+            await _run_successful_intake(session)
             assert session.closing_response_id is None
 
             await session._handle_event({
@@ -333,7 +333,7 @@ class TestHangupWaitsForClosing:
         session = _make_session()
         # Not connected: _send fails, so the reason must not be queued.
         await session._send_response_create(
-            reason="post_ticket_closing",
+            reason="post_intake_closing",
             response_source="test",
         )
         assert len(session._response_create_reasons) == 0
@@ -350,7 +350,7 @@ class TestHangupExactlyOnce:
         session = _make_session(on_closing_finished=on_closing_finished)
         await _connect_session(session)
 
-        await _run_successful_ticket(session)
+        await _run_successful_intake(session)
         await _finish_closing_response(session)
         assert session._hangup_grace_task is not None
         await session._hangup_grace_task
@@ -376,7 +376,7 @@ class TestHangupExactlyOnce:
         ws = await _connect_session(session)
 
         with caplog.at_level("INFO"):
-            await _run_successful_ticket(session)
+            await _run_successful_intake(session)
             # Duplicate/retried tool call with the same successful result.
             session.on_tool_call = AsyncMock(return_value=SUCCESS_RESULT)
             await session._handle_function_call({**TOOL_ITEM, "call_id": "call_close_2"})
@@ -384,7 +384,7 @@ class TestHangupExactlyOnce:
         creates = _response_creates(ws)
         assert len(creates) == 1
         assert CLOSING_MESSAGE in creates[0]["response"]["instructions"]
-        assert _events_named(caplog, "duplicate_ticket_tool_call_ignored")
+        assert _events_named(caplog, "duplicate_assistance_request_tool_call_ignored")
         assert len(_events_named(caplog, "closing_response_started")) == 1
 
         await _finish_closing_response(session)
@@ -397,7 +397,7 @@ class TestHangupExactlyOnce:
         session = _make_session(on_closing_finished=on_closing_finished)
         ws = await _connect_session(session)
 
-        await _run_successful_ticket(session)
+        await _run_successful_intake(session)
         session.on_tool_call = AsyncMock(return_value=SUCCESS_RESULT)
         await session._handle_function_call({**TOOL_ITEM, "call_id": "call_close_3"})
         session.on_tool_call = AsyncMock(return_value=SUCCESS_RESULT)
@@ -429,7 +429,7 @@ class TestFailedTicketNoHangup:
         assert "instructions" not in creates[0].get("response", {})
         assert CLOSING_MESSAGE not in str(creates[0])
 
-        assert session.ticket_created is False
+        assert session.intake_completed is False
         assert session.closing_response_started is False
         assert _events_named(caplog, "closing_response_started") == []
 
@@ -444,19 +444,19 @@ class TestFailedTicketNoHangup:
         on_closing_finished.assert_not_called()
         assert session.hangup_started is False
 
-    async def test_handler_failure_does_not_log_ticket_created(
+    async def test_handler_failure_does_not_log_intake_completed(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         with patch("app.api.twilio.create_ticket", side_effect=RuntimeError("db down")):
             with caplog.at_level("INFO"):
-                result = await handle_create_breakdown_ticket(
+                result = await handle_update_assistance_request(
                     call_sid="CA_fail",
                     caller_phone="+15551234567",
                     arguments='{"location": "A", "vehicle": "B", "issue": "C"}',
                 )
 
         assert result.status == "error"
-        assert _events_named(caplog, "ticket_created") == []
+        assert _events_named(caplog, "intake_completed") == []
 
 
 # ---------------------------------------------------------------------------
@@ -479,7 +479,7 @@ class TestCallerInterruption:
         })
         ws.reset_mock()
 
-        await _run_successful_ticket(session)
+        await _run_successful_intake(session)
         await session._handle_event({
             "type": "response.created",
             "response": {"id": "resp_closing", "status": "in_progress"},
@@ -522,7 +522,7 @@ class TestCallerInterruption:
         await _connect_session(session)
 
         with caplog.at_level("INFO"):
-            await _run_successful_ticket(session)
+            await _run_successful_intake(session)
             # Caller starts speaking right as the closing response completes.
             await session._handle_event({"type": "input_audio_buffer.speech_started"})
             await session._handle_event({
@@ -554,7 +554,7 @@ class TestCallerInterruption:
         session = _make_session()
         await _connect_session(session)
 
-        await _run_successful_ticket(session)
+        await _run_successful_intake(session)
         await session._handle_event({"type": "input_audio_buffer.speech_started"})
         assert session.closing_response_started is True
         assert session.closing_response_completed is False
@@ -582,18 +582,18 @@ class TestConcurrentClosingState:
         await _connect_session(session_b)
 
         # Call A completes its full closing flow.
-        await _run_successful_ticket(session_a)
+        await _run_successful_intake(session_a)
         await _finish_closing_response(session_a)
         assert session_a._hangup_grace_task is not None
         await session_a._hangup_grace_task
 
         # Call B only reaches the closing response — no completion, no hangup.
-        await _run_successful_ticket(session_b)
+        await _run_successful_intake(session_b)
 
         assert session_a.hangup_started is True
         callback_a.assert_called_once_with("CA_concurrent_a")
 
-        assert session_b.ticket_created is True
+        assert session_b.intake_completed is True
         assert session_b.closing_response_started is True
         assert session_b.closing_response_completed is False
         assert session_b.hangup_started is False
@@ -630,7 +630,7 @@ class TestEmergencyUnaffected:
         assert "instructions" not in creates[0].get("response", {})
         assert CLOSING_MESSAGE not in str(creates[0])
 
-        assert session.ticket_created is False
+        assert session.intake_completed is False
         assert session.closing_response_started is False
         assert _events_named(caplog, "closing_response_started") == []
         on_closing_finished.assert_not_called()
@@ -660,7 +660,7 @@ class TestEmergencyUnaffected:
         await _connect_session(session)
 
         with caplog.at_level("INFO"):
-            await _run_successful_ticket(session)
+            await _run_successful_intake(session)
             session.on_tool_call = AsyncMock(return_value=TRANSFER_RESULT)
             await session._handle_function_call(dict(TRANSFER_ITEM))
 
@@ -685,7 +685,7 @@ class TestEmergencyUnaffected:
             "type": "response.done",
             "response": {"id": "resp_greeting", "status": "completed", "output": []},
         })
-        await _run_successful_ticket(session)
+        await _run_successful_intake(session)
         await session._handle_event({
             "type": "response.created",
             "response": {"id": "resp_closing", "status": "in_progress"},

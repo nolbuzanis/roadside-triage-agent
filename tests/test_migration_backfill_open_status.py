@@ -102,14 +102,17 @@ def _seed_rows(conn: psycopg.Connection[dict[str, Any]]) -> None:
 
 
 def _row_count(conn: psycopg.Connection[dict[str, Any]]) -> int:
+    # Runs before and after the target migration but before the later
+    # breakdown_tickets → assistance_requests rename joins the chain.
     row = conn.execute("select count(*) as n from breakdown_tickets").fetchone()
     assert row is not None
     return int(row["n"])
 
 
 def _status_by_call(conn: psycopg.Connection[dict[str, Any]]) -> dict[str, str]:
+    # Called only from post-chain assertions, after the table rename has run.
     rows = conn.execute(
-        "select call_id, status from breakdown_tickets"
+        "select call_id, status from assistance_requests"
     ).fetchall()
     return {row["call_id"]: row["status"] for row in rows}
 
@@ -183,7 +186,7 @@ class TestBackfillClassification:
 
     def test_no_row_remains_open(self, migration_db: MigrationDb) -> None:
         row = migration_db.conn.execute(
-            "select count(*) as n from breakdown_tickets "
+            "select count(*) as n from assistance_requests "
             "where status in ('pending', 'in_progress')"
         ).fetchone()
         assert row is not None
@@ -206,7 +209,7 @@ class TestBackfillPreservesData:
             """
             select location, vehicle, issue, session_id, caller_phone,
                    hazard_detected, hazard_reason, notification_status, intake_status
-            from breakdown_tickets where call_id = %s
+            from assistance_requests where call_id = %s
             """,
             (SEED_ESCALATED,),
         ).fetchone()
@@ -225,7 +228,7 @@ class TestBackfillPreservesData:
 
     def test_partial_row_keeps_collected_fields(self, migration_db: MigrationDb) -> None:
         row = migration_db.conn.execute(
-            "select location, vehicle, issue, status from breakdown_tickets where call_id = %s",
+            "select location, vehicle, issue, status from assistance_requests where call_id = %s",
             (SEED_PARTIAL_IN_PROGRESS,),
         ).fetchone()
         assert row is not None
@@ -250,12 +253,12 @@ class TestChainStillAppliesCleanly:
     def test_status_column_still_free_text(self, migration_db: MigrationDb) -> None:
         call_id = f"CA_FREE_{uuid.uuid4().hex[:8]}"
         migration_db.conn.execute(
-            "insert into breakdown_tickets (call_id, status) values (%s, 'pending')",
+            "insert into assistance_requests (call_id, status) values (%s, 'pending')",
             (call_id,),
         )
         updated = migration_db.conn.execute(
             """
-            update breakdown_tickets set status = 'custom_value'
+            update assistance_requests set status = 'custom_value'
             where call_id = %s
             returning status
             """,

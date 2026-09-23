@@ -114,19 +114,19 @@ class TestSecretLeakageAudit:
         log_data = json.loads(caplog.records[0].message)
         assert log_data["call_sid"] == "CA_abc123def456"
 
-    def test_ticket_data_is_safe_to_log(self, caplog: pytest.LogCaptureFixture) -> None:
-        logger = structlog.get_logger("test.ticket_data")
+    def test_assistance_request_data_is_safe_to_log(self, caplog: pytest.LogCaptureFixture) -> None:
+        logger = structlog.get_logger("test.assistance_request_data")
         with caplog.at_level("INFO"):
             logger.info(
-                "ticket_created",
-                ticket_id="uuid-123",
+                "intake_completed",
+                assistance_request_id="uuid-123",
                 location="Main St",
                 vehicle="Toyota Camry",
                 issue="Flat tire",
             )
 
         log_data = json.loads(caplog.records[0].message)
-        assert log_data["ticket_id"] == "uuid-123"
+        assert log_data["assistance_request_id"] == "uuid-123"
         assert log_data["location"] == "Main St"
         assert log_data["vehicle"] == "Toyota Camry"
         assert log_data["issue"] == "Flat tire"

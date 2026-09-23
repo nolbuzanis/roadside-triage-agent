@@ -42,7 +42,7 @@
 **Responsibilities:**
 
 - Initialize the Twilio REST client using environment credentials.
-- Format the raw breakdown ticket data into a concise, readable SMS template.
+- Format the raw assistance request data into a concise, readable SMS template.
 - Dispatch the SMS alert to the predefined on-duty dispatcher phone number and handle API delivery failures gracefully.
 
 
@@ -51,9 +51,9 @@
 
 **Responsibilities:**
 
-- Define the `BreakdownTicket` schema and state enums using SQLAlchemy 2.0 `Mapped` classes.
+- Define the `AssistanceRequest` schema and state enums using SQLAlchemy 2.0 `Mapped` classes.
 - Manage automatic timestamp generation for `created_at` and `updated_at` fields.
-- Ensure database-level constraints (e.g., unique `call_id` indexes to prevent duplicate ticket creation from webhook retries).
+- Ensure database-level constraints (e.g., unique `call_id` indexes to prevent duplicate request creation from webhook retries).
 
 
 
@@ -61,10 +61,10 @@
 
 
 
-### BreakdownTicket
+### AssistanceRequest
 
 ```python
-cclass BreakdownTicket(Base):
+cclass AssistanceRequest(Base):
     id: int              # Primary key, autoincrement
     call_id: str         # Unique Vapi call session identifier (indexed)
     caller_phone: str    # Inbound caller phone number from Twilio SIP

@@ -41,7 +41,7 @@ Twilio SMS
 Dispatcher
 ```
 
-The backend owns Twilio call/webhook handling, the realtime audio WebSocket bridge, conversation/session state, ticket persistence, emergency transfer control, and dispatcher notification integration.
+The backend owns Twilio call/webhook handling, the realtime audio WebSocket bridge, conversation/session state, assistance-request persistence, emergency transfer control, and dispatcher notification integration.
 
 OpenAI Realtime owns the live conversational audio/model loop.
 
@@ -70,7 +70,7 @@ valid inbound call
 → complete normally, abandon on disconnect, or escalate on emergency
 ```
 
-Items below are listed in dependency order (A → B → C → D → E). The domain rename (`breakdown_ticket` → `assistance_request`) is deliberately staged last, after the behavioral changes are stable, to minimize production risk.
+Items below are listed in dependency order (A → B → C → D → E). The domain rename was deliberately staged last, after the behavioral changes were stable, to minimize production risk.
 
 ## P0 — Allow nullable intake columns (migration)
 
@@ -202,7 +202,7 @@ Stage the domain rename as a separate atomic change after the lifecycle behavior
 
 ### Status
 
-- [ ] Not started
+- [x] Completed in `feat/rename-breakdown-ticket-assistance-request` PR
 
 ---
 
@@ -1055,7 +1055,7 @@ Document:
 - Realtime system prompt
 - Realtime model configuration
 - Voice/audio settings
-- Tool schema for `create_breakdown_ticket`
+- Tool schema for `update_assistance_request`
 - Emergency transfer behavior
 - Twilio webhook configuration
 - Media Stream configuration
@@ -1075,9 +1075,9 @@ The MVP is complete when all of the following work:
 - The assistant collects vehicle details
 - The assistant collects issue
 - Emergency situations are transferred immediately
-- Normal calls invoke `create_breakdown_ticket`
-- Exactly one ticket is created in Supabase
-- Duplicate ticket creation is idempotent
+- Normal calls invoke `update_assistance_request`
+- Exactly one assistance request is created in Supabase
+- Duplicate assistance-request creation is idempotent
 - Dispatcher receives an SMS
 - Notification status is recorded
 - Real end-to-end normal call succeeds
@@ -1095,10 +1095,11 @@ The MVP is complete when all of the following work:
 - Gate the post-closing hangup on the caller's follow-up turn: after `closing_response_completed`, a caller question still creates a `caller_turn_complete` response, and the re-armed grace task can fire while the assistant's reply is mid-generation/mid-playback, cutting it off. Acceptance: when the caller speaks after the closing response completes, the hangup waits until that follow-up assistant response reaches a terminal state (or the call ends naturally); no disconnect occurs while a post-closing assistant response is in progress. Verification: unit tests drive closing completion → speech_started/stopped → committed → follow-up `response.created`/`response.done` and assert `on_closing_finished` is not called until the follow-up `response.done` arrives, plus a test asserting the grace task does not fire while a response is outstanding.
 - Verify the spoken closing delivery the same way the greeting is verified: compare the closing response's delivered transcript against `CLOSING_MESSAGE` on completion. Acceptance: matching deliveries log `closing_delivery_verified` and mismatches log `closing_delivery_mismatch` at error level, both with delivered/expected text and `call_sid`; no audio payloads logged. Verification: unit tests feed `response.done` with matching and mismatching transcripts and assert the two log events.
 - Extract a shared Twilio client factory (e.g. `get_twilio_client()`) used by `app/services/emergency.py` and `app/services/hangup.py` so call-control operations do not each construct `TwilioClient(settings...)` independently. Acceptance: a single construction site builds the client from settings; transfer and hangup behavior unchanged. Verification: existing emergency and hangup unit tests pass (patch points updated to the factory); grep shows one `TwilioClient(` construction in `app/`.
-- Live end-to-end regression check for the closing flow: place a real call, complete intake, and confirm the agent speaks exactly the fixed closing line and Twilio hangs up after the audio finishes with no extra questions. Acceptance: for N test calls, the spoken closing matches `CLOSING_MESSAGE` and the call terminates after `closing_response_completed` + grace. Verification: manual telephony test correlating the `ticket_created` → `closing_response_started` → `closing_response_completed` → `call_hangup_started` → `call_hangup_completed` structured log sequence.
+- Live end-to-end regression check for the closing flow: place a real call, complete intake, and confirm the agent speaks exactly the fixed closing line and Twilio hangs up after the audio finishes with no extra questions. Acceptance: for N test calls, the spoken closing matches `CLOSING_MESSAGE` and the call terminates after `closing_response_completed` + grace. Verification: manual telephony test correlating the `intake_completed` → `closing_response_started` → `closing_response_completed` → `call_hangup_started` → `call_hangup_completed` structured log sequence.
+- Post-deploy smoke check for the `breakdown_tickets` → `assistance_requests` rename: apply the rename migration in the deployed environment, then place one real call that completes intake. Acceptance: exactly one row lands in `assistance_requests`, the `assistance_requests_pkey` and `assistance_requests_call_id_key` constraints exist, the `assistance_requests` RLS policy is attached and enforced, dispatcher SMS arrives with the "New assistance request" copy, and no query or write touches a `breakdown_tickets` table. Verification: live Twilio call plus SQL inspection of table name, constraints, row contents, and policy attachment in the deployed database.
 - Migrate FastAPI startup validation from deprecated `@app.on_event("startup")` to `lifespan` context manager
 - Add unit test for `Settings` validation that asserts `ValidationError` when env vars are missing
-- Add unit tests for `TicketArgs` Pydantic validation and `CREATE_BREAKDOWN_TICKET_TOOL` schema shape
+- Add unit tests for `AssistanceRequestArgs` Pydantic validation and `UPDATE_ASSISTANCE_REQUEST_TOOL` schema shape
 - Add unit tests for `CallState` and `CallStateManager` (create/get/remove/isolation) and integration tests verifying tool handlers update state correctly
 - Suppress `response.create` for spurious post-greeting input (transcription-based filtering): enable input audio transcription and gate `caller_turn_complete` responses on the committed turn's transcript so empty/filler-only commits (call-setup noise or greeting echo) do not trigger an assistant response. Acceptance: a commit with no speech does not create a response; a commit with real speech creates exactly one. Verification: unit tests feed `conversation.item.input_audio_transcription.completed` with empty vs real transcripts and assert `response.create` counts
 - Live end-to-end regression check: place a real call and verify the agent speaks exactly one fixed greeting and then stays silent until the caller speaks (no immediate "OK, let's get some information..."). Acceptance: for N test calls, no unsolicited second response before caller speech. Verification: manual telephony test against prod/staging using the new `response_create_sent` + `input_audio_buffer.*` structured logs
@@ -1111,9 +1112,9 @@ The MVP is complete when all of the following work:
 - Reconcile the unused `intake_status` column with the `status`-driven lifecycle: the nullable-intake migration added `intake_status` (`in_progress`/`completed`/`abandoned`/`escalated`, default `in_progress`) but application code drives the lifecycle exclusively through the free-text `status` column, so every row created after the migration sits at `intake_status='in_progress'` forever. Acceptance: either each lifecycle transition updates `intake_status` in tandem with `status`, or the column is dropped before any consumer relies on it; no code path leaves a misleading `intake_status` value. Verification: unit/integration tests assert `intake_status` tracks every transition (or a migration test asserts the column is gone); grep shows no divergence between the two fields.
 - Recover from a timed-out early assistance-request insert so no row is stuck open: `start_assistance_request` is bounded by the voice-webhook timeout, but the underlying insert thread can still commit `in_progress` after the terminal status callback (or teardown) has already run its no-op finalization, leaving an open row with no further Twilio events coming. Acceptance: a row whose insert commits after its call reached a terminal status still ends non-open — either the resolved insert re-checks a recorded terminal-status receipt for that `call_sid`, or the status-callback path retries briefly when the row does not exist yet. Verification: unit tests drive a stalled insert resolving after `abandon_if_open` ran and assert the row is finalized; the early-connection, webhook, and status-callback suites still pass.
 - Lock the status no-overwrite guards against Supabase client regressions: `complete_intake` and `abandon_if_open` rely on `.update().eq().in_()` serialization, but today that is only asserted through mocked call chains, so a client-library change to filter encoding would go unnoticed. Acceptance: a test exercises the real postgrest query construction used by both finalizers (generated request path/filters asserted, or executed against an available Supabase/PostgREST instance) and proves `completed`/`escalated` rows are excluded while open rows match. Verification: `python -m pytest tests/ -v` passes with the new test; it skips cleanly when no live database is available, matching the migration-test convention.
-- Dispatcher ticket dashboard
-- Supabase Realtime ticket updates
-- `/api/v1/tickets` endpoint if a dedicated backend API becomes necessary
+- Dispatcher assistance-request dashboard
+- Supabase Realtime assistance-request updates
+- `/api/v1/assistance-requests` endpoint if a dedicated backend API becomes necessary
 - Rate limiting
 - Advanced retry/recovery workflows
 - Better notification delivery tracking
