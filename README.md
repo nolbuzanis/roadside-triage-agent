@@ -166,6 +166,20 @@ POST https://<your-ngrok-id>.ngrok.io/api/v1/twilio/voice
 2. **Local WebSocket test**: Connect to `ws://localhost:8000/api/v1/twilio/media-stream` to verify the WebSocket endpoint accepts connections
 3. **End-to-end test**: Call your Twilio phone number — the call should connect and the voice assistant should begin speaking
 
+### Run the Dispatcher Dashboard
+
+The read-only dispatcher UI lives in `frontend/` (Vite + React + TypeScript). It authenticates with the single dispatcher Supabase Auth account and reads `assistance_requests` using only the public Supabase URL and anon/publishable key.
+
+```bash
+cd frontend
+npm install
+cp .env.example .env.local
+# Fill VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in .env.local
+npm run dev
+```
+
+Open [http://localhost:3000](http://localhost:3000) and sign in with the dispatcher account created in [Create the Dispatcher Account (One-Time)](#create-the-dispatcher-account-one-time). Never put `SUPABASE_SERVICE_ROLE_KEY` in the frontend environment.
+
 ---
 
 ## Project Structure
@@ -209,6 +223,12 @@ tests/
 supabase/
   config.toml                      # Supabase CLI configuration
   migrations/                      # SQL migrations (table, RLS, webhooks)
+frontend/
+  index.html                       # Dispatcher dashboard entry point
+  src/
+    App.tsx                        # Session gate (auth screen vs dashboard)
+    components/                    # AuthScreen, Dashboard, RequestCard
+    lib/supabaseClient.ts          # Public Supabase client (anon key only)
 ```
 
 ---
