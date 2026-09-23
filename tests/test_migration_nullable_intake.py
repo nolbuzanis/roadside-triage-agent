@@ -328,13 +328,16 @@ class TestStatusUnchanged:
         assert updated is not None
         assert updated["status"] == "escalated"
 
-    def test_historical_status_values_preserved(self, migration_db: MigrationDb) -> None:
+    def test_historical_status_finalized_by_backfill(self, migration_db: MigrationDb) -> None:
+        """After the full chain, the legacy pending row is finalized by the
+        one-time open-status backfill (full intake → completed); escalated
+        and other terminal statuses are never overwritten."""
         rows = migration_db.conn.execute(
             "select call_id, status from breakdown_tickets where call_id in (%s, %s)",
             (SEED_CALL_PENDING, SEED_CALL_ESCALATED),
         ).fetchall()
         status_by_call = {row["call_id"]: row["status"] for row in rows}
-        assert status_by_call[SEED_CALL_PENDING] == "pending"
+        assert status_by_call[SEED_CALL_PENDING] == "completed"
         assert status_by_call[SEED_CALL_ESCALATED] == "escalated"
 
 
