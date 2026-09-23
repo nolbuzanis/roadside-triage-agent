@@ -22,6 +22,8 @@ from app.services.emergency import transfer_call
 from app.services.hangup import hangup_call
 from app.services.notifier import notify_dispatcher
 from app.services.tickets import (
+    abandon_if_open,
+    complete_intake,
     create_ticket,
     is_intake_complete,
     start_assistance_request,
@@ -94,6 +96,11 @@ async def handle_create_breakdown_ticket(
         call_sid=call_sid,
         ticket_id=ticket.get("id"),
     )
+
+    # Finalize the intake lifecycle status alongside the completion path.
+    # Guarded update: open rows become completed, abandoned rows self-heal
+    # (backfill-in-flight calls), and escalated/completed are never touched.
+    await asyncio.to_thread(complete_intake, call_id=call_sid or "unknown")
 
     # Completion-gated SMS: fire only while notification_status is still pending
     # so a retried completing call never re-sends.
@@ -390,6 +397,55 @@ async def twilio_voice_webhook(request: Request) -> PlainTextResponse:
     return PlainTextResponse(twiml, media_type="application/xml")
 
 
+# Terminal Twilio call statuses that mean the call is over. Covers calls that
+# end before the Media Stream connects, where no WebSocket teardown ever runs.
+_TERMINAL_CALL_STATUSES = frozenset(
+    {"completed", "busy", "failed", "no-answer", "canceled"}
+)
+
+
+@router.post("/twilio/status")
+async def twilio_status_callback(request: Request) -> PlainTextResponse:
+    """Finalize the assistance request when Twilio reports a terminal call status.
+
+    Covers pre-stream termination (caller hangs up before the Media Stream
+    connects), where no WebSocket teardown ever runs. Validated with the same
+    Twilio signature check as the voice webhook. The abandon update is guarded
+    so only still-open rows flip to 'abandoned' — 'completed' and 'escalated'
+    rows are never overwritten, and retried callbacks are idempotent.
+    """
+    twilio_signature = request.headers.get("X-Twilio-Signature", "")
+    form = await request.form()
+    params = {k: str(v) for k, v in form.items()}
+
+    url = _reconstruct_twilio_url(request)
+
+    if not _validate_twilio_request(url, twilio_signature, params):
+        logger.warning("Invalid Twilio signature", url=url)
+        return PlainTextResponse("Invalid request", status_code=403)
+
+    call_sid = params.get("CallSid", "unknown")
+    call_status = params.get("CallStatus", "unknown")
+
+    logger.info(
+        "twilio_status_callback",
+        call_sid=call_sid,
+        call_status=call_status,
+    )
+
+    if call_status in _TERMINAL_CALL_STATUSES:
+        try:
+            await asyncio.to_thread(abandon_if_open, call_id=call_sid)
+        except Exception:
+            logger.exception(
+                "Failed to finalize intake status from status callback",
+                call_sid=call_sid,
+                call_status=call_status,
+            )
+
+    return PlainTextResponse("", status_code=200)
+
+
 @router.websocket("/twilio/media-stream")
 async def twilio_media_stream(websocket: WebSocket) -> None:
     """Handle Twilio Media Stream WebSocket connection.
@@ -606,6 +662,15 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                     await pending.session.close()
 
         if call_sid:
+            # Finalize the intake row on disconnect: the guarded update flips
+            # only still-open rows to abandoned (completed/escalated are never
+            # overwritten) and never raises out of teardown.
+            try:
+                await asyncio.to_thread(abandon_if_open, call_id=call_sid)
+            except Exception:
+                logger.exception(
+                    "Failed to finalize intake status on teardown", call_sid=call_sid
+                )
             call_manager.remove(call_sid)
         if session:
             await session.close()

@@ -200,3 +200,67 @@ def update_notification_status(*, call_id: str, status: str) -> None:
         logger.info("Notification status updated", call_id=call_id, status=status)
     except Exception:
         logger.exception("Failed to update notification status", call_id=call_id)
+
+
+# Statuses considered still open in the intake lifecycle.
+_OPEN_STATUSES = ("pending", "in_progress")
+
+
+def complete_intake(*, call_id: str) -> None:
+    """Set the assistance request's status to 'completed' when intake completes.
+
+    Guarded update: only 'pending'/'in_progress' rows and 'abandoned' rows
+    (self-heal for calls in flight during the one-time backfill) are flipped;
+    'escalated' and already-'completed' rows are never overwritten, so retried
+    completions are idempotent. Non-blocking: logs failures but does not raise.
+    """
+    try:
+        supabase = _get_supabase()
+        result = (
+            supabase.table("breakdown_tickets")
+            .update({"status": "completed"})
+            .eq("call_id", call_id)
+            .in_("status", [*_OPEN_STATUSES, "abandoned"])
+            .execute()
+        )
+        rows_updated = len(result.data or [])
+        logger.info(
+            "Intake status finalized",
+            call_id=call_id,
+            status="completed",
+            rows_updated=rows_updated,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to finalize intake status", call_id=call_id, status="completed"
+        )
+
+
+def abandon_if_open(*, call_id: str) -> None:
+    """Flip a still-open assistance request's status to 'abandoned'.
+
+    Only 'pending'/'in_progress' rows are updated: 'completed' and 'escalated'
+    are never overwritten, and an already-'abandoned' row matches nothing, so
+    duplicate teardowns and retried Twilio status callbacks are idempotent.
+    Non-blocking: logs failures but does not raise.
+    """
+    try:
+        supabase = _get_supabase()
+        result = (
+            supabase.table("breakdown_tickets")
+            .update({"status": "abandoned"})
+            .eq("call_id", call_id)
+            .in_("status", list(_OPEN_STATUSES))
+            .execute()
+        )
+        rows_updated = len(result.data or [])
+        logger.info(
+            "Intake status finalized",
+            call_id=call_id,
+            status="abandoned",
+            rows_updated=rows_updated,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to finalize intake status", call_id=call_id, status="abandoned"
+        )

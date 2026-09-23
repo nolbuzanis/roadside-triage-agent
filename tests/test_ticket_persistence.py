@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -837,3 +838,176 @@ class TestUpdateNotificationStatus:
 
         # Should not raise
         update_notification_status(call_id="CA_err", status="sent")
+
+
+# ---------------------------------------------------------------------------
+# complete_intake
+# ---------------------------------------------------------------------------
+
+
+def _mock_guarded_update(*, rows_updated: int = 1) -> MagicMock:
+    """Build a mock Supabase client for update().eq().in_().execute() chains."""
+    sb = MagicMock()
+    table = MagicMock()
+    sb.table.return_value = table
+    update_mock = MagicMock()
+    table.update.return_value = update_mock
+    eq_mock = MagicMock()
+    update_mock.eq.return_value = eq_mock
+    in_mock = MagicMock()
+    eq_mock.in_.return_value = in_mock
+    execute_result = MagicMock()
+    execute_result.data = [{"call_id": "CA_x"}] * rows_updated
+    in_mock.execute.return_value = execute_result
+    return sb
+
+
+class TestCompleteIntake:
+    """Tests for the completion status finalizer."""
+
+    @patch("app.services.tickets._get_supabase")
+    def test_sets_status_to_completed(self, mock_get_sb: MagicMock) -> None:
+        sb = _mock_guarded_update()
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import complete_intake
+
+        complete_intake(call_id="CA_done")
+
+        update_payload = sb.table.return_value.update.call_args[0][0]
+        assert update_payload == {"status": "completed"}
+
+    @patch("app.services.tickets._get_supabase")
+    def test_filters_by_call_id(self, mock_get_sb: MagicMock) -> None:
+        sb = _mock_guarded_update()
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import complete_intake
+
+        complete_intake(call_id="CA_specific")
+
+        sb.table.return_value.update.return_value.eq.assert_called_once_with(
+            "call_id", "CA_specific"
+        )
+
+    @patch("app.services.tickets._get_supabase")
+    def test_guard_allows_open_and_abandoned_only(self, mock_get_sb: MagicMock) -> None:
+        """The guard must flip open rows and self-heal abandoned rows, never escalated."""
+        sb = _mock_guarded_update()
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import complete_intake
+
+        complete_intake(call_id="CA_guard")
+
+        in_mock = sb.table.return_value.update.return_value.eq.return_value.in_
+        in_mock.assert_called_once_with(
+            "status", ["pending", "in_progress", "abandoned"]
+        )
+
+    @patch("app.services.tickets._get_supabase")
+    def test_logs_rows_updated(self, mock_get_sb: MagicMock, caplog: pytest.LogCaptureFixture) -> None:
+        sb = _mock_guarded_update(rows_updated=0)
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import complete_intake
+
+        with caplog.at_level("INFO"):
+            complete_intake(call_id="CA_norow")
+
+        events = [
+            json.loads(r.message)
+            for r in caplog.records
+            if r.message.startswith("{")
+        ]
+        finalized = [e for e in events if e.get("event") == "Intake status finalized"]
+        assert finalized, "expected an 'Intake status finalized' log event"
+        assert finalized[0]["rows_updated"] == 0
+        assert finalized[0]["status"] == "completed"
+
+    @patch("app.services.tickets._get_supabase")
+    def test_exception_is_swallowed(self, mock_get_sb: MagicMock) -> None:
+        sb = MagicMock()
+        sb.table.return_value.update.side_effect = RuntimeError("DB down")
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import complete_intake
+
+        # Should not raise
+        complete_intake(call_id="CA_err")
+
+
+# ---------------------------------------------------------------------------
+# abandon_if_open
+# ---------------------------------------------------------------------------
+
+
+class TestAbandonIfOpen:
+    """Tests for the open-row abandonment finalizer."""
+
+    @patch("app.services.tickets._get_supabase")
+    def test_sets_status_to_abandoned(self, mock_get_sb: MagicMock) -> None:
+        sb = _mock_guarded_update()
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import abandon_if_open
+
+        abandon_if_open(call_id="CA_gone")
+
+        update_payload = sb.table.return_value.update.call_args[0][0]
+        assert update_payload == {"status": "abandoned"}
+
+    @patch("app.services.tickets._get_supabase")
+    def test_filters_by_call_id(self, mock_get_sb: MagicMock) -> None:
+        sb = _mock_guarded_update()
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import abandon_if_open
+
+        abandon_if_open(call_id="CA_specific")
+
+        sb.table.return_value.update.return_value.eq.assert_called_once_with(
+            "call_id", "CA_specific"
+        )
+
+    @patch("app.services.tickets._get_supabase")
+    def test_guard_excludes_completed_and_escalated(self, mock_get_sb: MagicMock) -> None:
+        """Only still-open rows may flip to abandoned."""
+        sb = _mock_guarded_update()
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import abandon_if_open
+
+        abandon_if_open(call_id="CA_guard")
+
+        in_mock = sb.table.return_value.update.return_value.eq.return_value.in_
+        in_mock.assert_called_once_with("status", ["pending", "in_progress"])
+        allowed = in_mock.call_args[0][1]
+        assert "completed" not in allowed
+        assert "escalated" not in allowed
+
+    @patch("app.services.tickets._get_supabase")
+    def test_zero_matched_rows_is_a_no_op(self, mock_get_sb: MagicMock) -> None:
+        """A retried callback against an already-finalized row matches nothing and does not raise."""
+        sb = _mock_guarded_update(rows_updated=0)
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import abandon_if_open
+
+        abandon_if_open(call_id="CA_retry")
+
+        execute_mock = (
+            sb.table.return_value.update.return_value.eq.return_value.in_.return_value.execute
+        )
+        execute_mock.assert_called_once()
+
+    @patch("app.services.tickets._get_supabase")
+    def test_exception_is_swallowed(self, mock_get_sb: MagicMock) -> None:
+        sb = MagicMock()
+        sb.table.return_value.update.side_effect = RuntimeError("Timeout")
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import abandon_if_open
+
+        # Should not raise
+        abandon_if_open(call_id="CA_err")

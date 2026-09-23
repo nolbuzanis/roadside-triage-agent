@@ -47,6 +47,13 @@ def _mock_start_assistance_request() -> Generator[MagicMock]:
         yield mock_start
 
 
+@pytest.fixture(autouse=True)
+def _mock_abandon_if_open() -> Generator[MagicMock]:
+    """Mock status finalization so these tests never hit Supabase."""
+    with patch("app.api.twilio.abandon_if_open") as mock_abandon:
+        yield mock_abandon
+
+
 @patch("app.api.twilio._validate_twilio_request")
 def test_valid_twilio_request_returns_twiml(mock_validate: MagicMock) -> None:
     """A valid Twilio request should return TwiML XML with a Media Stream."""
@@ -640,3 +647,159 @@ def test_webhook_retry_calls_start_with_same_call_id(
     assert _mock_start_assistance_request.call_count == 2
     for call in _mock_start_assistance_request.call_args_list:
         assert call.kwargs["call_id"] == "CA_test_call_sid_123"
+
+
+# ---------------------------------------------------------------------------
+# Call status callback (pre-stream termination finalization)
+# ---------------------------------------------------------------------------
+
+STATUS_CALLBACK_PATH = "/api/v1/twilio/status"
+
+TERMINAL_STATUSES = ("completed", "busy", "failed", "no-answer", "canceled")
+NON_TERMINAL_STATUSES = ("initiated", "ringing", "in-progress")
+
+
+@patch("app.api.twilio._validate_twilio_request")
+@pytest.mark.parametrize("call_status", TERMINAL_STATUSES)
+def test_terminal_status_finalizes_open_row(
+    mock_validate: MagicMock,
+    _mock_abandon_if_open: MagicMock,
+    call_status: str,
+) -> None:
+    """A terminal call status abandons the still-open row by call_id."""
+    mock_validate.return_value = True
+
+    response = client.post(
+        STATUS_CALLBACK_PATH,
+        data={**TWILIO_PARAMS, "CallStatus": call_status},
+        headers=_make_twilio_headers(),
+    )
+
+    assert response.status_code == 200
+    _mock_abandon_if_open.assert_called_once_with(
+        call_id="CA_test_call_sid_123"
+    )
+
+
+@patch("app.api.twilio._validate_twilio_request")
+@pytest.mark.parametrize("call_status", NON_TERMINAL_STATUSES)
+def test_non_terminal_status_does_not_finalize(
+    mock_validate: MagicMock,
+    _mock_abandon_if_open: MagicMock,
+    call_status: str,
+) -> None:
+    """Non-terminal statuses (e.g. ringing) leave the row untouched."""
+    mock_validate.return_value = True
+
+    response = client.post(
+        STATUS_CALLBACK_PATH,
+        data={**TWILIO_PARAMS, "CallStatus": call_status},
+        headers=_make_twilio_headers(),
+    )
+
+    assert response.status_code == 200
+    _mock_abandon_if_open.assert_not_called()
+
+
+@patch("app.api.twilio._validate_twilio_request")
+def test_invalid_signature_rejected_and_no_finalize(
+    mock_validate: MagicMock,
+    _mock_abandon_if_open: MagicMock,
+) -> None:
+    """An invalid Twilio signature returns 403 and never touches the row."""
+    mock_validate.return_value = False
+
+    response = client.post(
+        STATUS_CALLBACK_PATH,
+        data={**TWILIO_PARAMS, "CallStatus": "completed"},
+        headers=_make_twilio_headers(signature="bad_signature"),
+    )
+
+    assert response.status_code == 403
+    _mock_abandon_if_open.assert_not_called()
+
+
+@patch("app.api.twilio._validate_twilio_request")
+def test_missing_signature_rejected(
+    mock_validate: MagicMock,
+    _mock_abandon_if_open: MagicMock,
+) -> None:
+    """A request with no Twilio signature is rejected."""
+    mock_validate.return_value = False
+
+    response = client.post(
+        STATUS_CALLBACK_PATH,
+        data={**TWILIO_PARAMS, "CallStatus": "completed"},
+        headers={"Host": "example.com", "x-forwarded-proto": "https"},
+    )
+
+    assert response.status_code == 403
+    _mock_abandon_if_open.assert_not_called()
+
+
+@patch("app.api.twilio._validate_twilio_request")
+def test_retried_callback_is_idempotent(
+    mock_validate: MagicMock,
+    _mock_abandon_if_open: MagicMock,
+) -> None:
+    """A retried callback re-invokes the guarded finalizer (idempotent at DB)."""
+    mock_validate.return_value = True
+    status_data = {**TWILIO_PARAMS, "CallStatus": "completed"}
+
+    first = client.post(
+        STATUS_CALLBACK_PATH, data=status_data, headers=_make_twilio_headers()
+    )
+    second = client.post(
+        STATUS_CALLBACK_PATH, data=status_data, headers=_make_twilio_headers()
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert _mock_abandon_if_open.call_count == 2
+    for call in _mock_abandon_if_open.call_args_list:
+        assert call.kwargs["call_id"] == "CA_test_call_sid_123"
+
+
+@patch("app.api.twilio._validate_twilio_request")
+def test_status_callback_logs_event(
+    mock_validate: MagicMock,
+    _mock_abandon_if_open: MagicMock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The callback logs a structured event with call_id and call_status."""
+    mock_validate.return_value = True
+
+    with caplog.at_level("INFO"):
+        client.post(
+            STATUS_CALLBACK_PATH,
+            data={**TWILIO_PARAMS, "CallStatus": "no-answer"},
+            headers=_make_twilio_headers(),
+        )
+
+    events = [
+        json.loads(r.message)
+        for r in caplog.records
+        if r.message.startswith("{")
+    ]
+    logged = [e for e in events if e.get("event") == "twilio_status_callback"]
+    assert logged, "expected a twilio_status_callback log event"
+    assert logged[0]["call_sid"] == "CA_test_call_sid_123"
+    assert logged[0]["call_status"] == "no-answer"
+
+
+@patch("app.api.twilio._validate_twilio_request")
+def test_status_callback_failure_does_not_crash(
+    mock_validate: MagicMock,
+    _mock_abandon_if_open: MagicMock,
+) -> None:
+    """A finalizer failure is swallowed; Twilio still gets a 2xx reply."""
+    mock_validate.return_value = True
+    _mock_abandon_if_open.side_effect = RuntimeError("DB down")
+
+    response = client.post(
+        STATUS_CALLBACK_PATH,
+        data={**TWILIO_PARAMS, "CallStatus": "completed"},
+        headers=_make_twilio_headers(),
+    )
+
+    assert response.status_code == 200

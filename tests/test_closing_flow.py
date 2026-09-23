@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Generator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -12,6 +13,13 @@ from app.realtime.instructions import CLOSING_MESSAGE
 from app.realtime.session import CLOSING_HANGUP_GRACE_SECONDS, RealtimeSession
 from app.services.calls import call_manager
 from app.services.hangup import hangup_call
+
+
+@pytest.fixture(autouse=True)
+def _mock_complete_intake() -> Generator[None]:
+    """Keep handler-driven tests off the real database."""
+    with patch("app.api.twilio.complete_intake"):
+        yield
 
 # ---------------------------------------------------------------------------
 # Helpers
