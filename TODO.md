@@ -1097,6 +1097,7 @@ The MVP is complete when all of the following work:
 - Extract a shared Twilio client factory (e.g. `get_twilio_client()`) used by `app/services/emergency.py` and `app/services/hangup.py` so call-control operations do not each construct `TwilioClient(settings...)` independently. Acceptance: a single construction site builds the client from settings; transfer and hangup behavior unchanged. Verification: existing emergency and hangup unit tests pass (patch points updated to the factory); grep shows one `TwilioClient(` construction in `app/`.
 - Live end-to-end regression check for the closing flow: place a real call, complete intake, and confirm the agent speaks exactly the fixed closing line and Twilio hangs up after the audio finishes with no extra questions. Acceptance: for N test calls, the spoken closing matches `CLOSING_MESSAGE` and the call terminates after `closing_response_completed` + grace. Verification: manual telephony test correlating the `intake_completed` → `closing_response_started` → `closing_response_completed` → `call_hangup_started` → `call_hangup_completed` structured log sequence.
 - Post-deploy smoke check for the `breakdown_tickets` → `assistance_requests` rename: apply the rename migration in the deployed environment, then place one real call that completes intake. Acceptance: exactly one row lands in `assistance_requests`, the `assistance_requests_pkey` and `assistance_requests_call_id_key` constraints exist, the `assistance_requests` RLS policy is attached and enforced, dispatcher SMS arrives with the "New assistance request" copy, and no query or write touches a `breakdown_tickets` table. Verification: live Twilio call plus SQL inspection of table name, constraints, row contents, and policy attachment in the deployed database.
+- Post-deploy smoke check for single-dispatcher authentication: after pushing the dispatcher read-access migration to the hosted Supabase project, create the one dispatcher Auth user per the README setup, confirm public sign-ups are disabled in the hosted dashboard (local `config.toml` only affects local development), and verify the account can sign in and `SELECT` from `assistance_requests` using only the public Supabase URL plus the anon/publishable key. Acceptance: anon/unauthenticated queries return no rows, the dispatcher account authenticates and reads requests, and no service-role key is used client-side. Verification: hosted Supabase dashboard steps plus a PostgREST/curl check with the anon key (zero rows) and with the dispatcher's session token (rows returned).
 - Migrate FastAPI startup validation from deprecated `@app.on_event("startup")` to `lifespan` context manager
 - Add unit test for `Settings` validation that asserts `ValidationError` when env vars are missing
 - Add unit tests for `AssistanceRequestArgs` Pydantic validation and `UPDATE_ASSISTANCE_REQUEST_TOOL` schema shape
@@ -1221,7 +1222,7 @@ Add the minimum authentication/security required for a private dispatcher dashbo
 
 ### Status
 
-- [ ] Not started
+- [x] Completed in `feat/configure-dispatcher-auth-read-access` PR
 
 ---
 
