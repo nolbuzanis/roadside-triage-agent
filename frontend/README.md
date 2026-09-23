@@ -45,5 +45,6 @@ This first version is intentionally minimal and read-only:
 - per-request started time, caller phone, location, vehicle, issue, and intake status
 - missing active fields shown as `Collecting…`, missing terminal fields as `Not collected`
 - escalated requests visually distinct
+- live INSERT/UPDATE updates via Supabase Realtime (deduplicated by row `id`, with a connection indicator in the header); the subscription is removed on sign-out/unmount
 
-No editing, search, analytics, maps, or realtime updates yet.
+No editing, search, analytics, or maps.
