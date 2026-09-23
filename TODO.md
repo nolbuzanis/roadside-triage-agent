@@ -1117,6 +1117,8 @@ The MVP is complete when all of the following work:
 - `/api/v1/assistance-requests` endpoint if a dedicated backend API becomes necessary
 - Add unit tests for the dispatcher dashboard's pure display logic using a frontend test runner (e.g. Vitest): placeholder resolution (`Collecting…` for missing fields on `in_progress` requests, `Not collected` on terminal requests, real values for non-empty strings, null/undefined/empty/whitespace-only inputs handled) and the Active/Past partition (`in_progress` → Active; `completed`/`abandoned`/`escalated` → Past). Acceptance: a documented `npm test` script in `frontend/` runs the tests offline with no Supabase network dependency. Verification: `cd frontend && npm test` passes with coverage of the placeholder and partition cases alongside any extracted helpers.
 - Execute and record a manual browser smoke checklist for the dispatcher dashboard once the dispatcher Auth account exists: unauthenticated visit shows only the auth screen; sign-in opens the dashboard; refresh restores the session; Active/Past sections, `Collecting…`/`Not collected` placeholders, and escalated styling render correctly; sign-out returns to the auth screen; layout works at desktop and tablet widths. Acceptance: each checklist item performed against a running build with real dispatcher credentials and recorded (notes or screenshots linked from the follow-up). Verification: checklist completed after hosted dispatcher-user setup (see the dispatcher-auth post-deploy smoke item above).
+- Backfill the dispatcher dashboard when the realtime subscription reconnects: after a `CHANNEL_ERROR` / `TIMED_OUT` / `CLOSED` state later returns to `SUBSCRIBED`, re-run the initial `assistance_requests` query so INSERT/UPDATE events committed during the outage are recovered instead of silently missing while the indicator shows "Live". Acceptance: a simulated disconnect/reconnect cycle ends with dashboard state matching a fresh page load. Verification: frontend unit test drives the subscribe callback through error → `SUBSCRIBED` and asserts the load query runs again; manual smoke with a dropped network confirms missed rows appear.
+- Maintain `updated_at` on `assistance_requests` writes (e.g. a `BEFORE UPDATE` trigger setting `updated_at = now()`, or explicit sets in backend update paths) so the stale-update guard in `frontend/src/lib/requestList.ts` `preferNewer` is meaningful rather than relying on commit-ordered delivery. Acceptance: an UPDATE write advances `updated_at`; realtime payloads carry the new value. Verification: migration test asserts the trigger fires on update and existing suites still pass.
 - Rate limiting
 - Advanced retry/recovery workflows
 - Better notification delivery tracking
@@ -1305,7 +1307,7 @@ Make the dashboard update automatically as calls arrive and intake progresses. U
 
 ### Status
 
-- [ ] Not started
+- [x] Completed in `feat/supabase-realtime-assistance-updates` PR
 
 ---
 
