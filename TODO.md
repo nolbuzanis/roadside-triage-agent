@@ -101,7 +101,7 @@ Convert `create_ticket` into a merge-upsert keyed by `call_id` so an existing ro
 - Upsert keyed by `call_id`: insert when missing, merge only non-empty provided fields when present, never null-out previously saved values
 - `TicketArgs` accepts optional `location`/`vehicle`/`issue` (at least one required); reject only when there is nothing to save
 - Completion = row has non-empty location, vehicle, and issue after merge; only then fire `notify_dispatcher` once (guard on `notification_status == "pending"`) and return tool result `status = "created"` — preserving the closing-flow contract in `session.py`
-- Partial saves return a distinct result status (e.g. `"updated"`): no SMS, no closing trigger, `status` column remains `pending`
+- Partial saves return a distinct result status (e.g. `"updated"`): no SMS, no closing trigger; the row's `status` column is left unchanged
 - Handle the concurrent duplicate `call_id` insert race atomically (on-conflict / `IntegrityError` → return existing row)
 
 ### Acceptance Criteria
@@ -124,7 +124,8 @@ Convert `create_ticket` into a merge-upsert keyed by `call_id` so an existing ro
 
 Every valid inbound call (after Twilio signature validation) idempotently creates exactly one request row with null intake fields, and the assistant persists each field as it is collected through the existing tool. Call state gains only an optional request-id field for log correlation — no new infrastructure.
 
-- After signature validation in the voice webhook, idempotently insert `{call_id, caller_phone, status: pending}` with null intake fields (on-conflict by `call_id` → return existing); log a distinct event (e.g. `assistance_request_started`); a creation failure is logged loudly but must not block the call path
+- After signature validation in the voice webhook, idempotently insert `{call_id, caller_phone}` with `status = "in_progress"` and null intake fields (on-conflict by `call_id` → return existing); log a distinct event (e.g. `assistance_request_started`); a creation failure is logged loudly but must not block the call path
+- Every request insert while intake is open (early creation, or the tool's insert-when-missing fallback) sets `status = "in_progress"` explicitly — the new flow never relies on the legacy `pending` default, keeping open rows unambiguous for finalization and the future dashboard
 - Carry `assistance_request_id` through `EarlyConnection` → `CallState` (one optional field each); keep keying all DB writes by `call_id`
 - Open the model-facing tool schema (all-optional `required`), update tool description and system instructions: save each piece as it is collected and call again to update; the completing call must still return `status = "created"`
 - Keep notification logic where it is (completion path from the previous task); explicitly verify the initial insert sends no SMS
@@ -132,7 +133,7 @@ Every valid inbound call (after Twilio signature validation) idempotently create
 
 ### Acceptance Criteria
 
-- Valid voice webhook → exactly one row per `call_id` with null intake fields and zero dispatcher SMS; invalid signature → 403 and no row
+- Valid voice webhook → exactly one row per `call_id` with null intake fields, status `in_progress`, and zero dispatcher SMS; invalid signature → 403 and no row
 - Twilio webhook retry/duplicate for the same call still yields exactly one row
 - Two concurrent calls create two isolated rows mapped to the correct calls
 - Progressive tool calls persist fields as collected and preserve previously saved fields
@@ -147,22 +148,27 @@ Every valid inbound call (after Twilio signature validation) idempotently create
 
 - [ ] Not started
 
-## P0 — Finalize status on completion, disconnect, and emergency
+## P0 — Finalize intake status on completion, disconnect, and emergency
 
-Give each request a terminal status: `completed` when intake finishes, `abandoned` when the caller disconnects with the request still open (preserving whatever partial data was collected), and never overwrite `escalated`. `status` is free text — no schema change required.
+Ensure every created request eventually leaves the open (`in_progress`) status — including calls that terminate before the Media Stream is established, where no WebSocket teardown ever runs. Use the existing Media Stream teardown where available, and add the minimum Twilio call-status handling needed for pre-stream termination. `status` stays free text — no column changes required.
 
 - Completion path (same place SMS fires) sets `status = "completed"` when intake first completes
-- Media-stream teardown `finally`: if the row's status is still `pending`, non-blocking update to `abandoned`; log the result and never raise from teardown
-- Abandonment must not overwrite `completed` or `escalated`; emergency escalation (`_record_escalation`) must not be blocked by or clobber partial intake fields — verify both sets of fields are retained
+- Media Stream teardown `finally`: if the row is still `in_progress`, non-blocking update to `abandoned`; log the result and never raise from teardown
+- Pre-stream termination: add a Twilio Voice status-callback route (e.g. `POST /api/v1/twilio/status`) for terminal call statuses (`completed`, `busy`, `failed`, `no-answer`, `canceled`), configured on the Twilio number alongside the existing voice webhook and validated with the same `RequestValidator` signature check; finalize the row by `call_id` only if still open — one route plus Twilio config, not a new subsystem; document it in README's Twilio setup
+- Both finalization paths share the same guard: only open rows flip to `abandoned`; never overwrite `completed` or `escalated` (covers the Twilio `completed` callback arriving after a normal or emergency call); duplicate/retried callbacks are idempotent
+- One-time backfill in the same migration so no pre-existing row is stuck open: rows in `pending`/`in_progress` with non-empty location, vehicle, and issue → `completed`; rows still missing intake fields → `abandoned` (legacy `pending` rows were only ever created on full intake, so they end `completed`); the completion hook must self-heal `abandoned → completed` for any call in flight during the backfill
 - Live emergency transfer remains independent of any database write
 
 ### Acceptance Criteria
 
-- Mid-intake disconnect → row keeps all collected partial fields, status `abandoned`, still exactly one row per call
-- Successful completion → status `completed`; a later disconnect does not flip it to `abandoned`
-- Emergency call → status `escalated` with `hazard_reason` plus whatever intake fields were collected; later disconnect does not overwrite `escalated`
-- Teardown DB failure is logged and does not prevent WebSocket/session cleanup
-- Closing-flow and emergency-transfer test suites still pass; new tests cover abandonment and no-overwrite rules
+- Mid-intake Media Stream disconnect → collected partial fields preserved, status `abandoned`, still exactly one row per call
+- Caller hangs up before the Media Stream connects → status-callback path flips the open row to `abandoned` with no WebSocket teardown involved
+- Successful completion → status `completed`; later teardown and/or Twilio status callbacks do not flip it to `abandoned`
+- Emergency call → status `escalated` with `hazard_reason` plus whatever intake fields were collected; subsequent teardown/status-callback events do not overwrite it
+- Status-callback route rejects invalid Twilio signatures; retried callbacks are idempotent
+- Backfill converts only `status` values per the rules above; row count and all intake/hazard/notification data unchanged; no row remains stuck in `pending` or `in_progress` after migration
+- DB failures during teardown/callback are logged and never crash request handling
+- Closing-flow and emergency suites pass; new tests cover abandonment, pre-stream termination, no-overwrite rules, callback signature/idempotency, and backfill
 
 ### Dependencies
 
@@ -178,18 +184,20 @@ Stage the domain rename as a separate atomic change after the lifecycle behavior
 
 - Migration: `alter table breakdown_tickets rename to assistance_requests;` — production rows, PK, unique `call_id`, and the RLS policy move with the table; verify the policy is still attached
 - Update service/table references, health check, handler and tool name (`create_breakdown_ticket` → `update_assistance_request`), system instructions, session `func_name` checks, structured log events, and call/session flag names
+- Rename completion semantics explicitly: `RealtimeSession.ticket_created` → `intake_completed`, matching `ticket_created` structured-log events, and remove the write-only `CallState.ticket_created` — the flag must mean "intake completed," never "a row exists"
 - Sweep terminology in README, PRODUCT, ARCHITECTURE, and this TODO's active specs; do not rewrite historical migration files or completed-history entries
 - Coordinate migration and application deploy (old code querying the old table name fails after rename — brief ordered deploy window, or a temporary compatibility view if ordering cannot be guaranteed)
 
 ### Acceptance Criteria
 
 - Zero `breakdown_ticket` references remain in `app/`, `tests/`, `supabase/` current schema expectations, or active docs (historical migration files and completed-history notes exempt)
+- No `ticket_created` flag/event names remain in code, tests, or active docs — replaced by `intake_completed` equivalents
 - Production row count, ids, and data unchanged after the rename migration; unique `call_id` and RLS still enforced
 - Full test suite passes under the new names; live smoke confirms one Twilio `call_id` maps to exactly one assistance request
 
 ### Dependencies
 
-- P0 — Finalize status on completion, disconnect, and emergency
+- P0 — Finalize intake status on completion, disconnect, and emergency
 
 ### Status
 
