@@ -1,0 +1,268 @@
+.app-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100svh;
+  color: var(--muted);
+}
+
+/* Auth screen */
+
+.auth-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100svh;
+  padding: 24px;
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 380px;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  padding: 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  text-align: center;
+}
+
+.auth-subtitle {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.auth-card label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-h);
+}
+
+.auth-card input {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-h);
+  background: var(--card-bg);
+}
+
+.auth-card input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
+
+.auth-card button {
+  padding: 10px 12px;
+  border: none;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.auth-card button:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.auth-card button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.auth-error {
+  color: var(--danger);
+  font-size: 14px;
+}
+
+/* Dashboard layout */
+
+.dashboard {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.dashboard-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.dispatcher-email {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.dashboard-header button {
+  padding: 8px 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card-bg);
+  color: var(--text-h);
+}
+
+.dashboard-header button:hover {
+  background: var(--neutral-bg);
+}
+
+.dashboard-error {
+  color: var(--danger);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  font-size: 14px;
+}
+
+.dashboard-empty,
+.section-empty {
+  color: var(--muted);
+  font-size: 14px;
+  padding: 16px 0;
+}
+
+.request-section {
+  margin-bottom: 32px;
+}
+
+.request-section h2 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 7px;
+  border-radius: 12px;
+  background: var(--neutral-bg);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+/* Request cards */
+
+.request-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  padding: 16px;
+}
+
+.request-card.escalated {
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+}
+
+.card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.card-top time {
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.status-badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.status-in_progress {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.status-completed {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.status-abandoned {
+  background: var(--neutral-bg);
+  color: var(--neutral);
+}
+
+.status-escalated {
+  background: var(--danger);
+  color: #ffffff;
+}
+
+.card-fields {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.card-fields > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.card-fields dt {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.card-fields dd {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-h);
+  overflow-wrap: anywhere;
+}
+
+/* Tablet / small desktop */
+
+@media (max-width: 768px) {
+  .dashboard {
+    padding: 16px;
+  }
+
+  .dashboard-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .card-grid {
+    grid-template-columns: 1fr;
+  }
+}
