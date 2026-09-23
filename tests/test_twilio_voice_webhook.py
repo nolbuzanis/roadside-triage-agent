@@ -1,6 +1,7 @@
 """Tests for the Twilio voice webhook endpoint."""
 
 import json
+from collections.abc import Generator
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -29,7 +30,7 @@ def _make_twilio_headers(signature: str = "valid_signature") -> dict[str, str]:
 
 
 @pytest.fixture(autouse=True)
-def _mock_start_assistance_request() -> MagicMock:
+def _mock_start_assistance_request() -> Generator[MagicMock]:
     """Mock early assistance-request creation so webhook tests never hit Supabase."""
     with patch(
         "app.api.twilio.start_assistance_request",

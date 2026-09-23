@@ -48,7 +48,7 @@ def start_assistance_request(
 
     existing = table.select("*").eq("call_id", call_id).execute()
     if existing.data:
-        return dict(existing.data[0])
+        return dict(existing.data[0])  # type: ignore[arg-type]
 
     row: dict[str, Any] = {
         "call_id": call_id,
@@ -66,9 +66,9 @@ def start_assistance_request(
         if not raced.data:
             raise
         logger.info("Assistance request insert race resolved", call_id=call_id)
-        return dict(raced.data[0])
+        return dict(raced.data[0])  # type: ignore[arg-type]
 
-    return dict(result.data[0]) if result.data else row
+    return dict(result.data[0]) if result.data else row  # type: ignore[arg-type]
 
 
 def create_ticket(
