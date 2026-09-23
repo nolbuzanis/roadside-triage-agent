@@ -1115,6 +1115,8 @@ The MVP is complete when all of the following work:
 - Dispatcher assistance-request dashboard
 - Supabase Realtime assistance-request updates
 - `/api/v1/assistance-requests` endpoint if a dedicated backend API becomes necessary
+- Add unit tests for the dispatcher dashboard's pure display logic using a frontend test runner (e.g. Vitest): placeholder resolution (`Collecting…` for missing fields on `in_progress` requests, `Not collected` on terminal requests, real values for non-empty strings, null/undefined/empty/whitespace-only inputs handled) and the Active/Past partition (`in_progress` → Active; `completed`/`abandoned`/`escalated` → Past). Acceptance: a documented `npm test` script in `frontend/` runs the tests offline with no Supabase network dependency. Verification: `cd frontend && npm test` passes with coverage of the placeholder and partition cases alongside any extracted helpers.
+- Execute and record a manual browser smoke checklist for the dispatcher dashboard once the dispatcher Auth account exists: unauthenticated visit shows only the auth screen; sign-in opens the dashboard; refresh restores the session; Active/Past sections, `Collecting…`/`Not collected` placeholders, and escalated styling render correctly; sign-out returns to the auth screen; layout works at desktop and tablet widths. Acceptance: each checklist item performed against a running build with real dispatcher credentials and recorded (notes or screenshots linked from the follow-up). Verification: checklist completed after hosted dispatcher-user setup (see the dispatcher-auth post-deploy smoke item above).
 - Rate limiting
 - Advanced retry/recovery workflows
 - Better notification delivery tracking
@@ -1270,7 +1272,7 @@ Create a small Vite + React + TypeScript dispatcher UI. The first version is rea
 
 ### Status
 
-- [ ] Not started
+- [x] Completed in `feat/minimal-dispatcher-dashboard` PR (automated verification passed: strict `tsc` build, oxlint, backend suite; live sign-in/session smoke deferred to the recorded manual smoke-checklist TODO above)
 
 ---
 

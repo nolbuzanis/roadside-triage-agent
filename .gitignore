@@ -18,6 +18,7 @@ downloads/
 eggs/
 .eggs/
 lib/
+!frontend/src/lib/
 lib64/
 parts/
 sdist/
@@ -47,5 +48,6 @@ Thumbs.db
 
 # Large data files
 *.html
+!frontend/index.html
 *.xml
 *.zip
