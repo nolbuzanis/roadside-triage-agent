@@ -22,6 +22,7 @@ from app.services.emergency import transfer_call
 from app.services.hangup import hangup_call
 from app.services.notifier import notify_dispatcher
 from app.services.tickets import (
+    abandon_if_open,
     complete_intake,
     create_ticket,
     is_intake_complete,
@@ -612,6 +613,15 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                     await pending.session.close()
 
         if call_sid:
+            # Finalize the intake row on disconnect: the guarded update flips
+            # only still-open rows to abandoned (completed/escalated are never
+            # overwritten) and never raises out of teardown.
+            try:
+                await asyncio.to_thread(abandon_if_open, call_id=call_sid)
+            except Exception:
+                logger.exception(
+                    "Failed to finalize intake status on teardown", call_sid=call_sid
+                )
             call_manager.remove(call_sid)
         if session:
             await session.close()
