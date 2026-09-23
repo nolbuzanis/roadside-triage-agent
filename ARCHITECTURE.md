@@ -71,7 +71,8 @@ cclass AssistanceRequest(Base):
     location: str        # Verbal cross-streets or landmark extracted by LLM
     vehicle: str         # Vehicle make, model, and color extracted by LLM
     issue: str           # Description of breakdown or mechanical problem
-    status: str          # Enum string: pending, dispatched, completed, escalated
+    status: str          # Free-text dispatcher/business workflow state (reserved for future use)
+    intake_status: str   # Canonical intake lifecycle: in_progress, completed, abandoned, escalated
     created_at: datetime # Record creation time (UTC)
     updated_at: datetime # Record last updated time (UTC)
 ```

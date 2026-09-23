@@ -82,6 +82,26 @@ class TestCreateTicketNew:
         insert_call = table.insert.call_args
         row = insert_call[0][0]
         assert row["status"] == "in_progress"
+        assert row["intake_status"] == "in_progress"
+
+    @patch("app.services.tickets._get_supabase")
+    def test_default_intake_status_is_in_progress(self, mock_get_sb: MagicMock) -> None:
+        sb = _mock_supabase()
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import create_ticket
+
+        create_ticket(
+            call_id="CA_intake_status",
+            caller_phone="+15550000000",
+            location="A",
+            vehicle="B",
+            issue="C",
+        )
+
+        table = sb.table.return_value
+        row = table.insert.call_args[0][0]
+        assert row["intake_status"] == "in_progress"
 
     @patch("app.services.tickets._get_supabase")
     def test_default_notification_status_is_pending(self, mock_get_sb: MagicMock) -> None:
@@ -195,6 +215,7 @@ class TestCreateTicketNew:
         assert "vehicle" not in row
         assert "issue" not in row
         assert row["status"] == "in_progress"
+        assert row["intake_status"] == "in_progress"
         assert row["notification_status"] == "pending"
 
 
@@ -482,6 +503,7 @@ class TestStartAssistanceRequest:
         assert row["call_id"] == "CA_early"
         assert row["caller_phone"] == "+15551234567"
         assert row["status"] == "in_progress"
+        assert row["intake_status"] == "in_progress"
         assert row["notification_status"] == "pending"
         assert "location" not in row
         assert "vehicle" not in row
@@ -747,6 +769,7 @@ class TestUpdateTicketHazard:
 
         update_payload = sb.table.return_value.update.call_args[0][0]
         assert update_payload["status"] == "escalated"
+        assert update_payload["intake_status"] == "escalated"
 
     @patch("app.services.tickets._get_supabase")
     def test_filters_by_call_id(self, mock_get_sb: MagicMock) -> None:
@@ -875,7 +898,7 @@ class TestCompleteIntake:
         complete_intake(call_id="CA_done")
 
         update_payload = sb.table.return_value.update.call_args[0][0]
-        assert update_payload == {"status": "completed"}
+        assert update_payload == {"status": "completed", "intake_status": "completed"}
 
     @patch("app.services.tickets._get_supabase")
     def test_filters_by_call_id(self, mock_get_sb: MagicMock) -> None:
@@ -892,7 +915,8 @@ class TestCompleteIntake:
 
     @patch("app.services.tickets._get_supabase")
     def test_guard_allows_open_and_abandoned_only(self, mock_get_sb: MagicMock) -> None:
-        """The guard must flip open rows and self-heal abandoned rows, never escalated."""
+        """The guard keys on canonical intake_status: open rows and abandoned
+        self-heal rows flip; escalated and completed never do."""
         sb = _mock_guarded_update()
         mock_get_sb.return_value = sb
 
@@ -901,9 +925,10 @@ class TestCompleteIntake:
         complete_intake(call_id="CA_guard")
 
         in_mock = sb.table.return_value.update.return_value.eq.return_value.in_
-        in_mock.assert_called_once_with(
-            "status", ["pending", "in_progress", "abandoned"]
-        )
+        in_mock.assert_called_once_with("intake_status", ["in_progress", "abandoned"])
+        allowed = in_mock.call_args[0][1]
+        assert "completed" not in allowed
+        assert "escalated" not in allowed
 
     @patch("app.services.tickets._get_supabase")
     def test_logs_rows_updated(self, mock_get_sb: MagicMock, caplog: pytest.LogCaptureFixture) -> None:
@@ -955,7 +980,7 @@ class TestAbandonIfOpen:
         abandon_if_open(call_id="CA_gone")
 
         update_payload = sb.table.return_value.update.call_args[0][0]
-        assert update_payload == {"status": "abandoned"}
+        assert update_payload == {"status": "abandoned", "intake_status": "abandoned"}
 
     @patch("app.services.tickets._get_supabase")
     def test_filters_by_call_id(self, mock_get_sb: MagicMock) -> None:
@@ -972,7 +997,7 @@ class TestAbandonIfOpen:
 
     @patch("app.services.tickets._get_supabase")
     def test_guard_excludes_completed_and_escalated(self, mock_get_sb: MagicMock) -> None:
-        """Only still-open rows may flip to abandoned."""
+        """Only rows still open on the canonical intake_status may flip to abandoned."""
         sb = _mock_guarded_update()
         mock_get_sb.return_value = sb
 
@@ -981,7 +1006,7 @@ class TestAbandonIfOpen:
         abandon_if_open(call_id="CA_guard")
 
         in_mock = sb.table.return_value.update.return_value.eq.return_value.in_
-        in_mock.assert_called_once_with("status", ["pending", "in_progress"])
+        in_mock.assert_called_once_with("intake_status", ["in_progress"])
         allowed = in_mock.call_args[0][1]
         assert "completed" not in allowed
         assert "escalated" not in allowed

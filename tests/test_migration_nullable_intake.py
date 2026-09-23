@@ -123,15 +123,21 @@ def migration_db() -> Iterator[MigrationDb]:
 
 
 class TestHistoricalBackfill:
-    """Rows created under the old full-intake model classify as completed."""
+    """Rows created under the old full-intake model end with a truthful
+    intake_status after the full chain: the legacy pending row completes, the
+    escalated row stays escalated."""
 
-    def test_existing_rows_receive_completed(self, migration_db: MigrationDb) -> None:
+    def test_existing_rows_receive_truthful_intake_status(
+        self, migration_db: MigrationDb
+    ) -> None:
         rows = migration_db.conn.execute(
             "select call_id, intake_status from assistance_requests where call_id in (%s, %s)",
             (SEED_CALL_PENDING, SEED_CALL_ESCALATED),
         ).fetchall()
         assert len(rows) == 2
-        assert all(row["intake_status"] == "completed" for row in rows)
+        intake_by_call = {row["call_id"]: row["intake_status"] for row in rows}
+        assert intake_by_call[SEED_CALL_PENDING] == "completed"
+        assert intake_by_call[SEED_CALL_ESCALATED] == "escalated"
 
     def test_no_historical_row_marked_in_progress(self, migration_db: MigrationDb) -> None:
         row = migration_db.conn.execute(
