@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class TicketArgs(BaseModel):
-    """Validated arguments for the create_breakdown_ticket tool."""
+    """Validated arguments for the create_breakdown_ticket tool.
 
-    location: str
-    vehicle: str
-    issue: str
+    All intake fields are optional so partial saves are accepted; at least
+    one non-empty field is required (there must be something to save).
+    """
+
+    location: str | None = None
+    vehicle: str | None = None
+    issue: str | None = None
+
+    @model_validator(mode="after")
+    def _require_something_to_save(self) -> TicketArgs:
+        if not (self.location or self.vehicle or self.issue):
+            raise ValueError("at least one of location, vehicle, or issue is required")
+        return self
 
 
 class TicketToolResult(BaseModel):

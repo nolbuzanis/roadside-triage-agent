@@ -200,7 +200,14 @@ class TestClosingResponseTriggered:
         assert started[0]["ticket_id"] == "tkt_abc"
 
     async def test_ticket_created_logged_by_handler(self, caplog: pytest.LogCaptureFixture) -> None:
-        mock_ticket = {"id": "ticket-log-1", "call_id": "CA_log"}
+        mock_ticket = {
+            "id": "ticket-log-1",
+            "call_id": "CA_log",
+            "location": "A",
+            "vehicle": "B",
+            "issue": "C",
+            "notification_status": "pending",
+        }
         with patch("app.api.twilio.create_ticket", return_value=mock_ticket):
             with patch("app.api.twilio.notify_dispatcher"):
                 with caplog.at_level("INFO"):

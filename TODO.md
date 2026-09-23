@@ -119,7 +119,7 @@ Convert `create_ticket` into a merge-upsert keyed by `call_id` so an existing ro
 
 ### Status
 
-- [ ] Not started
+- [x] Completed in `feat/partial-safe-persistence` PR
 
 ## P0 — Create assistance request at call start with progressive intake
 
@@ -1098,7 +1098,6 @@ The MVP is complete when all of the following work:
 - Live end-to-end regression check for the closing flow: place a real call, complete intake, and confirm the agent speaks exactly the fixed closing line and Twilio hangs up after the audio finishes with no extra questions. Acceptance: for N test calls, the spoken closing matches `CLOSING_MESSAGE` and the call terminates after `closing_response_completed` + grace. Verification: manual telephony test correlating the `ticket_created` → `closing_response_started` → `closing_response_completed` → `call_hangup_started` → `call_hangup_completed` structured log sequence.
 - Migrate FastAPI startup validation from deprecated `@app.on_event("startup")` to `lifespan` context manager
 - Add unit test for `Settings` validation that asserts `ValidationError` when env vars are missing
-- Handle `IntegrityError` in `create_ticket()` for concurrent duplicate `call_id` inserts (atomic idempotent insert)
 - Add unit tests for `TicketArgs` Pydantic validation and `CREATE_BREAKDOWN_TICKET_TOOL` schema shape
 - Add unit tests for `CallState` and `CallStateManager` (create/get/remove/isolation) and integration tests verifying tool handlers update state correctly
 - Suppress `response.create` for spurious post-greeting input (transcription-based filtering): enable input audio transcription and gate `caller_turn_complete` responses on the committed turn's transcript so empty/filler-only commits (call-setup noise or greeting echo) do not trigger an assistant response. Acceptance: a commit with no speech does not create a response; a commit with real speech creates exactly one. Verification: unit tests feed `conversation.item.input_audio_transcription.completed` with empty vs real transcripts and assert `response.create` counts
@@ -1106,6 +1105,8 @@ The MVP is complete when all of the following work:
 - Add a handler-level test for `twilio_media_stream` that drives the `start` event and asserts `process_events` is started exactly once on the early-success, early-failure-fallback, and no-early-connection paths. Acceptance: no path starts two concurrent `process_events` readers and no task is orphaned when early setup fails after task creation. Verification: unit test with a mocked `RealtimeSession` counting `asyncio.create_task(session.process_events)` calls per path
 - Open the greeting gate when no greeting response will ever complete: with `create_response: False`, `_greeting_response_done` only flips on a first `response.done`, so `greeting=""` (or a silently failed greeting `response.create`) leaves the session permanently deaf to caller turns. Acceptance: with no greeting configured the first caller commit creates a response; if the greeting response never arrives within a bounded time, later caller turns still get responses. Verification: unit tests for the empty-greeting first turn and a greeting-timeout/fallback path
 - Pass OpenAI `session_id` to `create_ticket()` for troubleshooting correlation
+- Claim the dispatcher-SMS notification atomically before sending, and add a retry path for failed sends: the current `notification_status == "pending"` guard is check-then-act, so a duplicate completing tool call arriving while the SMS task is still in flight (or after a swallowed `update_notification_status` failure) can double-send, and a `failed` status is permanently suppressed with no recovery. Acceptance: the completing handler claims the row with a conditional update (only a row still in its pre-send state wins the claim); exactly one claim winner fires `notify_dispatcher`; a losing concurrent duplicate still returns `status = "created"` without sending; a defined retry can re-attempt `failed` sends while a `sent` row is never re-sent. Verification: unit tests drive two concurrent completing handler calls against a mocked claim and assert exactly one SMS, plus claim-lost and failed-then-retry path tests; the existing completion-gating and retry tests still pass.
+- Harden tests for partial-safe persistence: assert the completion-path SMS payload is read from the merged ticket row rather than the raw tool arguments, and cover the duplicate-insert race where the post-23505 re-select unexpectedly returns no row. Acceptance: a handler test with partial-but-completing args asserts `notify_dispatcher` receives the merged row's location/vehicle/issue; a persistence test forces an insert unique violation followed by an empty re-select and asserts the original API error propagates. Verification: `python -m pytest tests/test_tool_call_handling.py tests/test_ticket_persistence.py -v` passes with the new tests alongside the existing suites.
 - Dispatcher ticket dashboard
 - Supabase Realtime ticket updates
 - `/api/v1/tickets` endpoint if a dedicated backend API becomes necessary
