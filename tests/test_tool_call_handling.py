@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Generator
 from typing import ClassVar
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
@@ -15,6 +16,13 @@ from app.realtime.tools import (
     TicketArgs,
     TicketToolResult,
 )
+
+
+@pytest.fixture(autouse=True)
+def _mock_complete_intake() -> Generator[MagicMock]:
+    """Keep completion-path tests off the real database."""
+    with patch("app.api.twilio.complete_intake") as mock_complete:
+        yield mock_complete
 
 # ---------------------------------------------------------------------------
 # CREATE_BREAKDOWN_TICKET_TOOL schema tests
@@ -343,3 +351,94 @@ class TestHandleCreateBreakdownTicket:
                     )
 
         mock_to_thread.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_completion_finalizes_intake_status(
+        self, _mock_complete_intake: MagicMock
+    ) -> None:
+        """A completing tool call finalizes the row status via the guarded updater."""
+        with patch(
+            "app.api.twilio.create_ticket", return_value=dict(self._COMPLETE_TICKET)
+        ):
+            with patch("app.api.twilio.notify_dispatcher"):
+                result = await handle_create_breakdown_ticket(
+                    call_sid="CA_test",
+                    caller_phone="+15551234567",
+                    arguments='{"location": "Main St", "vehicle": "Honda Civic", "issue": "Won\'t start"}',
+                )
+
+        assert result.status == "created"
+        _mock_complete_intake.assert_called_once_with(call_id="CA_test")
+
+    @pytest.mark.asyncio
+    async def test_partial_save_does_not_finalize_intake_status(
+        self, _mock_complete_intake: MagicMock
+    ) -> None:
+        """A partial save must not flip the row out of the open status."""
+        partial_ticket = {
+            "id": "ticket-uuid-9",
+            "call_id": "CA_partial",
+            "location": "Main St",
+            "vehicle": None,
+            "issue": None,
+            "notification_status": "pending",
+        }
+        with patch("app.api.twilio.create_ticket", return_value=partial_ticket):
+            with patch("app.api.twilio.notify_dispatcher"):
+                result = await handle_create_breakdown_ticket(
+                    call_sid="CA_partial",
+                    caller_phone="+15551234567",
+                    arguments='{"location": "Main St"}',
+                )
+
+        assert result.status == "updated"
+        _mock_complete_intake.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_retried_completion_still_finalizes_intake_status(
+        self, _mock_complete_intake: MagicMock
+    ) -> None:
+        """A retried completing call re-runs the guarded finalizer (idempotent at the DB)."""
+        notified_ticket = {
+            "id": "ticket-uuid-10",
+            "call_id": "CA_retry_status",
+            "location": "A",
+            "vehicle": "B",
+            "issue": "C",
+            "notification_status": "sent",
+        }
+        with patch("app.api.twilio.create_ticket", return_value=notified_ticket):
+            with patch("app.api.twilio.notify_dispatcher") as mock_notify:
+                result = await handle_create_breakdown_ticket(
+                    call_sid="CA_retry_status",
+                    caller_phone="+15551234567",
+                    arguments='{"location": "A", "vehicle": "B", "issue": "C"}',
+                )
+
+        assert result.status == "created"
+        mock_notify.assert_not_called()
+        _mock_complete_intake.assert_called_once_with(call_id="CA_retry_status")
+
+    @pytest.mark.asyncio
+    async def test_finalizes_with_unknown_call_id_fallback(
+        self, _mock_complete_intake: MagicMock
+    ) -> None:
+        """Missing call_sid finalizes the same 'unknown' key the ticket was created under."""
+        mock_ticket = {
+            "id": "t1",
+            "call_id": "unknown",
+            "location": "A",
+            "vehicle": "B",
+            "issue": "C",
+            "notification_status": "pending",
+        }
+        with patch("app.api.twilio.create_ticket", return_value=mock_ticket):
+            with patch("app.api.twilio.notify_dispatcher"):
+                result = await handle_create_breakdown_ticket(
+                    call_sid="",
+                    caller_phone="",
+                    arguments='{"location": "A", "vehicle": "B", "issue": "C"}',
+                )
+
+        assert result.status == "created"
+        _mock_complete_intake.assert_called_once_with(call_id="unknown")

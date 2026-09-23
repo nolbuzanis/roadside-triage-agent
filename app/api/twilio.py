@@ -22,6 +22,7 @@ from app.services.emergency import transfer_call
 from app.services.hangup import hangup_call
 from app.services.notifier import notify_dispatcher
 from app.services.tickets import (
+    complete_intake,
     create_ticket,
     is_intake_complete,
     start_assistance_request,
@@ -94,6 +95,11 @@ async def handle_create_breakdown_ticket(
         call_sid=call_sid,
         ticket_id=ticket.get("id"),
     )
+
+    # Finalize the intake lifecycle status alongside the completion path.
+    # Guarded update: open rows become completed, abandoned rows self-heal
+    # (backfill-in-flight calls), and escalated/completed are never touched.
+    await asyncio.to_thread(complete_intake, call_id=call_sid or "unknown")
 
     # Completion-gated SMS: fire only while notification_status is still pending
     # so a retried completing call never re-sends.
