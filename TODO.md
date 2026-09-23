@@ -59,6 +59,144 @@ Twilio owns PSTN calling and dispatcher SMS.
 
 ---
 
+# Progressive `assistance_request` Lifecycle — P0 Sequence
+
+Target lifecycle:
+
+```text
+valid inbound call
+→ create one assistance_request immediately
+→ progressively persist location / vehicle / issue
+→ complete normally, abandon on disconnect, or escalate on emergency
+```
+
+Items below are listed in dependency order (A → B → C → D → E). The domain rename (`breakdown_ticket` → `assistance_request`) is deliberately staged last, after the behavioral changes are stable, to minimize production risk.
+
+## P0 — Allow nullable intake columns (migration)
+
+Migration-first prerequisite: drop the `NOT NULL` constraints on `location`, `vehicle`, and `issue` so a mostly-empty request row can be inserted at call start. Schema-only change; application code and existing production rows are untouched.
+
+- Add a forward-only Supabase migration: `alter table breakdown_tickets alter column location drop not null;` (same for `vehicle`, `issue`)
+- Leave `call_id` unique constraint, RLS deny-all policy, defaults, and all existing rows unchanged
+- Apply the migration before any application change that can write null intake fields is deployed
+
+### Acceptance Criteria
+
+- Migration applies cleanly locally and in production; row count and stored values are unchanged
+- A raw insert with null `location`/`vehicle`/`issue` succeeds; duplicate `call_id` still rejected; anonymous access still denied by RLS
+- Existing application test suite passes without modification
+
+### Dependencies
+
+- none
+
+### Status
+
+- [ ] Not started
+
+## P0 — Make persistence partial-safe with completion-gated notification
+
+Convert `create_ticket` into a merge-upsert keyed by `call_id` so an existing row is updated instead of returned unchanged (the current duplicate path silently discards new fields), and gate dispatcher SMS on intake completion. Behavior-preserving for today's single post-intake tool call; the model-facing tool schema and instructions stay unchanged in this step.
+
+- Upsert keyed by `call_id`: insert when missing, merge only non-empty provided fields when present, never null-out previously saved values
+- `TicketArgs` accepts optional `location`/`vehicle`/`issue` (at least one required); reject only when there is nothing to save
+- Completion = row has non-empty location, vehicle, and issue after merge; only then fire `notify_dispatcher` once (guard on `notification_status == "pending"`) and return tool result `status = "created"` — preserving the closing-flow contract in `session.py`
+- Partial saves return a distinct result status (e.g. `"updated"`): no SMS, no closing trigger, `status` column remains `pending`
+- Handle the concurrent duplicate `call_id` insert race atomically (on-conflict / `IntegrityError` → return existing row)
+
+### Acceptance Criteria
+
+- Partial update on an existing row overwrites only provided fields; omitted/empty fields are preserved (no null-outs)
+- First completing update sends exactly one SMS and returns `status = "created"`; a retried completing call does not re-send SMS
+- Partial save sends no SMS and does not start the closing/hangup flow; all existing closing-flow tests still pass
+- Concurrent duplicate `call_id` insert yields exactly one row without an unhandled error
+- Persistence, tool-handling, notifier, and closing-flow test suites pass (updated for optional args and merge semantics)
+
+### Dependencies
+
+- P0 — Allow nullable intake columns (migration)
+
+### Status
+
+- [ ] Not started
+
+## P0 — Create assistance request at call start with progressive intake
+
+Every valid inbound call (after Twilio signature validation) idempotently creates exactly one request row with null intake fields, and the assistant persists each field as it is collected through the existing tool. Call state gains only an optional request-id field for log correlation — no new infrastructure.
+
+- After signature validation in the voice webhook, idempotently insert `{call_id, caller_phone, status: pending}` with null intake fields (on-conflict by `call_id` → return existing); log a distinct event (e.g. `assistance_request_started`); a creation failure is logged loudly but must not block the call path
+- Carry `assistance_request_id` through `EarlyConnection` → `CallState` (one optional field each); keep keying all DB writes by `call_id`
+- Open the model-facing tool schema (all-optional `required`), update tool description and system instructions: save each piece as it is collected and call again to update; the completing call must still return `status = "created"`
+- Keep notification logic where it is (completion path from the previous task); explicitly verify the initial insert sends no SMS
+- Teardown/disconnect behavior unchanged in this task
+
+### Acceptance Criteria
+
+- Valid voice webhook → exactly one row per `call_id` with null intake fields and zero dispatcher SMS; invalid signature → 403 and no row
+- Twilio webhook retry/duplicate for the same call still yields exactly one row
+- Two concurrent calls create two isolated rows mapped to the correct calls
+- Progressive tool calls persist fields as collected and preserve previously saved fields
+- Completing intake updates the same row (no second record), fires exactly one SMS, and triggers the existing closing flow (closing/emergency tests pass)
+- Instructions/prompt tests reflect progressive persistence while still collecting all three fields before close
+
+### Dependencies
+
+- P0 — Make persistence partial-safe with completion-gated notification
+
+### Status
+
+- [ ] Not started
+
+## P0 — Finalize status on completion, disconnect, and emergency
+
+Give each request a terminal status: `completed` when intake finishes, `abandoned` when the caller disconnects with the request still open (preserving whatever partial data was collected), and never overwrite `escalated`. `status` is free text — no schema change required.
+
+- Completion path (same place SMS fires) sets `status = "completed"` when intake first completes
+- Media-stream teardown `finally`: if the row's status is still `pending`, non-blocking update to `abandoned`; log the result and never raise from teardown
+- Abandonment must not overwrite `completed` or `escalated`; emergency escalation (`_record_escalation`) must not be blocked by or clobber partial intake fields — verify both sets of fields are retained
+- Live emergency transfer remains independent of any database write
+
+### Acceptance Criteria
+
+- Mid-intake disconnect → row keeps all collected partial fields, status `abandoned`, still exactly one row per call
+- Successful completion → status `completed`; a later disconnect does not flip it to `abandoned`
+- Emergency call → status `escalated` with `hazard_reason` plus whatever intake fields were collected; later disconnect does not overwrite `escalated`
+- Teardown DB failure is logged and does not prevent WebSocket/session cleanup
+- Closing-flow and emergency-transfer test suites still pass; new tests cover abandonment and no-overwrite rules
+
+### Dependencies
+
+- P0 — Create assistance request at call start with progressive intake
+
+### Status
+
+- [ ] Not started
+
+## P0 — Rename `breakdown_ticket` to `assistance_request`
+
+Stage the domain rename as a separate atomic change after the lifecycle behavior is stable, minimizing production risk and keeping mechanical churn out of the behavior PRs.
+
+- Migration: `alter table breakdown_tickets rename to assistance_requests;` — production rows, PK, unique `call_id`, and the RLS policy move with the table; verify the policy is still attached
+- Update service/table references, health check, handler and tool name (`create_breakdown_ticket` → `update_assistance_request`), system instructions, session `func_name` checks, structured log events, and call/session flag names
+- Sweep terminology in README, PRODUCT, ARCHITECTURE, and this TODO's active specs; do not rewrite historical migration files or completed-history entries
+- Coordinate migration and application deploy (old code querying the old table name fails after rename — brief ordered deploy window, or a temporary compatibility view if ordering cannot be guaranteed)
+
+### Acceptance Criteria
+
+- Zero `breakdown_ticket` references remain in `app/`, `tests/`, `supabase/` current schema expectations, or active docs (historical migration files and completed-history notes exempt)
+- Production row count, ids, and data unchanged after the rename migration; unique `call_id` and RLS still enforced
+- Full test suite passes under the new names; live smoke confirms one Twilio `call_id` maps to exactly one assistance request
+
+### Dependencies
+
+- P0 — Finalize status on completion, disconnect, and emergency
+
+### Status
+
+- [ ] Not started
+
+---
+
 # Phase 1 — Supabase & Application Foundation
 
 ## P0 — Create Supabase Project
