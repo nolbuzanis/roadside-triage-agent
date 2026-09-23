@@ -88,6 +88,7 @@ This applies the migrations in `supabase/migrations/`:
 - `assistance_requests` table with all required columns
 - Row Level Security policies
 - Assistance-request insert webhook for dispatcher notifications
+- `assistance_requests` membership in the `supabase_realtime` publication (Supabase Realtime events for the dashboard)
 
 Alternatively, you can run the SQL directly in the Supabase SQL Editor (Dashboard → SQL Editor).
 
@@ -168,7 +169,7 @@ POST https://<your-ngrok-id>.ngrok.io/api/v1/twilio/voice
 
 ### Run the Dispatcher Dashboard
 
-The read-only dispatcher UI lives in `frontend/` (Vite + React + TypeScript). It authenticates with the single dispatcher Supabase Auth account and reads `assistance_requests` using only the public Supabase URL and anon/publishable key.
+The read-only dispatcher UI lives in `frontend/` (Vite + React + TypeScript). It authenticates with the single dispatcher Supabase Auth account and reads `assistance_requests` using only the public Supabase URL and anon/publishable key, with live INSERT/UPDATE updates via Supabase Realtime (the `assistance_requests` table is added to the `supabase_realtime` publication by a migration).
 
 ```bash
 cd frontend

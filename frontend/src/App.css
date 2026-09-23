@@ -115,6 +115,37 @@
   background: var(--neutral-bg);
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.live-indicator {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.live-indicator.live {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.live-indicator.connecting {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.live-indicator.disconnected {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
 .dashboard-error {
   color: var(--danger);
   background: var(--danger-bg);
