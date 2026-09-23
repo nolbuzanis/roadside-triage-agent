@@ -1,7 +1,9 @@
 """Tests for the Twilio voice webhook endpoint."""
 
+import json
 from unittest.mock import MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -24,6 +26,24 @@ def _make_twilio_headers(signature: str = "valid_signature") -> dict[str, str]:
         "Host": "example.com",
         "x-forwarded-proto": "https",
     }
+
+
+@pytest.fixture(autouse=True)
+def _mock_start_assistance_request() -> MagicMock:
+    """Mock early assistance-request creation so webhook tests never hit Supabase."""
+    with patch(
+        "app.api.twilio.start_assistance_request",
+        return_value={
+            "id": "req-test-123",
+            "call_id": "CA_test_call_sid_123",
+            "caller_phone": "+15551234567",
+            "status": "in_progress",
+            "location": None,
+            "vehicle": None,
+            "issue": None,
+        },
+    ) as mock_start:
+        yield mock_start
 
 
 @patch("app.api.twilio._validate_twilio_request")
@@ -412,3 +432,156 @@ def test_caller_phone_with_special_characters(mock_validate: MagicMock) -> None:
 
     assert response.status_code == 200
     assert "+15551234567;phone=true" in response.text
+
+
+# ---------------------------------------------------------------------------
+# Assistance request created at call start (progressive intake)
+# ---------------------------------------------------------------------------
+
+
+@patch("app.api.twilio._validate_twilio_request")
+def test_valid_request_starts_assistance_request(
+    mock_validate: MagicMock, _mock_start_assistance_request: MagicMock
+) -> None:
+    """A valid webhook idempotently creates one open assistance-request row."""
+    mock_validate.return_value = True
+
+    response = client.post(
+        "/api/v1/twilio/voice",
+        data=TWILIO_PARAMS,
+        headers=_make_twilio_headers(),
+    )
+
+    assert response.status_code == 200
+    _mock_start_assistance_request.assert_called_once_with(
+        call_id="CA_test_call_sid_123",
+        caller_phone="+15551234567",
+    )
+
+
+@patch("app.api.twilio._validate_twilio_request")
+def test_invalid_signature_starts_no_assistance_request(
+    mock_validate: MagicMock, _mock_start_assistance_request: MagicMock
+) -> None:
+    """An invalid signature returns 403 and never creates a row."""
+    mock_validate.return_value = False
+
+    response = client.post(
+        "/api/v1/twilio/voice",
+        data=TWILIO_PARAMS,
+        headers=_make_twilio_headers(signature="bad_signature"),
+    )
+
+    assert response.status_code == 403
+    _mock_start_assistance_request.assert_not_called()
+
+
+@patch("app.api.twilio._validate_twilio_request")
+def test_webhook_logs_assistance_request_started(
+    mock_validate: MagicMock,
+    _mock_start_assistance_request: MagicMock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Successful early creation logs the assistance_request_started event."""
+    mock_validate.return_value = True
+
+    with caplog.at_level("INFO"):
+        client.post(
+            "/api/v1/twilio/voice",
+            data=TWILIO_PARAMS,
+            headers=_make_twilio_headers(),
+        )
+
+    events = [
+        json.loads(r.message)["event"]
+        for r in caplog.records
+        if r.message.startswith("{")
+    ]
+    assert "assistance_request_started" in events
+
+
+@patch("app.api.twilio._validate_twilio_request")
+def test_assistance_request_failure_does_not_block_call(
+    mock_validate: MagicMock, _mock_start_assistance_request: MagicMock
+) -> None:
+    """A creation failure is logged but the call still gets TwiML."""
+    mock_validate.return_value = True
+    _mock_start_assistance_request.side_effect = RuntimeError("DB down")
+
+    response = client.post(
+        "/api/v1/twilio/voice",
+        data=TWILIO_PARAMS,
+        headers=_make_twilio_headers(),
+    )
+
+    assert response.status_code == 200
+    assert "<Connect>" in response.text
+
+
+@patch("app.api.twilio.notify_dispatcher")
+@patch("app.api.twilio._validate_twilio_request")
+def test_webhook_sends_zero_dispatcher_sms(
+    mock_validate: MagicMock,
+    mock_notify: MagicMock,
+    _mock_start_assistance_request: MagicMock,
+) -> None:
+    """Early creation at call start must not fire the dispatcher SMS."""
+    mock_validate.return_value = True
+
+    client.post(
+        "/api/v1/twilio/voice",
+        data=TWILIO_PARAMS,
+        headers=_make_twilio_headers(),
+    )
+
+    mock_notify.assert_not_called()
+
+
+@patch("app.api.twilio._validate_twilio_request")
+def test_concurrent_calls_create_isolated_requests(
+    mock_validate: MagicMock, _mock_start_assistance_request: MagicMock
+) -> None:
+    """Two concurrent calls map to two isolated rows keyed by their call ids."""
+    mock_validate.return_value = True
+
+    client.post(
+        "/api/v1/twilio/voice",
+        data={**TWILIO_PARAMS, "CallSid": "CA_call_1", "From": "+15551111111"},
+        headers=_make_twilio_headers(),
+    )
+    client.post(
+        "/api/v1/twilio/voice",
+        data={**TWILIO_PARAMS, "CallSid": "CA_call_2", "From": "+15552222222"},
+        headers=_make_twilio_headers(),
+    )
+
+    assert _mock_start_assistance_request.call_count == 2
+    _mock_start_assistance_request.assert_any_call(
+        call_id="CA_call_1", caller_phone="+15551111111"
+    )
+    _mock_start_assistance_request.assert_any_call(
+        call_id="CA_call_2", caller_phone="+15552222222"
+    )
+
+
+@patch("app.api.twilio._validate_twilio_request")
+def test_webhook_retry_calls_start_with_same_call_id(
+    mock_validate: MagicMock, _mock_start_assistance_request: MagicMock
+) -> None:
+    """A Twilio retry re-invokes start with the same call_id (idempotent at DB)."""
+    mock_validate.return_value = True
+
+    client.post(
+        "/api/v1/twilio/voice",
+        data=TWILIO_PARAMS,
+        headers=_make_twilio_headers(),
+    )
+    client.post(
+        "/api/v1/twilio/voice",
+        data=TWILIO_PARAMS,
+        headers=_make_twilio_headers(),
+    )
+
+    assert _mock_start_assistance_request.call_count == 2
+    for call in _mock_start_assistance_request.call_args_list:
+        assert call.kwargs["call_id"] == "CA_test_call_sid_123"
