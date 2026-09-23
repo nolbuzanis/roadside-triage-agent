@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import structlog
+from postgrest.exceptions import APIError
 
 from app.core.config import get_settings
 from supabase import Client, create_client
@@ -23,52 +24,102 @@ def _get_supabase() -> Client:
     return _client
 
 
+def is_intake_complete(ticket: dict[str, Any]) -> bool:
+    """Return True when the ticket row has non-empty location, vehicle, and issue."""
+    return all(ticket.get(field) for field in ("location", "vehicle", "issue"))
+
+
 def create_ticket(
     *,
     call_id: str,
     caller_phone: str,
-    location: str,
-    vehicle: str,
-    issue: str,
+    location: str | None = None,
+    vehicle: str | None = None,
+    issue: str | None = None,
     session_id: str | None = None,
 ) -> dict[str, Any]:
-    """Create a breakdown ticket in Supabase.
+    """Create or merge-upsert a breakdown ticket in Supabase, keyed by call_id.
 
-    Idempotent: if a ticket with the same call_id already exists, returns the
-    existing ticket instead of creating a duplicate.
+    Inserts a new row when missing; when the row exists, merges only the
+    non-empty provided intake fields (omitted/empty fields are preserved and
+    never nulled out). Raises ValueError when there is nothing to save.
 
-    Returns the inserted/existing row as a dict.
+    Concurrent duplicate inserts on call_id are handled atomically: a unique
+    violation (SQLSTATE 23505) falls back to merging into the existing row.
+
+    Returns the inserted/merged row as a dict.
     """
+    provided: dict[str, str] = {
+        field: value
+        for field, value in (
+            ("location", location),
+            ("vehicle", vehicle),
+            ("issue", issue),
+        )
+        if value
+    }
+    if not provided:
+        raise ValueError("nothing to save: at least one intake field is required")
+
     supabase = _get_supabase()
     table = supabase.table("breakdown_tickets")
 
     existing = table.select("*").eq("call_id", call_id).execute()
     if existing.data:
-        logger.info("Ticket already exists, returning existing", call_id=call_id)
-        return dict(existing.data[0])  # type: ignore[arg-type]
+        return _merge_into_existing(table, call_id, dict(existing.data[0]), provided)  # type: ignore[arg-type]
 
     row: dict[str, Any] = {
         "call_id": call_id,
         "caller_phone": caller_phone,
-        "location": location,
-        "vehicle": vehicle,
-        "issue": issue,
+        **provided,
         "status": "pending",
         "notification_status": "pending",
     }
     if session_id:
         row["session_id"] = session_id
 
-    result = table.insert(row).execute()
+    try:
+        result = table.insert(row).execute()
+    except APIError as exc:
+        if exc.code != "23505":
+            raise
+        raced = table.select("*").eq("call_id", call_id).execute()
+        if not raced.data:
+            raise
+        logger.info("Ticket insert race resolved", call_id=call_id)
+        return _merge_into_existing(table, call_id, dict(raced.data[0]), provided)  # type: ignore[arg-type]
+
     ticket: dict[str, Any] = dict(result.data[0]) if result.data else row  # type: ignore[arg-type]
 
     logger.info(
         "Ticket created",
         ticket_id=ticket.get("id"),
         call_id=call_id,
-        location=location,
+        location=provided.get("location"),
     )
     return ticket
+
+
+def _merge_into_existing(
+    table: Any,
+    call_id: str,
+    existing: dict[str, Any],
+    provided: dict[str, str],
+) -> dict[str, Any]:
+    """Merge non-empty provided intake fields into an existing row.
+
+    Only the provided intake fields are written; status, notification_status,
+    and omitted intake fields are left untouched.
+    """
+    table.update(provided).eq("call_id", call_id).execute()
+    merged = {**existing, **provided}
+    logger.info(
+        "Ticket updated",
+        ticket_id=existing.get("id"),
+        call_id=call_id,
+        fields=sorted(provided),
+    )
+    return merged
 
 
 def update_ticket_hazard(

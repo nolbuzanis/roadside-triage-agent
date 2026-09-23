@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -174,18 +176,44 @@ class TestCreateTicketNew:
         row = sb.table.return_value.insert.call_args[0][0]
         assert "session_id" not in row
 
+    @patch("app.services.tickets._get_supabase")
+    def test_partial_insert_omits_missing_fields(self, mock_get_sb: MagicMock) -> None:
+        sb = _mock_supabase()
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import create_ticket
+
+        create_ticket(
+            call_id="CA_partial",
+            caller_phone="+15550000000",
+            location="123 Main St",
+        )
+
+        row = sb.table.return_value.insert.call_args[0][0]
+        assert row["location"] == "123 Main St"
+        assert "vehicle" not in row
+        assert "issue" not in row
+        assert row["status"] == "pending"
+        assert row["notification_status"] == "pending"
+
 
 # ---------------------------------------------------------------------------
-# create_ticket — idempotency (duplicate call_id)
+# create_ticket — merge-upsert (duplicate call_id)
 # ---------------------------------------------------------------------------
 
 
-class TestCreateTicketIdempotent:
-    """Tests for duplicate call_id handling."""
+class TestCreateTicketMergeUpsert:
+    """Tests for merge-upsert semantics on duplicate call_id."""
 
     @patch("app.services.tickets._get_supabase")
-    def test_duplicate_call_id_returns_existing_ticket(self, mock_get_sb: MagicMock) -> None:
-        existing = {"id": "uuid-existing", "call_id": "CA_dup", "location": "Already St"}
+    def test_duplicate_call_id_merges_provided_fields(self, mock_get_sb: MagicMock) -> None:
+        existing = {
+            "id": "uuid-existing",
+            "call_id": "CA_dup",
+            "location": "Already St",
+            "vehicle": None,
+            "issue": None,
+        }
         sb = _mock_supabase(existing_data=[existing])
         mock_get_sb.return_value = sb
 
@@ -195,12 +223,58 @@ class TestCreateTicketIdempotent:
             call_id="CA_dup",
             caller_phone="+15550000000",
             location="New St",
-            vehicle="X",
-            issue="Y",
+            vehicle="Toyota Camry",
         )
 
         assert ticket["id"] == "uuid-existing"
-        assert ticket["location"] == "Already St"
+        assert ticket["location"] == "New St"
+        assert ticket["vehicle"] == "Toyota Camry"
+        assert ticket["issue"] is None  # omitted field is never nulled-invented
+
+    @patch("app.services.tickets._get_supabase")
+    def test_omitted_fields_are_preserved_not_nulled(self, mock_get_sb: MagicMock) -> None:
+        existing = {
+            "id": "uuid-1",
+            "call_id": "CA_keep",
+            "location": "123 Main St",
+            "vehicle": "Honda Civic",
+            "issue": None,
+        }
+        sb = _mock_supabase(existing_data=[existing])
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import create_ticket
+
+        ticket = create_ticket(
+            call_id="CA_keep",
+            caller_phone="+15550000000",
+            issue="Flat tire",
+        )
+
+        assert ticket["location"] == "123 Main St"
+        assert ticket["vehicle"] == "Honda Civic"
+        assert ticket["issue"] == "Flat tire"
+
+    @patch("app.services.tickets._get_supabase")
+    def test_merge_update_payload_contains_only_provided_fields(
+        self, mock_get_sb: MagicMock
+    ) -> None:
+        existing = {"id": "uuid-2", "call_id": "CA_payload", "location": "Old"}
+        sb = _mock_supabase(existing_data=[existing])
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import create_ticket
+
+        create_ticket(
+            call_id="CA_payload",
+            caller_phone="+15550000000",
+            issue="Blown tire",
+        )
+
+        table = sb.table.return_value
+        table.insert.assert_not_called()
+        update_payload = table.update.call_args[0][0]
+        assert update_payload == {"issue": "Blown tire"}
 
     @patch("app.services.tickets._get_supabase")
     def test_duplicate_call_id_does_not_insert(self, mock_get_sb: MagicMock) -> None:
@@ -221,7 +295,9 @@ class TestCreateTicketIdempotent:
         sb.table.return_value.insert.assert_not_called()
 
     @patch("app.services.tickets._get_supabase")
-    def test_second_request_with_same_call_id_returns_same_ticket(self, mock_get_sb: MagicMock) -> None:
+    def test_second_request_with_same_call_id_updates_same_row(
+        self, mock_get_sb: MagicMock
+    ) -> None:
         existing = {"id": "uuid-first", "call_id": "CA_same", "status": "pending"}
         sb = _mock_supabase(existing_data=[existing])
         mock_get_sb.return_value = sb
@@ -237,14 +313,143 @@ class TestCreateTicketIdempotent:
         )
         second = create_ticket(
             call_id="CA_same",
-            caller_phone="+15559999999",
+            caller_phone="+15550000000",
             location="Different",
-            vehicle="Different",
-            issue="Different",
         )
 
         assert first["id"] == second["id"]
-        assert first == second
+        assert second["location"] == "Different"
+        assert second["status"] == "pending"  # status column untouched
+
+    @patch("app.services.tickets._get_supabase")
+    def test_nothing_to_save_raises_value_error(self, mock_get_sb: MagicMock) -> None:
+        sb = _mock_supabase()
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import create_ticket
+
+        with pytest.raises(ValueError, match="nothing to save"):
+            create_ticket(
+                call_id="CA_empty",
+                caller_phone="+15550000000",
+                location=None,
+                vehicle=None,
+                issue=None,
+            )
+
+        sb.table.return_value.insert.assert_not_called()
+
+    @patch("app.services.tickets._get_supabase")
+    def test_concurrent_insert_race_merges_into_existing_row(
+        self, mock_get_sb: MagicMock
+    ) -> None:
+        from postgrest.exceptions import APIError
+
+        existing = {"id": "uuid-race", "call_id": "CA_race", "location": "Winner St"}
+        sb = MagicMock()
+        table = MagicMock()
+        sb.table.return_value = table
+
+        empty_result = MagicMock()
+        empty_result.data = []
+        existing_result = MagicMock()
+        existing_result.data = [existing]
+        # First select (before insert) finds nothing; select after the
+        # unique-violation finds the winning row.
+        table.select.return_value = table
+        table.eq.return_value = table
+        table.execute.side_effect = [empty_result, existing_result]
+
+        insert_chain = MagicMock()
+        insert_chain.execute.side_effect = APIError(
+            {"code": "23505", "message": "duplicate key", "details": None, "hint": None}
+        )
+        table.insert.return_value = insert_chain
+
+        update_chain = MagicMock()
+        update_chain.eq.return_value = update_chain
+        table.update.return_value = update_chain
+
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import create_ticket
+
+        ticket = create_ticket(
+            call_id="CA_race",
+            caller_phone="+15550000000",
+            issue="Flat tire",
+        )
+
+        assert ticket["id"] == "uuid-race"
+        assert ticket["location"] == "Winner St"
+        assert ticket["issue"] == "Flat tire"
+        update_payload = table.update.call_args[0][0]
+        assert update_payload == {"issue": "Flat tire"}
+
+    @patch("app.services.tickets._get_supabase")
+    def test_non_unique_api_error_is_raised(self, mock_get_sb: MagicMock) -> None:
+        from postgrest.exceptions import APIError
+
+        sb = MagicMock()
+        table = MagicMock()
+        sb.table.return_value = table
+
+        empty_result = MagicMock()
+        empty_result.data = []
+        table.select.return_value = table
+        table.eq.return_value = table
+        table.execute.return_value = empty_result
+
+        insert_chain = MagicMock()
+        insert_chain.execute.side_effect = APIError(
+            {"code": "42501", "message": "permission denied", "details": None, "hint": None}
+        )
+        table.insert.return_value = insert_chain
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import create_ticket
+
+        with pytest.raises(APIError):
+            create_ticket(
+                call_id="CA_perm",
+                caller_phone="+15550000000",
+                location="A",
+            )
+
+
+# ---------------------------------------------------------------------------
+# is_intake_complete
+# ---------------------------------------------------------------------------
+
+
+class TestIsIntakeComplete:
+    """Tests for the completion check used to gate the dispatcher SMS."""
+
+    def test_all_fields_non_empty_is_complete(self) -> None:
+        from app.services.tickets import is_intake_complete
+
+        assert is_intake_complete(
+            {"location": "A", "vehicle": "B", "issue": "C"}
+        )
+
+    def test_missing_field_is_incomplete(self) -> None:
+        from app.services.tickets import is_intake_complete
+
+        assert not is_intake_complete({"location": "A", "vehicle": "B"})
+
+    def test_null_field_is_incomplete(self) -> None:
+        from app.services.tickets import is_intake_complete
+
+        assert not is_intake_complete(
+            {"location": "A", "vehicle": "B", "issue": None}
+        )
+
+    def test_empty_string_field_is_incomplete(self) -> None:
+        from app.services.tickets import is_intake_complete
+
+        assert not is_intake_complete(
+            {"location": "A", "vehicle": "", "issue": "C"}
+        )
 
 
 # ---------------------------------------------------------------------------

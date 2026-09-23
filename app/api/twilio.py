@@ -21,7 +21,7 @@ from app.services.calls import EarlyConnection, call_manager
 from app.services.emergency import transfer_call
 from app.services.hangup import hangup_call
 from app.services.notifier import notify_dispatcher
-from app.services.tickets import create_ticket, update_ticket_hazard
+from app.services.tickets import create_ticket, is_intake_complete, update_ticket_hazard
 
 logger = structlog.get_logger(__name__)
 
@@ -59,40 +59,55 @@ async def handle_create_breakdown_ticket(
             vehicle=args.vehicle,
             issue=args.issue,
         )
-        if call_sid:
-            state = call_manager.get(call_sid)
-            if state:
-                state.ticket_created = True
+    except Exception:
+        logger.exception("Failed to create ticket", call_sid=call_sid)
+        return TicketToolResult(status="error", error="Unable to create the ticket")
 
+    if not is_intake_complete(ticket):
         logger.info(
-            "ticket_created",
+            "ticket_updated",
             call_sid=call_sid,
             ticket_id=ticket.get("id"),
         )
+        return TicketToolResult(
+            status="updated",
+            ticket_id=ticket.get("id"),
+            message="Intake details saved.",
+        )
 
-        # Dispatch SMS notification in the background (fire-and-forget).
+    if call_sid:
+        state = call_manager.get(call_sid)
+        if state:
+            state.ticket_created = True
+
+    logger.info(
+        "ticket_created",
+        call_sid=call_sid,
+        ticket_id=ticket.get("id"),
+    )
+
+    # Completion-gated SMS: fire only while notification_status is still pending
+    # so a retried completing call never re-sends.
+    if ticket.get("notification_status") == "pending":
         task = asyncio.create_task(
             asyncio.to_thread(
                 notify_dispatcher,
                 call_id=call_sid or "unknown",
                 caller_phone=caller_phone or "unknown",
-                location=args.location,
-                vehicle=args.vehicle,
-                issue=args.issue,
+                location=str(ticket.get("location") or ""),
+                vehicle=str(ticket.get("vehicle") or ""),
+                issue=str(ticket.get("issue") or ""),
             ),
             name=f"notify-{call_sid}",
         )
         _background_tasks.add(task)
         task.add_done_callback(_background_tasks.discard)
 
-        return TicketToolResult(
-            status="created",
-            ticket_id=ticket.get("id"),
-            message="Ticket created successfully. You may now close the call.",
-        )
-    except Exception:
-        logger.exception("Failed to create ticket", call_sid=call_sid)
-        return TicketToolResult(status="error", error="Unable to create the ticket")
+    return TicketToolResult(
+        status="created",
+        ticket_id=ticket.get("id"),
+        message="Ticket created successfully. You may now close the call.",
+    )
 
 
 async def _record_escalation(*, call_sid: str, arguments: str) -> None:
