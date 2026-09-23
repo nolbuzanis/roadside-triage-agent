@@ -522,22 +522,55 @@ def test_assistance_request_failure_does_not_block_call(
 @patch("app.api.twilio._ASSISTANCE_REQUEST_START_TIMEOUT_SECONDS", 0.05)
 @patch("app.api.twilio._validate_twilio_request")
 def test_assistance_request_timeout_does_not_block_call(
-    mock_validate: MagicMock, _mock_start_assistance_request: MagicMock
+    mock_validate: MagicMock,
+    _mock_start_assistance_request: MagicMock,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A stalled Supabase call is timed out; TwiML still returns promptly."""
     import time
+    from datetime import datetime
 
     mock_validate.return_value = True
     _mock_start_assistance_request.side_effect = lambda **kwargs: time.sleep(0.5)
 
-    response = client.post(
-        "/api/v1/twilio/voice",
-        data=TWILIO_PARAMS,
-        headers=_make_twilio_headers(),
-    )
+    with caplog.at_level("INFO"):
+        response = client.post(
+            "/api/v1/twilio/voice",
+            data=TWILIO_PARAMS,
+            headers=_make_twilio_headers(),
+        )
 
     assert response.status_code == 200
     assert "<Connect>" in response.text
+
+    events = [
+        json.loads(r.message)
+        for r in caplog.records
+        if r.message.startswith("{")
+    ]
+    # reason="timeout" is only logged from the wait_for TimeoutError branch —
+    # without the timeout wrap the stall surfaces as an AttributeError instead.
+    timeout_logs = [
+        e for e in events if e.get("event") == "assistance_request_start_failed"
+    ]
+    assert timeout_logs, "expected assistance_request_start_failed on timeout"
+    assert timeout_logs[0].get("reason") == "timeout"
+
+    # The timeout fired well before the 0.5s stall completed (log timestamps).
+    incoming = next(e for e in events if e.get("event") == "Incoming call")
+
+    def _ts(event: dict) -> datetime:
+        return datetime.fromisoformat(str(event["timestamp"]).replace("Z", "+00:00"))
+
+    delta = (_ts(timeout_logs[0]) - _ts(incoming)).total_seconds()
+    assert delta < 0.4, f"timeout fired after {delta:.3f}s, expected <0.4s"
+
+    # Timed-out start leaves no request id on the pending early connection.
+    from app.api.twilio import _pending_connections
+
+    pending = _pending_connections.get("CA_test_call_sid_123")
+    assert pending is not None
+    assert pending.assistance_request_id is None
 
 
 @patch("app.api.twilio.notify_dispatcher")
