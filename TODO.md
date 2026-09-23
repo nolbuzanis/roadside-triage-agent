@@ -1309,30 +1309,35 @@ Make the dashboard update automatically as calls arrive and intake progresses. U
 
 ---
 
-## P0 — Deploy the dispatcher dashboard
+## P1 — Deploy the dispatcher dashboard to Firebase Hosting
 
-Deploy the dashboard behind a stable production URL using the simplest approach compatible with the existing GCP/GitHub deployment setup. Keep frontend deployment independent from the voice-service runtime where practical.
+Deploy the Vite + React dispatcher dashboard to Firebase Hosting with a stable production URL. Keep the frontend deployment separate from the Cloud Run voice-service runtime.
 
-- Choose the smallest deployment target that supports the static Vite build
+- Create/configure a Firebase project or Hosting site for the dispatcher UI
+- Build the Vite app as a static production bundle
+- Configure Firebase Hosting to serve the generated `dist/` output
 - Configure production frontend environment variables for:
   - Supabase URL
   - Supabase public/publishable key
 - Never inject backend/service-role secrets into the frontend build
-- Add a GitHub Actions deployment workflow triggered from `main`, or extend the existing deployment workflow if that remains clean and independently reviewable
-- Verify the production dashboard can authenticate, load history, and receive realtime updates
-- Document the production dashboard URL and deployment steps
+- Add GitHub Actions deployment from `main` so a merged PR automatically deploys the latest dashboard
+- Use Firebase's supported GitHub authentication/deployment approach without committing long-lived credentials where avoidable
+- Configure SPA fallback routing so client-side navigation still works on refresh
+- Verify the production dashboard can authenticate, load request history, and receive Supabase Realtime updates
+- Document the Firebase Hosting URL and deployment/setup steps
 
 ### Acceptance Criteria
 
-- Merging the dashboard deployment changes to `main` produces a deployed dashboard
-- Production URL is stable
+- Merging dashboard deployment changes to `main` automatically deploys the latest frontend
+- Production dashboard has a stable Firebase Hosting HTTPS URL
 - Dispatcher authentication works in production
 - Existing assistance requests load successfully
-- A live phone call appears in Active Calls without manual refresh
-- Progressive updates appear during the call
-- Completed/abandoned/escalated requests move to Past Requests
-- No private backend secrets are present in the deployed frontend
-- Voice-agent Cloud Run deployment remains unaffected
+- A live phone call appears in **Active Calls** without manual refresh
+- Progressive location / vehicle / issue changes appear during the call
+- Completed, abandoned, and escalated requests move to **Past Requests** automatically
+- Refreshing the dashboard does not produce a Firebase 404
+- No `SUPABASE_SERVICE_ROLE_KEY`, Twilio credentials, OpenAI credentials, or other backend secrets are present in the frontend bundle
+- Existing Cloud Run voice-agent deployment remains unaffected
 
 ### Dependencies
 
