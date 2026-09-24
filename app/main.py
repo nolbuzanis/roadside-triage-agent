@@ -7,6 +7,7 @@ import httpx
 import structlog
 from fastapi import FastAPI, Query
 
+from app.api.demo_sessions import router as demo_sessions_router
 from app.api.twilio import router as twilio_router
 from app.core.config import get_settings
 
@@ -39,6 +40,7 @@ logger = structlog.get_logger(__name__)
 
 app = FastAPI(title="Roadside Triage Agent")
 app.include_router(twilio_router, prefix="/api/v1")
+app.include_router(demo_sessions_router, prefix="/api/v1")
 
 
 @app.on_event("startup")
