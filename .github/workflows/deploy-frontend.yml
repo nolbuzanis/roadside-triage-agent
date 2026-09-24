@@ -1,0 +1,131 @@
+name: Deploy Dispatcher Dashboard
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'frontend/**'
+      - 'firebase.json'
+      - '.github/workflows/deploy-frontend.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: firebase-hosting-dispatcher-dashboard
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify required configuration
+        env:
+          FIREBASE_PROJECT_ID: ${{ vars.FIREBASE_PROJECT_ID }}
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
+        run: |
+          missing=0
+          for name in FIREBASE_PROJECT_ID VITE_SUPABASE_URL VITE_SUPABASE_ANON_KEY; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing required repository variable: ${name}"
+              missing=1
+            fi
+          done
+          if [ -z "${FIREBASE_SERVICE_ACCOUNT}" ]; then
+            echo "::error::Missing required repository secret: FIREBASE_SERVICE_ACCOUNT"
+            missing=1
+          fi
+          if [ "${missing}" -ne 0 ]; then
+            echo "Configure the values documented in README.md under 'Production Deployment (Firebase Hosting)'."
+            exit 1
+          fi
+
+          # Fail loudly if a backend/secret key was configured as the "anon" key:
+          # new-format Supabase secret keys are not JWTs, so reject them by prefix.
+          case "${VITE_SUPABASE_ANON_KEY}" in
+            sb_secret_*)
+              echo "::error::VITE_SUPABASE_ANON_KEY is a Supabase secret key (sb_secret_...). Configure only the public anon/publishable key."
+              exit 1
+              ;;
+          esac
+
+          # Legacy Supabase keys are JWTs whose payload carries a "role" claim.
+          role="$(printf '%s' "${VITE_SUPABASE_ANON_KEY}" | python3 -c '
+          import base64, json, sys
+
+          key = sys.stdin.read().strip()
+          parts = key.split(".")
+          if len(parts) < 2:
+              sys.exit(0)
+          payload = parts[1] + "=" * (-len(parts[1]) % 4)
+          try:
+              data = json.loads(base64.urlsafe_b64decode(payload))
+          except Exception:
+              sys.exit(0)
+          if not isinstance(data, dict):
+              sys.exit(0)
+          print(data.get("role", ""))
+          ')"
+          if [ "${role}" = "service_role" ]; then
+            echo "::error::VITE_SUPABASE_ANON_KEY is a service-role key. Configure only the public Supabase anon/publishable key."
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Lint frontend
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Build frontend
+        working-directory: frontend
+        env:
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
+        run: npm run build
+
+      - name: Deploy to Firebase Hosting (live channel)
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          projectId: ${{ vars.FIREBASE_PROJECT_ID }}
+          channelId: live
+
+      # action-hosting-deploy does not set url outputs on the live channel,
+      # so the deterministic default Hosting domain is constructed directly.
+      - name: Verify deployment
+        run: |
+          URL="https://${{ vars.FIREBASE_PROJECT_ID }}.web.app/"
+          echo "Checking dashboard at: $URL"
+          for i in 1 2 3 4 5; do
+            if curl -sfL "$URL" -o /tmp/dashboard.html && grep -q 'id="root"' /tmp/dashboard.html; then
+              echo "Dashboard check passed"
+              exit 0
+            fi
+            echo "Attempt $i failed, retrying in 10s..."
+            sleep 10
+          done
+          echo "Dashboard check failed after 5 attempts"
+          exit 1
+
+      - name: Print deployment info
+        run: |
+          echo "=========================================="
+          echo "  Dispatcher Dashboard Deployment Complete"
+          echo "=========================================="
+          echo "  Dashboard URL: https://${{ vars.FIREBASE_PROJECT_ID }}.web.app/"
+          echo "=========================================="

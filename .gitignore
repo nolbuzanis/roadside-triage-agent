@@ -36,6 +36,9 @@ wheels/
 .env
 .env.local
 
+# Firebase Hosting deploy service account key (never commit)
+firebase-service-account.json
+
 # IDE
 .vscode/
 .idea/
