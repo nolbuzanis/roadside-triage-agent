@@ -1436,3 +1436,287 @@ The first dispatcher dashboard does **not** include:
 - a dedicated `/api/v1/assistance-requests` backend endpoint
 
 Those should only be introduced after real dispatcher usage demonstrates a need.
+
+---
+
+# Public Demo Session — P0 Sequence
+
+Target experience:
+
+```text
+visitor opens demo page
+→ enters the phone number they will call from
+→ starts a short-lived demo session
+→ page waits for their call
+→ caller phones the Twilio demo number
+→ backend matches the inbound caller to that demo session
+→ assistance request is linked to the session
+→ only that browser can see the live request
+→ session expires automatically
+```
+
+The phone number is used only to correlate the inbound Twilio call with the browser session. It must not, by itself, authorize access to assistance-request data.
+
+Items below are listed in dependency order (A → B → C → D → E → F).
+
+---
+
+## P0 — Add short-lived demo-session model
+
+Add the minimum persistence needed to associate one browser demo session with one inbound phone call.
+
+- Add a `demo_sessions` table containing at minimum:
+  - `id`
+  - `auth_user_id`
+  - `phone_hmac`
+  - `phone_last4`
+  - `expires_at`
+  - `claimed_at`
+  - `call_id`
+  - `created_at`
+- Add optional `demo_session_id` to `assistance_requests`
+- Normalize entered phone numbers to E.164 before matching
+- Do not store the entered phone number as a new plaintext field in `demo_sessions`
+- Store a keyed HMAC of the normalized phone number using a server-side secret rather than a plain hash
+- Default demo-session lifetime to a short configurable window, e.g. 15 minutes
+- A demo session may be claimed by at most one Twilio call
+- Existing non-demo assistance requests remain unchanged
+
+### Acceptance Criteria
+
+- A valid demo session can be created with an expiry timestamp
+- Raw phone number is not persisted in `demo_sessions`
+- The same normalized phone number always produces the same server-side HMAC
+- An expired session cannot be claimed
+- A claimed session cannot be claimed by a second call
+- Existing production assistance-request behavior is unchanged
+- Migration and backend tests pass
+
+### Dependencies
+
+- none
+
+### Status
+
+- [ ] Not started
+
+---
+
+## P0 — Create secure demo-session start flow
+
+Allow a visitor to start a demo without creating a permanent account.
+
+- Enable Supabase anonymous authentication for the public demo
+- On **Start Demo**, create/reuse an anonymous Supabase Auth session in the browser
+- Add a FastAPI endpoint such as:
+
+  `POST /api/v1/demo-sessions`
+
+- Require the Supabase access token on the request
+- Validate the authenticated anonymous user server-side
+- Accept the phone number the visitor intends to call from
+- Normalize it to E.164
+- Compute the server-side phone HMAC
+- Create a short-lived `demo_sessions` row owned by that authenticated user
+- Return only safe session metadata:
+  - session id
+  - phone last four digits
+  - expiry time
+  - demo phone number
+- Do not return or expose the phone HMAC or HMAC secret
+
+### Acceptance Criteria
+
+- Visitor can begin a demo without creating a named account
+- Invalid phone numbers are rejected
+- Missing/invalid Supabase auth tokens are rejected
+- Demo session is associated with the correct anonymous `auth_user_id`
+- Response contains no sensitive phone-matching data
+- Refreshing the browser retains the anonymous Supabase session
+- Backend secrets never enter the frontend bundle
+
+### Dependencies
+
+- P0 — Add short-lived demo-session model
+
+### Status
+
+- [ ] Not started
+
+---
+
+## P0 — Match inbound Twilio calls to demo sessions
+
+When an inbound call begins, associate it with the active browser session created for that caller.
+
+- After validating the Twilio voice webhook, normalize the inbound `From` number to E.164
+- Compute the same server-side phone HMAC used by demo-session creation
+- Look for an unexpired, unclaimed demo session matching that HMAC
+- Atomically claim at most one matching session
+- Store:
+  - `claimed_at`
+  - Twilio `call_id`
+- Link the call's `assistance_request` to the claimed `demo_session_id`
+- Continue normal voice behavior if no demo session exists
+- Never delay or fail the voice call because demo-session matching failed
+- Do not expose matching details in logs
+
+### Acceptance Criteria
+
+- Calling from the number entered on the demo page claims the correct active session
+- The resulting assistance request is linked to that demo session
+- Calling from another number does not attach to the session
+- Expired sessions are ignored
+- Duplicate Twilio webhooks do not claim multiple sessions
+- Two simultaneous callers remain isolated
+- Calls made outside the public demo continue functioning normally
+
+### Dependencies
+
+- P0 — Create secure demo-session start flow
+
+### Status
+
+- [ ] Not started
+
+---
+
+## P0 — Restrict demo request access with RLS
+
+Ensure a public demo visitor can read only the assistance request associated with their own authenticated demo session.
+
+- Add RLS policies allowing an authenticated anonymous user to read:
+  - their own `demo_sessions` row
+  - an `assistance_request` whose `demo_session_id` belongs to that user
+- Require that the demo session is still valid for public-demo access
+- Do not permit anonymous/demo users to:
+  - read other assistance requests
+  - insert assistance requests
+  - update assistance requests
+  - delete assistance requests
+- Preserve dispatcher access to all assistance requests
+- Preserve backend service-role access
+- Ensure Supabase Realtime respects the same SELECT policy
+- Do not authorize access based solely on `caller_phone`
+
+### Acceptance Criteria
+
+- Demo user A can read request A
+- Demo user A cannot read request B
+- Changing query parameters or guessing another request UUID does not expose it
+- Entering another person's phone number does not grant access to historical requests for that number
+- Demo users cannot modify assistance-request data
+- Dispatcher dashboard access remains unchanged
+- Realtime events are delivered only for rows the authenticated demo user may select
+
+### Dependencies
+
+- P0 — Match inbound Twilio calls to demo sessions
+
+### Status
+
+- [ ] Not started
+
+---
+
+## P0 — Build the public demo waiting and live-call UI
+
+Add a simple public demo experience to the Firebase-hosted frontend.
+
+### Before the call
+
+Show:
+
+```text
+Try the Roadside AI Demo
+
+Enter the phone number you'll call from
+
+[ +1 604 555 1234 ]
+
+[ Start Demo ]
+```
+
+After creating the session, show:
+
+```text
+Ready for your call
+
+Call:
+(XXX) XXX-XXXX
+
+Waiting for a call from:
+••• ••• 1234
+
+Session expires in 14:32
+```
+
+### During the call
+
+Once an assistance request is linked, replace the waiting state with the live request:
+
+- call status
+- location
+- vehicle
+- issue
+- intake status
+- `Collecting…` for fields not yet captured
+- visually distinct emergency/escalated state
+
+Subscribe using Supabase Realtime so progressive request updates appear without refresh.
+
+- Never display the full caller phone number
+- Do not expose other requests or request history
+- Handle natural call completion, abandonment, and escalation
+- Display an expired-session state when the demo window ends
+
+### Acceptance Criteria
+
+- User can start the demo from the public page
+- Waiting screen clearly identifies the last four digits being matched
+- Correct inbound call automatically transitions the page to the live request
+- Location, vehicle, and issue appear progressively during the conversation
+- Another demo user's call never appears
+- Completed/abandoned/escalated state appears without refreshing
+- Full caller phone number is never shown
+- Refresh during an active demo restores the correct session and request
+- Expired demo sessions can no longer view request data
+
+### Dependencies
+
+- P0 — Restrict demo request access with RLS
+
+### Status
+
+- [ ] Not started
+
+---
+
+## P0 — Add demo-session expiry and cleanup
+
+Ensure public demo sessions and demo data do not accumulate indefinitely.
+
+- Reject or hide expired demo sessions automatically
+- Add cleanup for expired `demo_sessions`
+- Define a short retention period for public-demo assistance requests, e.g. 48 hours
+- Delete or anonymize expired demo request data according to the chosen retention policy
+- Do not delete non-demo assistance requests
+- Ensure cleanup cannot affect an active call
+- Document the demo retention behavior
+
+### Acceptance Criteria
+
+- Expired sessions cannot access assistance requests
+- Old demo sessions are removed automatically
+- Demo assistance requests older than the configured retention period are removed/anonymized
+- Production/non-demo requests are never affected
+- Active demo calls are never removed by cleanup
+- Cleanup failure does not affect the live voice application
+
+### Dependencies
+
+- P0 — Build the public demo waiting and live-call UI
+
+### Status
+
+- [ ] Not started
