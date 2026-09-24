@@ -201,3 +201,30 @@ class TestStartDemoSession:
         assert insert_payload["phone_last4"] == "1234"
         assert len(insert_payload["phone_hmac"]) == 64
         assert HMAC_SECRET not in insert_payload["phone_hmac"]
+
+    def test_insert_without_id_fails_loudly(self) -> None:
+        get_user = MagicMock()
+        auth_supabase = _mock_supabase_client(user=_anonymous_user(), get_user=get_user)
+        db_supabase = _db_supabase()
+        db_supabase.table.return_value.insert.return_value.execute.return_value = (
+            MagicMock(data=[])
+        )
+        with (
+            patch("app.api.demo_sessions._get_supabase", return_value=auth_supabase),
+            patch(
+                "app.api.demo_sessions.get_settings",
+                return_value=_mock_settings(),
+            ),
+            patch(
+                "app.services.demo_sessions.get_settings",
+                return_value=_mock_settings(),
+            ),
+            patch(
+                "app.services.demo_sessions._get_supabase",
+                return_value=db_supabase,
+            ),
+        ):
+            response = client.post(PATH, json={"phone": PHONE_E164}, headers=_auth_header())
+
+        assert response.status_code == 500
+        assert response.json()["detail"] == "Failed to create demo session"

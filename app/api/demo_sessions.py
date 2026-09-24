@@ -93,7 +93,14 @@ async def start_demo_session(
     )
 
     settings = get_settings()
-    session_id = str(row.get("id", ""))
+    session_id = str(row.get("id") or "")
+    if not session_id:
+        logger.error(
+            "Demo session start failed",
+            reason="insert_returned_no_id",
+            auth_user_id=auth_user_id,
+        )
+        raise HTTPException(status_code=500, detail="Failed to create demo session")
     logger.info(
         "Demo session start succeeded",
         demo_session_id=session_id,
