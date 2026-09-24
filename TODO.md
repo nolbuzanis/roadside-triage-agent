@@ -1165,6 +1165,7 @@ The MVP is complete when all of the following work:
 - Scan the built frontend bundle for backend-secret markers before every Firebase Hosting deploy: after `npm run build` in `.github/workflows/deploy-frontend.yml`, fail the workflow if any file under `frontend/dist/` contains `service_role`, `sb_secret_`, `TWILIO_`, or `OPENAI_` material, so the "no backend secrets in the bundle" criterion is mechanically enforced on each deploy rather than only by the one-time manual smoke inspection. Acceptance: the deploy workflow includes a post-build grep step that exits non-zero on a match; a deliberately planted marker in `dist/` fails the step. Verification: workflow step exists and its matching logic is exercised against a sample marker file; a clean build passes.
 - Migrate FastAPI startup validation from deprecated `@app.on_event("startup")` to `lifespan` context manager
 - Add unit test for `Settings` validation that asserts `ValidationError` when env vars are missing
+- Require non-empty values for the remaining required secrets (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `OPENAI_API_KEY`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`, `DISPATCHER_ALERT_PHONE`, `EMERGENCY_TRANSFER_PHONE`) with the same `Field(min_length=1)` guard already applied to `DEMO_PHONE_HMAC_SECRET`. Acceptance: an empty-string value for any required secret fails startup validation with a field-specific error, while a missing variable still fails as it does today. Verification: unit tests assert `ValidationError` on empty values for each required secret; `python -m pytest tests/ -v` passes.
 - Add unit tests for `AssistanceRequestArgs` Pydantic validation and `UPDATE_ASSISTANCE_REQUEST_TOOL` schema shape
 - Add unit tests for `CallState` and `CallStateManager` (create/get/remove/isolation) and integration tests verifying tool handlers update state correctly
 - Suppress `response.create` for spurious post-greeting input (transcription-based filtering): enable input audio transcription and gate `caller_turn_complete` responses on the committed turn's transcript so empty/filler-only commits (call-setup noise or greeting echo) do not trigger an assistant response. Acceptance: a commit with no speech does not create a response; a commit with real speech creates exactly one. Verification: unit tests feed `conversation.item.input_audio_transcription.completed` with empty vs real transcripts and assert `response.create` counts
@@ -1498,7 +1499,7 @@ Add the minimum persistence needed to associate one browser demo session with on
 
 ### Status
 
-- [ ] Not started
+- [x] Completed in `feat/demo-session-model` PR
 
 ---
 

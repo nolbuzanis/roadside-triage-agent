@@ -63,6 +63,8 @@ cp .env.example .env
 | `TWILIO_PHONE_NUMBER`        | Yes      | Your Twilio-provisioned phone number (e.g., `+16045550199`)                                     |
 | `DISPATCHER_ALERT_PHONE`     | Yes      | Cell phone number of the human dispatcher receiving SMS alerts (e.g., `+16045550100`)           |
 | `EMERGENCY_TRANSFER_PHONE`   | Yes      | Emergency transfer destination (911 or local emergency number)                                  |
+| `DEMO_PHONE_HMAC_SECRET`     | Yes      | Server-side keyed HMAC secret for demo phone matching (generate with `openssl rand -hex 32`)     |
+| `DEMO_SESSION_TTL_SECONDS`   | No       | Demo session lifetime in seconds (default `900` = 15 minutes)                                   |
 
 ### 4. Set Up Supabase
 
@@ -89,6 +91,7 @@ This applies the migrations in `supabase/migrations/`:
 - Row Level Security policies
 - Assistance-request insert webhook for dispatcher notifications
 - `assistance_requests` membership in the `supabase_realtime` publication (Supabase Realtime events for the dashboard)
+- `demo_sessions` table for short-lived public demo sessions (keyed phone HMAC, never plaintext) plus the optional `assistance_requests.demo_session_id` link
 
 Alternatively, you can run the SQL directly in the Supabase SQL Editor (Dashboard → SQL Editor).
 
@@ -199,6 +202,7 @@ app/
     notifier.py                    # Dispatcher SMS via Twilio
     calls.py                       # Per-call session state (CallState, CallStateManager)
     emergency.py                   # Emergency call transfer via Twilio call control
+    demo_sessions.py               # Short-lived demo sessions: phone HMAC matching, at-most-once claims
   realtime/
     __init__.py
     session.py                     # OpenAI Realtime WebSocket session manager
@@ -221,6 +225,7 @@ tests/
   test_latency.py                  # Latency tracking and metrics
   test_early_connection.py         # Early OpenAI connection lifecycle
   test_structured_logging.py       # Structured logging configuration and output
+  test_demo_sessions.py            # Demo-session phone HMAC, TTL, claim guards
 supabase/
   config.toml                      # Supabase CLI configuration
   migrations/                      # SQL migrations (table, RLS, webhooks)
@@ -873,7 +878,9 @@ After the first deploy (tracked by the post-deploy smoke-check TODO in `TODO.md`
 | `TWILIO_PHONE_NUMBER` | Yes | Twilio phone number |
 | `DISPATCHER_ALERT_PHONE` | Yes | Dispatcher SMS destination |
 | `EMERGENCY_TRANSFER_PHONE` | Yes | Emergency transfer number |
+| `DEMO_PHONE_HMAC_SECRET` | Yes | Keyed HMAC secret for demo phone matching (`openssl rand -hex 32`) |
+| `DEMO_SESSION_TTL_SECONDS` | No | Demo session lifetime in seconds (default `900` = 15 minutes) |
 
 ### Production (Secret Manager)
 
-Same variables as above, stored in Google Secret Manager and injected into Cloud Run at runtime.
+Same variables as above, stored in Google Secret Manager and injected into Cloud Run at runtime. Create the `DEMO_PHONE_HMAC_SECRET` secret (with a generated value) before deploying — the service refuses to start without it.
