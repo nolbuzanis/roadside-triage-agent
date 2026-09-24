@@ -1,6 +1,6 @@
-# Dispatcher Dashboard
+# Roadside AI Frontend
 
-Read-only dispatcher UI for the roadside assistance triage agent. Built with Vite, React, TypeScript, and `@supabase/supabase-js`.
+Public demo (home route `/`) and read-only dispatcher UI (`/admin`) for the roadside assistance triage agent. Built with Vite, React, TypeScript, and `@supabase/supabase-js`.
 
 The dashboard authenticates with the single dispatcher Supabase Auth account and reads `assistance_requests` directly from Supabase using the public anon/publishable key. It never contains backend secrets — never put `SUPABASE_SERVICE_ROLE_KEY` in this app.
 
@@ -26,7 +26,7 @@ The dispatcher account must already exist (see the root README, "Create the Disp
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) and sign in with the dispatcher account.
+Open [http://localhost:3000/admin](http://localhost:3000/admin) and sign in with the dispatcher account. The home route (`/`) is the public demo.
 
 ## Build
 

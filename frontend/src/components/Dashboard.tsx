@@ -2,22 +2,12 @@ import { useEffect, useState } from 'react'
 import { REALTIME_SUBSCRIBE_STATES, type Session } from '@supabase/supabase-js'
 import { supabase } from '../lib/supabaseClient'
 import { mergeLoadedRequests, upsertRequest } from '../lib/requestList'
+import {
+  STATUS_INDICATOR,
+  type RealtimeStatus,
+} from '../lib/realtimeStatus'
 import type { AssistanceRequest } from '../types'
 import RequestCard from './RequestCard'
-
-type RealtimeStatus = 'connecting' | 'live' | 'disconnected'
-
-const STATUS_INDICATOR: Record<
-  RealtimeStatus,
-  { label: string; className: string }
-> = {
-  connecting: { label: 'Connecting…', className: 'live-indicator connecting' },
-  live: { label: 'Live', className: 'live-indicator live' },
-  disconnected: {
-    label: 'Disconnected',
-    className: 'live-indicator disconnected',
-  },
-}
 
 export default function Dashboard({ session }: { session: Session }) {
   const [requests, setRequests] = useState<AssistanceRequest[]>([])

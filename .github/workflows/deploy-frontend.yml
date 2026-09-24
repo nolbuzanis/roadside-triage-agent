@@ -109,23 +109,26 @@ jobs:
       # so the deterministic default Hosting domain is constructed directly.
       - name: Verify deployment
         run: |
-          URL="https://${{ vars.FIREBASE_PROJECT_ID }}.web.app/"
-          echo "Checking dashboard at: $URL"
+          URL="https://${{ vars.FIREBASE_PROJECT_ID }}.web.app"
+          ADMIN_URL="$URL/admin"
+          echo "Checking demo at: $URL and dashboard at: $ADMIN_URL"
           for i in 1 2 3 4 5; do
-            if curl -sfL "$URL" -o /tmp/dashboard.html && grep -q 'id="root"' /tmp/dashboard.html; then
-              echo "Dashboard check passed"
+            if curl -sfL "$URL" -o /tmp/demo.html && grep -q 'id="root"' /tmp/demo.html \
+              && curl -sfL "$ADMIN_URL" -o /tmp/dashboard.html && grep -q 'id="root"' /tmp/dashboard.html; then
+              echo "Site check passed"
               exit 0
             fi
             echo "Attempt $i failed, retrying in 10s..."
             sleep 10
           done
-          echo "Dashboard check failed after 5 attempts"
+          echo "Site check failed after 5 attempts"
           exit 1
 
       - name: Print deployment info
         run: |
           echo "=========================================="
-          echo "  Dispatcher Dashboard Deployment Complete"
+          echo "  Frontend Deployment Complete"
           echo "=========================================="
-          echo "  Dashboard URL: https://${{ vars.FIREBASE_PROJECT_ID }}.web.app/"
+          echo "  Demo URL:      https://${{ vars.FIREBASE_PROJECT_ID }}.web.app/"
+          echo "  Dashboard URL: https://${{ vars.FIREBASE_PROJECT_ID }}.web.app/admin"
           echo "=========================================="
