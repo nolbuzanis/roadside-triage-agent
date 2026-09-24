@@ -859,7 +859,7 @@ class RealtimeSession:
                 await self.on_closing_mark_requested(mark_name)
             except Exception:
                 logger.exception(
-                    "closing_playback_mark_send_failed",
+                    "closing_playback_mark_callback_errored",
                     call_sid=self.call_sid,
                     mark_name=mark_name,
                 )
