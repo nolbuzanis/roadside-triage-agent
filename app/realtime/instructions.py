@@ -3,7 +3,7 @@
 OPENING_GREETING = "This is roadside assistance. How can I help?"
 
 # Fixed closing line spoken after update_assistance_request succeeds. The call is
-# hung up only after this response's audio has finished plus a short grace period.
+# hung up only after Twilio acknowledges that this response's audio finished playing.
 CLOSING_MESSAGE = (
     "You're all set. I've logged your roadside assistance request, and a dispatcher will "
     "follow up with you shortly. Please stay somewhere safe. Goodbye."

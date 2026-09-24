@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Generator
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -10,7 +11,11 @@ import pytest
 
 from app.api.twilio import handle_closing_finished, handle_update_assistance_request
 from app.realtime.instructions import CLOSING_MESSAGE
-from app.realtime.session import CLOSING_HANGUP_GRACE_SECONDS, RealtimeSession
+from app.realtime.session import (
+    CLOSING_HANGUP_GRACE_SECONDS,
+    CLOSING_MARK_TIMEOUT_SECONDS,
+    RealtimeSession,
+)
 from app.services.calls import call_manager
 from app.services.hangup import hangup_call
 
@@ -48,7 +53,17 @@ def _make_session(**kwargs: object) -> RealtimeSession:
         "stream_sid": "MZ_closing_test",
     }
     defaults.update(kwargs)
-    return RealtimeSession(**defaults)  # type: ignore[arg-type]
+    session = RealtimeSession(**defaults)  # type: ignore[arg-type]
+    # Default to immediately acknowledging the Twilio playback mark so tests
+    # that are not specifically about mark timing stay deterministic. Tests
+    # about mark behavior pass their own on_closing_mark_requested.
+    if "on_closing_mark_requested" not in kwargs:
+
+        async def _auto_ack_mark(mark_name: str) -> None:
+            session.acknowledge_closing_mark(mark_name)
+
+        session.on_closing_mark_requested = _auto_ack_mark
+    return session
 
 
 def _make_settings() -> MagicMock:
@@ -146,6 +161,11 @@ class TestClosingConstants:
 
     def test_grace_period_is_500_to_1000ms(self) -> None:
         assert 0.5 <= CLOSING_HANGUP_GRACE_SECONDS <= 1.0
+
+    def test_mark_timeout_is_bounded(self) -> None:
+        # A missing mark must fall back safely, never leaving the call open
+        # indefinitely — but the bound must also cover the full closing playback.
+        assert 5.0 <= CLOSING_MARK_TIMEOUT_SECONDS <= 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -559,6 +579,216 @@ class TestCallerInterruption:
         assert session.closing_response_started is True
         assert session.closing_response_completed is False
         assert session.hangup_started is False
+
+
+# ---------------------------------------------------------------------------
+# 6b. Hangup waits for the Twilio closing playback mark
+# ---------------------------------------------------------------------------
+
+
+class TestClosingPlaybackMark:
+    async def test_no_mark_requested_before_closing_completes(self, no_grace: None) -> None:
+        mark_names: list[str] = []
+
+        async def _capture(mark_name: str) -> None:
+            mark_names.append(mark_name)
+
+        on_closing_finished = AsyncMock()
+        session = _make_session(
+            on_closing_mark_requested=_capture,
+            on_closing_finished=on_closing_finished,
+        )
+        await _connect_session(session)
+
+        await _run_successful_intake(session)
+        await session._handle_event({
+            "type": "response.created",
+            "response": {"id": "resp_closing", "status": "in_progress"},
+        })
+
+        assert mark_names == []
+        assert session._hangup_grace_task is None
+        on_closing_finished.assert_not_called()
+
+    async def test_hangup_waits_for_mark_acknowledgment(self, no_grace: None) -> None:
+        mark_names: list[str] = []
+
+        async def _capture(mark_name: str) -> None:
+            mark_names.append(mark_name)
+
+        on_closing_finished = AsyncMock()
+        session = _make_session(
+            on_closing_mark_requested=_capture,
+            on_closing_finished=on_closing_finished,
+        )
+        await _connect_session(session)
+
+        await _run_successful_intake(session)
+        await _finish_closing_response(session)
+        assert session._hangup_grace_task is not None
+
+        # Let the hangup task start and request the mark behind the closing audio.
+        await asyncio.sleep(0)
+        assert len(mark_names) == 1
+        assert mark_names[0].startswith(f"closing-{session.call_sid}-")
+
+        # The mark has not been acknowledged yet: no hangup, even with grace collapsed.
+        on_closing_finished.assert_not_called()
+        assert session.hangup_started is False
+
+        session.acknowledge_closing_mark(mark_names[0])
+        await session._hangup_grace_task
+
+        on_closing_finished.assert_called_once_with("CA_closing_test")
+        assert session.hangup_started is True
+
+    async def test_missing_mark_falls_back_after_bounded_timeout(
+        self, no_grace: None, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        async def _never_ack(mark_name: str) -> None:
+            """Mark is 'sent' but Twilio never echoes it back."""
+
+        on_closing_finished = AsyncMock()
+        session = _make_session(
+            on_closing_mark_requested=_never_ack,
+            on_closing_finished=on_closing_finished,
+        )
+        await _connect_session(session)
+
+        with patch("app.realtime.session.CLOSING_MARK_TIMEOUT_SECONDS", 0.05):
+            with caplog.at_level("INFO"):
+                await _run_successful_intake(session)
+                await _finish_closing_response(session)
+                assert session._hangup_grace_task is not None
+                await session._hangup_grace_task
+
+        assert session.hangup_started is True
+        on_closing_finished.assert_called_once_with("CA_closing_test")
+        assert _events_named(caplog, "closing_playback_mark_timeout")
+        assert _events_named(caplog, "closing_playback_mark_acknowledged") == []
+
+    async def test_missing_mark_callback_falls_back_via_timeout(
+        self, no_grace: None, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        on_closing_finished = AsyncMock()
+        session = _make_session(
+            on_closing_mark_requested=None,
+            on_closing_finished=on_closing_finished,
+        )
+        await _connect_session(session)
+
+        with patch("app.realtime.session.CLOSING_MARK_TIMEOUT_SECONDS", 0.05):
+            with caplog.at_level("WARNING"):
+                await _run_successful_intake(session)
+                await _finish_closing_response(session)
+                assert session._hangup_grace_task is not None
+                await session._hangup_grace_task
+
+        assert _events_named(caplog, "closing_playback_mark_callback_missing")
+        assert _events_named(caplog, "closing_playback_mark_timeout")
+        on_closing_finished.assert_called_once()
+
+    async def test_stale_mark_acknowledgment_is_ignored(self, no_grace: None) -> None:
+        mark_names: list[str] = []
+
+        async def _capture(mark_name: str) -> None:
+            mark_names.append(mark_name)
+
+        on_closing_finished = AsyncMock()
+        session = _make_session(
+            on_closing_mark_requested=_capture,
+            on_closing_finished=on_closing_finished,
+        )
+        await _connect_session(session)
+
+        await _run_successful_intake(session)
+        await _finish_closing_response(session)
+        await asyncio.sleep(0)
+        assert len(mark_names) == 1
+
+        # A foreign/stale mark name must not unblock the wait.
+        session.acknowledge_closing_mark("closing-someone-else-99")
+        await asyncio.sleep(0)
+        on_closing_finished.assert_not_called()
+        assert session.hangup_started is False
+
+        assert session._hangup_grace_task is not None
+        session.acknowledge_closing_mark(mark_names[0])
+        await session._hangup_grace_task
+        on_closing_finished.assert_called_once()
+
+    async def test_caller_speaking_during_mark_wait_defers_hangup(
+        self, no_grace: None, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        mark_names: list[str] = []
+
+        async def _capture(mark_name: str) -> None:
+            mark_names.append(mark_name)
+
+        on_closing_finished = AsyncMock()
+        session = _make_session(
+            on_closing_mark_requested=_capture,
+            on_closing_finished=on_closing_finished,
+        )
+        await _connect_session(session)
+
+        with caplog.at_level("INFO"):
+            await _run_successful_intake(session)
+            await _finish_closing_response(session)
+            await asyncio.sleep(0)
+            assert len(mark_names) == 1
+
+            # Caller starts speaking while the mark wait is in flight.
+            await session._handle_event({"type": "input_audio_buffer.speech_started"})
+
+            # Mark acks, but the re-check must defer the hangup mid-speech.
+            assert session._hangup_grace_task is not None
+            session.acknowledge_closing_mark(mark_names[0])
+            await session._hangup_grace_task
+            on_closing_finished.assert_not_called()
+            assert session.hangup_started is False
+            assert _events_named(caplog, "hangup_deferred_caller_speaking")
+
+            # Speech ends -> a fresh mark is requested and the hangup completes.
+            await session._handle_event({"type": "input_audio_buffer.speech_stopped"})
+            assert session._hangup_grace_task is not None
+            await asyncio.sleep(0)
+            assert len(mark_names) == 2
+            assert mark_names[1] != mark_names[0]
+
+            session.acknowledge_closing_mark(mark_names[1])
+            await session._hangup_grace_task
+
+        assert session.hangup_started is True
+        on_closing_finished.assert_called_once_with("CA_closing_test")
+
+    async def test_late_mark_ack_after_hangup_is_harmless(self, no_grace: None) -> None:
+        mark_names: list[str] = []
+
+        async def _capture(mark_name: str) -> None:
+            mark_names.append(mark_name)
+
+        on_closing_finished = AsyncMock()
+        session = _make_session(
+            on_closing_mark_requested=_capture,
+            on_closing_finished=on_closing_finished,
+        )
+        await _connect_session(session)
+
+        await _run_successful_intake(session)
+        await _finish_closing_response(session)
+        await asyncio.sleep(0)
+        assert session._hangup_grace_task is not None
+        session.acknowledge_closing_mark(mark_names[0])
+        await session._hangup_grace_task
+        on_closing_finished.assert_called_once()
+
+        # Repeated acks and re-arm attempts must not produce a second hangup.
+        session.acknowledge_closing_mark(mark_names[0])
+        session._maybe_arm_hangup()
+        if session._hangup_grace_task is not None:
+            await session._hangup_grace_task
+        on_closing_finished.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
