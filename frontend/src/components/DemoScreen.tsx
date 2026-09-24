@@ -213,6 +213,18 @@ export default function DemoScreen() {
     )
   }
 
+  if (phase === 'active' && demo) {
+    return (
+      <DemoActiveView
+        demo={demo}
+        request={requests[0] ?? null}
+        nowMs={nowMs}
+        realtimeStatus={realtimeStatus}
+        error={error}
+      />
+    )
+  }
+
   return (
     <main className="demo-screen">
       <header className="demo-header">
@@ -228,24 +240,13 @@ export default function DemoScreen() {
         </p>
       )}
 
-      {phase === 'active' && demo ? (
-        <DemoActiveView
-          demo={demo}
-          request={requests[0] ?? null}
-          nowMs={nowMs}
-          realtimeStatus={realtimeStatus}
-        />
-      ) : (
-        <section className="demo-panel demo-expired">
-          <h2>Demo session expired</h2>
-          <p>
-            This demo session has expired. Start a new demo to try again.
-          </p>
-          <button type="button" onClick={handleRestart}>
-            Start a new demo
-          </button>
-        </section>
-      )}
+      <section className="demo-panel demo-expired">
+        <h2>Demo session expired</h2>
+        <p>This demo session has expired. Start a new demo to try again.</p>
+        <button type="button" onClick={handleRestart}>
+          Start a new demo
+        </button>
+      </section>
     </main>
   )
 }
