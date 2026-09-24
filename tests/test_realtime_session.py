@@ -622,6 +622,7 @@ class TestGreetingTurnControl:
         turn_detection = event["session"]["audio"]["input"]["turn_detection"]
         assert turn_detection["type"] == "server_vad"
         assert turn_detection["create_response"] is False
+        assert turn_detection["interrupt_response"] is False
 
     async def test_greeting_creates_exactly_one_response(self) -> None:
         session = _make_session(greeting="Hello there!")

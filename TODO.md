@@ -87,7 +87,7 @@ When the caller begins speaking while the assistant is talking, stop both the ac
 
 ### Status
 
-- [ ] Not started
+- [x] Completed in `feat/caller-interruption-stop-speech` PR
 
 ## P0 — Hang up only after the closing audio finishes playback
 
@@ -1191,6 +1191,8 @@ The MVP is complete when all of the following work:
 - Call/transcript audit tooling
 - Authentication for dispatcher-facing interfaces
 - Cost and usage monitoring per call
+- Cancel a create-in-flight response when the caller interrupts: `input_audio_buffer.speech_started` arriving after `response.create` is sent but before `response.created` is observed sends no `response.cancel` (the app is the sole cancellation authority with `interrupt_response: False`), so a response created in that brief window can keep speaking over the caller until it finishes. Acceptance: caller speech in the create-in-flight window still cancels the pending/just-created response and drops its audio deltas, with no spurious `response.cancel` when no create is pending or when a create fails server-side; normal turn-taking, greeting, and closing flows unchanged. Verification: a unit test drives the exact interleaving (`response.create` sent → `speech_started` → `response.created`) and asserts a cancel targets the pending response and its deltas are not forwarded; the existing interruption, greeting, and closing suites still pass.
+- Live telephony regression check for caller barge-in audibility: unit tests prove `response.cancel` + Twilio `clear` + delta suppression at the message layer, but not audible silence through Twilio's real media buffer. Acceptance: for N test calls, talking over the assistant mid-sentence silences it immediately, the caller can finish a correction without being talked over, and exactly one assistant reply follows the completed turn. Verification: manual call correlating `caller_interruption_detected` → `twilio_playback_cleared` → a single `response_create_sent` in the structured logs, recorded on this item.
 
 ## Recently Completed
 
