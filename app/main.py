@@ -6,6 +6,8 @@ import time
 import httpx
 import structlog
 from fastapi import FastAPI, Query
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import ValidationError
 
 from app.api.demo_sessions import router as demo_sessions_router
 from app.api.twilio import router as twilio_router
@@ -38,9 +40,36 @@ structlog.configure(
 
 logger = structlog.get_logger(__name__)
 
+
+def _cors_allowed_origins() -> list[str]:
+    """Parse the comma-separated ``FRONTEND_ORIGINS`` setting into a list.
+
+    Returns an empty list when settings cannot be loaded (e.g. test collection
+    without environment configuration). Production configuration is still
+    enforced by the startup settings gate below, which exits before serving if
+    required variables are missing; with no configured origins, browser
+    cross-origin requests are simply denied.
+    """
+    try:
+        settings = get_settings()
+    except ValidationError:
+        return []
+    return [
+        origin.strip()
+        for origin in settings.FRONTEND_ORIGINS.split(",")
+        if origin.strip()
+    ]
+
+
 app = FastAPI(title="Roadside Triage Agent")
 app.include_router(twilio_router, prefix="/api/v1")
 app.include_router(demo_sessions_router, prefix="/api/v1")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_allowed_origins(),
+    allow_methods=["GET", "POST"],
+    allow_headers=["Authorization", "Content-Type"],
+)
 
 
 @app.on_event("startup")

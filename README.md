@@ -65,6 +65,7 @@ cp .env.example .env
 | `EMERGENCY_TRANSFER_PHONE`   | Yes      | Emergency transfer destination (911 or local emergency number)                                  |
 | `DEMO_PHONE_HMAC_SECRET`     | Yes      | Server-side keyed HMAC secret for demo phone matching (generate with `openssl rand -hex 32`)     |
 | `DEMO_SESSION_TTL_SECONDS`   | No       | Demo session lifetime in seconds (default `900` = 15 minutes)                                   |
+| `FRONTEND_ORIGINS`           | No       | Comma-separated browser origins allowed to call the API cross-origin (default: none)             |
 
 ### 4. Set Up Supabase
 
