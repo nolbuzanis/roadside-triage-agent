@@ -59,6 +59,67 @@ Twilio owns PSTN calling and dispatcher SMS.
 
 ---
 
+# Bugs
+
+## P0 — Make caller interruption stop assistant speech immediately
+
+When the caller begins speaking while the assistant is talking, stop both the active OpenAI response and any assistant audio still buffered for Twilio playback.
+
+- Detect caller speech start during an active assistant response
+- Cancel/truncate the active OpenAI response using the supported Realtime interruption flow
+- Clear queued outbound Twilio media so previously generated assistant audio does not continue playing
+- Preserve the caller's new audio/turn normally
+- Do not create duplicate assistant responses after interruption
+- Keep greeting and closing state machines compatible with interruption behavior
+
+### Acceptance Criteria
+
+- Caller speech during assistant playback stops audible assistant speech immediately
+- No stale assistant audio continues after interruption
+- Caller can finish a correction or additional detail without being talked over
+- Exactly one assistant response is generated for the completed caller turn
+- Repeated interruptions do not corrupt session state
+- Existing normal-call, emergency, greeting, and closing tests still pass
+
+### Dependencies
+
+- none
+
+### Status
+
+- [ ] Not started
+
+## P0 — Hang up only after the closing audio finishes playback
+
+Do not hang up based only on OpenAI `response.done`. Verify that the final closing audio has actually finished playing to the caller before completing the Twilio call.
+
+- Keep the fixed closing-message flow
+- After the final closing audio has been sent to Twilio, send a Twilio Media Streams `mark`
+- Track the mark for the current closing response/call
+- Wait for Twilio's corresponding `mark` event before starting hangup
+- Remove the fixed 750ms grace period as the primary delivery guarantee
+- Add a bounded fallback timeout so a missing mark cannot leave the call open forever
+- Preserve caller barge-in behavior: if the caller speaks before final playback completes, do not hang up underneath the new turn
+
+### Acceptance Criteria
+
+- The caller hears the entire closing message before disconnect
+- Twilio hangup starts only after the closing playback mark is acknowledged
+- A missing mark falls back safely after a bounded timeout
+- Caller interruption during the closing cancels/defer hangup correctly
+- No duplicate hangup occurs
+- Existing closing/emergency teardown tests continue to pass
+
+### Dependencies
+
+- P0 — Make caller interruption stop assistant speech immediately
+
+### Status
+
+- [ ] Not started
+
+---
+
 # Progressive `assistance_request` Lifecycle — P0 Sequence
 
 Target lifecycle:
