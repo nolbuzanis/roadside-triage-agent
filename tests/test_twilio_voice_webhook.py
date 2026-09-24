@@ -54,6 +54,16 @@ def _mock_abandon_if_open() -> Generator[MagicMock]:
         yield mock_abandon
 
 
+@pytest.fixture(autouse=True)
+def _mock_match_demo_session_for_call() -> Generator[MagicMock]:
+    """Mock demo-session matching so webhook tests never hit Supabase."""
+    with patch(
+        "app.api.twilio.match_demo_session_for_call",
+        return_value=None,
+    ) as mock_match:
+        yield mock_match
+
+
 @patch("app.api.twilio._validate_twilio_request")
 def test_valid_twilio_request_returns_twiml(mock_validate: MagicMock) -> None:
     """A valid Twilio request should return TwiML XML with a Media Stream."""

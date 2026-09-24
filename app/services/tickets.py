@@ -273,3 +273,39 @@ def abandon_if_open(*, call_id: str) -> None:
         logger.exception(
             "Failed to finalize intake status", call_id=call_id, status="abandoned"
         )
+
+
+def link_demo_session(*, call_id: str, demo_session_id: str) -> None:
+    """Attach a claimed demo session to the call's assistance request.
+
+    Guarded update: only fills `demo_session_id` while it is still null, so
+    duplicate Twilio webhooks are idempotent and an existing link is never
+    overwritten. Matching zero rows (no assistance-request row yet, or
+    already linked) is surfaced loudly. Non-blocking: logs failures but does
+    not raise.
+    """
+    try:
+        supabase = _get_supabase()
+        result = (
+            supabase.table("assistance_requests")
+            .update({"demo_session_id": demo_session_id})
+            .eq("call_id", call_id)
+            .is_("demo_session_id", None)
+            .execute()
+        )
+        rows_updated = len(result.data or [])
+        if rows_updated == 0:
+            logger.warning(
+                "Demo session link matched no assistance request",
+                call_id=call_id,
+                demo_session_id=demo_session_id,
+            )
+            return
+        logger.info(
+            "Demo session linked",
+            call_id=call_id,
+            demo_session_id=demo_session_id,
+            rows_updated=rows_updated,
+        )
+    except Exception:
+        logger.exception("Failed to link demo session", call_id=call_id)

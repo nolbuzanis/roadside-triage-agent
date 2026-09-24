@@ -158,3 +158,63 @@ def claim_demo_session(*, session_id: str, call_id: str) -> dict[str, Any] | Non
         call_id=call_id,
     )
     return dict(result.data[0])  # type: ignore[arg-type]
+
+
+# Cap how many claimable candidates one inbound call will race through.
+_MAX_CLAIM_CANDIDATES = 5
+
+
+def match_demo_session_for_call(*, call_id: str, caller_phone: str) -> dict[str, Any] | None:
+    """Find and claim at most one active demo session for an inbound Twilio call.
+
+    Normalizes the caller number to E.164 and looks up unexpired, unclaimed
+    sessions by keyed phone HMAC (newest first). Candidates are claimed
+    through the existing atomic guarded claim, so a duplicate webhook or a
+    concurrent call can never claim the same session twice; if this call
+    already owns a claim it is returned as-is (duplicate-webhook idempotency).
+
+    Returns the claimed session row, or None when there is nothing to match.
+    Never logs the raw phone number or its HMAC; an unparseable caller number
+    is treated as "no match" rather than an error.
+    """
+    try:
+        phone_e164 = normalize_phone_e164(phone=caller_phone)
+    except ValueError:
+        logger.info("Demo session match skipped", call_id=call_id, reason="invalid_phone")
+        return None
+
+    supabase = _get_supabase()
+
+    # Duplicate webhooks: this call may already own a claim (the table's
+    # claim-fields constraint sets call_id together with claimed_at).
+    existing = (
+        supabase.table("demo_sessions").select("*").eq("call_id", call_id).limit(1).execute()
+    )
+    if existing.data:
+        row = dict(existing.data[0])  # type: ignore[arg-type]
+        logger.info(
+            "Demo session already claimed for call",
+            call_id=call_id,
+            demo_session_id=row.get("id"),
+        )
+        return row
+
+    now = datetime.now(UTC).isoformat()
+    candidates = (
+        supabase.table("demo_sessions")
+        .select("*")
+        .eq("phone_hmac", hash_phone(phone_e164=phone_e164))
+        .is_("claimed_at", None)
+        .gt("expires_at", now)
+        .order("created_at", desc=True)
+        .limit(_MAX_CLAIM_CANDIDATES)
+        .execute()
+    )
+
+    candidate_rows: list[dict[str, Any]] = candidates.data or []  # type: ignore[assignment]
+    for candidate in candidate_rows:
+        claimed = claim_demo_session(session_id=str(candidate["id"]), call_id=call_id)
+        if claimed is not None:
+            return claimed
+
+    return None
