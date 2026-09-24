@@ -27,9 +27,15 @@ REALTIME_URL = "wss://api.openai.com/v1/realtime"
 # to avoid audio conversion overhead.
 TWILIO_AUDIO_RATE = 8000
 
-# Grace period between the closing response finishing and the Twilio hangup,
-# giving Twilio's media pipeline time to drain the final audio.
+# Grace period after Twilio acknowledges the closing playback mark (or after the
+# bounded mark timeout), giving the media pipeline a final moment to drain. The
+# mark acknowledgment — not this timer — is the primary delivery guarantee.
 CLOSING_HANGUP_GRACE_SECONDS = 0.75
+
+# Bounded fallback for a missing Twilio playback mark: if the mark event never
+# arrives, hangup proceeds after this timeout so the call cannot stay open
+# forever. Must exceed the longest expected closing-message playback duration.
+CLOSING_MARK_TIMEOUT_SECONDS = 20.0
 
 
 @dataclass
@@ -56,6 +62,7 @@ class RealtimeSession:
     on_error: Callable[[Exception], Coroutine[Any, Any, None]] | None = None
     on_closing_finished: Callable[[str], Coroutine[Any, Any, None]] | None = None
     on_clear_playback: Callable[[], Coroutine[Any, Any, None]] | None = None
+    on_closing_mark_requested: Callable[[str], Coroutine[Any, Any, None]] | None = None
 
     _ws: ClientConnection | None = field(default=None, init=False, repr=False)
     _connected: bool = field(default=False, init=False, repr=False)
@@ -66,7 +73,8 @@ class RealtimeSession:
 
     # Per-call closing-flow state:
     # intake_completed -> closing_response_started -> closing_response_completed
-    # -> hangup_started. The sequence runs at most once per call.
+    # -> Twilio closing playback mark acknowledged -> hangup_started.
+    # The sequence runs at most once per call.
     intake_completed: bool = field(default=False, init=False, repr=False)
     closing_response_started: bool = field(default=False, init=False, repr=False)
     closing_response_completed: bool = field(default=False, init=False, repr=False)
@@ -80,6 +88,9 @@ class RealtimeSession:
     _hangup_grace_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _active_response_id: str | None = field(default=None, init=False, repr=False)
     _interrupted_response_id: str | None = field(default=None, init=False, repr=False)
+    _closing_mark_event: asyncio.Event | None = field(default=None, init=False, repr=False)
+    _closing_mark_name: str | None = field(default=None, init=False, repr=False)
+    _closing_mark_seq: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize the latency tracker for this call."""
@@ -679,7 +690,8 @@ class RealtimeSession:
         Sends a response.create carrying per-response instructions that require
         the model to speak exactly ``CLOSING_MESSAGE`` and nothing else, mirroring
         the deterministic greeting trigger. The hangup is NOT started here — it
-        waits for this response to finish (see _handle_closing_response_done).
+        waits for this response to finish and for Twilio to confirm the audio
+        finished playing (see _handle_closing_response_done).
         """
         if self.closing_response_started:
             logger.warning("closing_response_already_started", call_sid=self.call_sid)
@@ -773,13 +785,16 @@ class RealtimeSession:
             self._maybe_arm_hangup()
 
     def _maybe_arm_hangup(self) -> None:
-        """Start the grace-then-hangup sequence once the closing flow is safe.
+        """Start the mark-then-hangup sequence once the closing flow is safe.
 
-        Deferred while the caller is speaking so the call is never disconnected
-        in the middle of caller speech, and suppressed entirely once an emergency
-        transfer has been requested so the transfer is never terminated.
-        Re-armed from speech_stopped/committed once it is safe again. At most
-        one grace task exists at a time.
+        The armed task first requests a Twilio Media Streams mark behind the
+        final closing audio and waits (bounded) for Twilio's mark event, so the
+        hangup never races the closing playback. Deferred while the caller is
+        speaking so the call is never disconnected in the middle of caller
+        speech, and suppressed entirely once an emergency transfer has been
+        requested so the transfer is never terminated. Re-armed from
+        speech_stopped/committed once it is safe again. At most one hangup
+        task exists at a time.
         """
         if self.hangup_started or not self.closing_response_completed:
             return
@@ -791,17 +806,18 @@ class RealtimeSession:
             return
         if self._hangup_grace_task is not None and not self._hangup_grace_task.done():
             return
-        self._hangup_grace_task = asyncio.create_task(self._hangup_after_grace())
+        self._hangup_grace_task = asyncio.create_task(self._hangup_after_playback())
 
-    async def _hangup_after_grace(self) -> None:
-        """Wait the grace period, re-check safety, then finish the closing flow."""
+    async def _hangup_after_playback(self) -> None:
+        """Wait for Twilio to confirm closing playback, settle, re-check, hang up."""
         try:
+            await self._await_closing_playback_mark()
             await asyncio.sleep(CLOSING_HANGUP_GRACE_SECONDS)
             if self.hangup_started or not self.closing_response_completed:
                 return
             if self._transfer_requested:
-                # An emergency transfer was requested during the grace period;
-                # transferring the call away must win over our hangup.
+                # An emergency transfer was requested while waiting for playback
+                # confirmation; transferring the call away must win over our hangup.
                 logger.info("hangup_suppressed_transfer", call_sid=self.call_sid)
                 return
             if self._caller_speaking:
@@ -815,15 +831,84 @@ class RealtimeSession:
         except Exception:
             logger.exception("Closing hangup callback failed", call_sid=self.call_sid)
 
+    async def _await_closing_playback_mark(self) -> None:
+        """Request a Twilio playback mark and wait for its acknowledgment.
+
+        The mark is requested only after the closing response reaches
+        ``response.done``, which fires after every audio delta has already been
+        forwarded to Twilio — so the mark sits behind the complete closing
+        audio in the stream. Twilio echoes the mark event once it has flushed
+        the media up to that point, i.e. the caller has received the closing
+        message. A missing mark falls back after CLOSING_MARK_TIMEOUT_SECONDS
+        so the call can never be left open forever.
+        """
+        self._closing_mark_seq += 1
+        mark_name = f"closing-{self.call_sid}-{self._closing_mark_seq}"
+        self._closing_mark_name = mark_name
+        event = asyncio.Event()
+        self._closing_mark_event = event
+
+        if self.on_closing_mark_requested is None:
+            logger.warning(
+                "closing_playback_mark_callback_missing",
+                call_sid=self.call_sid,
+                mark_name=mark_name,
+            )
+        else:
+            try:
+                await self.on_closing_mark_requested(mark_name)
+            except Exception:
+                logger.exception(
+                    "closing_playback_mark_callback_errored",
+                    call_sid=self.call_sid,
+                    mark_name=mark_name,
+                )
+
+        try:
+            await asyncio.wait_for(event.wait(), timeout=CLOSING_MARK_TIMEOUT_SECONDS)
+        except TimeoutError:
+            logger.warning(
+                "closing_playback_mark_timeout",
+                call_sid=self.call_sid,
+                mark_name=mark_name,
+                timeout_seconds=CLOSING_MARK_TIMEOUT_SECONDS,
+            )
+            return
+        logger.info(
+            "closing_playback_mark_acknowledged",
+            call_sid=self.call_sid,
+            mark_name=mark_name,
+        )
+
+    def acknowledge_closing_mark(self, mark_name: str) -> None:
+        """Resolve the pending closing playback mark when Twilio echoes it back.
+
+        Called from the Twilio Media Stream receive loop. A mark that does not
+        match the currently pending one (stale or foreign) is ignored so an old
+        acknowledgment can never unblock a newer wait.
+        """
+        if not mark_name or mark_name != self._closing_mark_name:
+            logger.debug(
+                "closing_playback_mark_unexpected",
+                call_sid=self.call_sid,
+                mark_name=mark_name,
+                expected=self._closing_mark_name,
+            )
+            return
+        if self._closing_mark_event is not None:
+            self._closing_mark_event.set()
+
     async def close(self) -> None:
         """Cleanly close the OpenAI Realtime session and WebSocket."""
         logger.info("Closing OpenAI Realtime session", call_sid=self.call_sid)
         self._connected = False
 
-        # Cancel any pending closing-flow grace task so it cannot fire after teardown.
+        # Cancel any pending closing-flow hangup task so it cannot fire after teardown.
         if self._hangup_grace_task is not None and not self._hangup_grace_task.done():
             self._hangup_grace_task.cancel()
         self._hangup_grace_task = None
+        self._closing_mark_event = None
+        self._closing_mark_name = None
 
         # Record call ended and log latency metrics
         assert self.latency_tracker is not None
