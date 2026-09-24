@@ -227,11 +227,13 @@ async def send_clear_to_twilio(
 async def handle_closing_finished(call_sid: str) -> None:
     """Hang up the Twilio call after the closing flow safely finished.
 
-    Invoked by the RealtimeSession once the closing response has completed and
-    the grace period has elapsed without the caller speaking. Skips the Twilio
-    call when the call already disconnected naturally (state cleaned up) or when
-    an emergency transfer owns the call, so neither case is treated as an error
-    and a live transfer is never terminated.
+    Invoked by the RealtimeSession once the closing response has completed,
+    Twilio has acknowledged the closing playback mark (or the bounded mark
+    timeout elapsed), and the grace period has elapsed without the caller
+    speaking. Skips the Twilio call when the call already disconnected
+    naturally (state cleaned up) or when an emergency transfer owns the call,
+    so neither case is treated as an error and a live transfer is never
+    terminated.
     """
     if not call_sid:
         logger.warning("call_hangup_skipped_missing_call_sid")
@@ -256,6 +258,46 @@ async def handle_closing_finished(call_sid: str) -> None:
         logger.info("call_hangup_completed", call_sid=call_sid)
     else:
         logger.warning("call_hangup_failed", call_sid=call_sid)
+
+
+async def _send_media_stream_mark(
+    websocket: WebSocket,
+    *,
+    stream_sid: str | None,
+    mark_name: str,
+    call_sid: str | None,
+) -> None:
+    """Send a Twilio Media Streams mark and log the attempt.
+
+    Sent after the final closing audio frames so Twilio's echoed mark event
+    confirms the caller received the complete closing message before hangup.
+    Failures are logged loudly; the session's bounded mark timeout remains the
+    fallback so a lost mark can never leave the call open forever.
+    """
+    if not stream_sid:
+        logger.warning(
+            "closing_playback_mark_skipped_no_stream",
+            call_sid=call_sid,
+            mark_name=mark_name,
+        )
+        return
+    try:
+        await websocket.send_json({
+            "event": "mark",
+            "streamSid": stream_sid,
+            "mark": {"name": mark_name},
+        })
+        logger.info(
+            "closing_playback_mark_sent",
+            call_sid=call_sid,
+            mark_name=mark_name,
+        )
+    except Exception:
+        logger.warning(
+            "closing_playback_mark_send_failed",
+            call_sid=call_sid,
+            mark_name=mark_name,
+        )
 
 
 _validator: RequestValidator | None = None
@@ -506,6 +548,15 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
             return
         await send_clear_to_twilio(websocket, stream_sid=stream_sid, call_sid=call_sid)
 
+    async def send_closing_mark(mark_name: str) -> None:
+        """Request a playback mark for the closing audio on this stream."""
+        await _send_media_stream_mark(
+            websocket,
+            stream_sid=stream_sid,
+            mark_name=mark_name,
+            call_sid=call_sid,
+        )
+
     async def handle_session_error(error: Exception) -> None:
         """Log errors from the OpenAI Realtime session."""
         logger.error("Realtime session error", call_sid=call_sid, error=str(error))
@@ -572,6 +623,7 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                         session.on_tool_call = handle_tool_call
                         session.on_error = handle_session_error
                         session.on_closing_finished = handle_closing_finished
+                        session.on_closing_mark_requested = send_closing_mark
                         # Start draining OpenAI events BEFORE the greeting so
                         # the greeting audio and its response.done are always
                         # observed, then deliver the deferred greeting.
@@ -627,6 +679,7 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                         on_tool_call=handle_tool_call,
                         on_error=handle_session_error,
                         on_closing_finished=handle_closing_finished,
+                        on_closing_mark_requested=send_closing_mark,
                     )
 
                     # Record call started and twilio stream started events
@@ -668,6 +721,11 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                     payload = data.get("media", {}).get("payload", "")
                     if payload:
                         await session.send_audio(payload)
+
+            elif event == "mark":
+                mark_name = data.get("mark", {}).get("name") or ""
+                if session is not None and mark_name:
+                    session.acknowledge_closing_mark(mark_name)
 
             elif event in ("stop", "closed"):
                 logger.info("Media Stream stopping", call_sid=call_sid)

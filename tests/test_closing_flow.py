@@ -3,13 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from collections.abc import Generator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi.testclient import TestClient
 
-from app.api.twilio import handle_closing_finished, handle_update_assistance_request
+from app.api.twilio import (
+    EarlyConnection,
+    _pending_connections,
+    _send_media_stream_mark,
+    handle_closing_finished,
+    handle_update_assistance_request,
+)
+from app.main import app
 from app.realtime.instructions import CLOSING_MESSAGE
 from app.realtime.session import (
     CLOSING_HANGUP_GRACE_SECONDS,
@@ -1029,6 +1038,151 @@ class TestHandleClosingFinished:
 
         mock_hangup.assert_not_called()
         assert _events_named(caplog, "call_hangup_skipped_missing_call_sid")
+
+
+# ---------------------------------------------------------------------------
+# Twilio Media Streams mark bridge (send + receive)
+# ---------------------------------------------------------------------------
+
+
+def _make_session_mock() -> MagicMock:
+    session = MagicMock()
+    session.connect = AsyncMock()
+    session.close = AsyncMock()
+    session.send_audio = AsyncMock()
+    session.process_events = AsyncMock()
+    session.set_stream_sid_and_greet = AsyncMock()
+    session.is_connected = True
+    session.latency_tracker = MagicMock()
+    session.acknowledge_closing_mark = MagicMock()
+    return session
+
+
+def _start_event(*, call_sid: str, stream_sid: str = "MS_mark") -> dict:
+    return {
+        "event": "start",
+        "start": {
+            "streamSid": stream_sid,
+            "callSid": call_sid,
+            "customParameters": {
+                "call_sid": call_sid,
+                "caller_phone": "+15551234567",
+            },
+        },
+    }
+
+
+class TestMediaStreamMarkBridge:
+    async def test_mark_message_shape(self) -> None:
+        ws = AsyncMock()
+        await _send_media_stream_mark(
+            ws, stream_sid="MZ_1", mark_name="closing-CA_1-1", call_sid="CA_1"
+        )
+        ws.send_json.assert_awaited_once_with({
+            "event": "mark",
+            "streamSid": "MZ_1",
+            "mark": {"name": "closing-CA_1-1"},
+        })
+
+    async def test_mark_skipped_without_stream(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        ws = AsyncMock()
+        with caplog.at_level("WARNING"):
+            await _send_media_stream_mark(
+                ws, stream_sid=None, mark_name="closing-CA_1-1", call_sid="CA_1"
+            )
+        ws.send_json.assert_not_awaited()
+        assert _events_named(caplog, "closing_playback_mark_skipped_no_stream")
+
+    async def test_mark_send_failure_logged_not_raised(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        ws = AsyncMock()
+        ws.send_json.side_effect = RuntimeError("socket closed")
+        with caplog.at_level("WARNING"):
+            await _send_media_stream_mark(
+                ws, stream_sid="MZ_1", mark_name="closing-CA_1-1", call_sid="CA_1"
+            )
+        assert _events_named(caplog, "closing_playback_mark_send_failed")
+
+    @patch("app.api.twilio.abandon_if_open")
+    @patch("app.api.twilio.RealtimeSession")
+    def test_fallback_path_attaches_mark_callback_and_routes_inbound_mark(
+        self,
+        mock_session_cls: MagicMock,
+        mock_abandon: MagicMock,
+    ) -> None:
+        client = TestClient(app)
+        session = _make_session_mock()
+        mock_session_cls.return_value = session
+
+        with client.websocket_connect("/api/v1/twilio/media-stream") as ws:
+            ws.send_json({"event": "connected"})
+            ws.send_json(_start_event(call_sid="CA_mark_fb"))
+            # Events are processed in order, so the mark is handled only after
+            # the session was constructed with its mark callback.
+            ws.send_json({"event": "mark", "mark": {"name": "closing-CA_mark_fb-1"}})
+            ws.send_json({"event": "stop"})
+
+        # Assert only after the handler has finished processing the queue.
+        callback = mock_session_cls.call_args.kwargs.get("on_closing_mark_requested")
+        assert callable(callback)
+        session.acknowledge_closing_mark.assert_called_once_with("closing-CA_mark_fb-1")
+
+    @patch("app.api.twilio.abandon_if_open")
+    def test_early_path_attaches_mark_callback_and_routes_inbound_mark(
+        self, mock_abandon: MagicMock
+    ) -> None:
+        client = TestClient(app)
+        session = _make_session_mock()
+
+        async def _immediate() -> object:
+            return session
+
+        # A completed task can be awaited from the handler's event loop without
+        # touching the loop that created it, which lets the sync TestClient
+        # drive the early-connection reuse path.
+        loop = asyncio.new_event_loop()
+        try:
+            task = loop.create_task(_immediate())
+            loop.run_until_complete(task)
+        finally:
+            loop.close()
+        assert task.done()
+
+        _pending_connections["CA_early_mark"] = EarlyConnection(
+            call_sid="CA_early_mark",
+            caller_phone="+15551234567",
+            connection_task=task,  # type: ignore[arg-type]
+        )
+        try:
+            with client.websocket_connect("/api/v1/twilio/media-stream") as ws:
+                ws.send_json({"event": "connected"})
+                ws.send_json(_start_event(call_sid="CA_early_mark"))
+                # The mark is processed only after the early-path callback assignment.
+                ws.send_json({
+                    "event": "mark",
+                    "mark": {"name": "closing-CA_early_mark-1"},
+                })
+                ws.send_json({"event": "stop"})
+        finally:
+            _pending_connections.pop("CA_early_mark", None)
+
+        # The early path assigns the real send-closing-mark closure.
+        assert inspect.iscoroutinefunction(session.on_closing_mark_requested)
+        session.acknowledge_closing_mark.assert_called_once_with("closing-CA_early_mark-1")
+
+    @patch("app.api.twilio.abandon_if_open")
+    def test_inbound_mark_before_start_is_ignored(self, mock_abandon: MagicMock) -> None:
+        client = TestClient(app)
+        with client.websocket_connect("/api/v1/twilio/media-stream") as ws:
+            ws.send_json({"event": "connected"})
+            # No session yet: a stray mark must not crash the handler.
+            ws.send_json({"event": "mark", "mark": {"name": "closing-unknown-1"}})
+            ws.send_json({"event": "stop"})
+
+        mock_abandon.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
