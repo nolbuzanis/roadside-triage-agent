@@ -116,7 +116,7 @@ Do not hang up based only on OpenAI `response.done`. Verify that the final closi
 
 ### Status
 
-- [ ] Not started
+- [x] Completed in `feat/hangup-after-closing-audio` PR
 
 ---
 
