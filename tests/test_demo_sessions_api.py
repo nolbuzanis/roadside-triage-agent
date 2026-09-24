@@ -104,14 +104,32 @@ class TestAuthRejections:
         assert response.status_code == 401
         get_user.assert_called_once_with(jwt=TOKEN)
 
-    def test_non_anonymous_user_returns_403(self) -> None:
+    def test_non_anonymous_user_can_start_session(self) -> None:
         user = _anonymous_user()
         user.is_anonymous = False
         get_user = MagicMock()
-        supabase = _mock_supabase_client(user=user, get_user=get_user)
-        with patch("app.api.demo_sessions._get_supabase", return_value=supabase):
+        auth_supabase = _mock_supabase_client(user=user, get_user=get_user)
+        db_supabase = _db_supabase()
+        with (
+            patch("app.api.demo_sessions._get_supabase", return_value=auth_supabase),
+            patch(
+                "app.api.demo_sessions.get_settings",
+                return_value=_mock_settings(),
+            ),
+            patch(
+                "app.services.demo_sessions.get_settings",
+                return_value=_mock_settings(),
+            ),
+            patch(
+                "app.services.demo_sessions._get_supabase",
+                return_value=db_supabase,
+            ),
+        ):
             response = client.post(PATH, json={"phone": PHONE_E164}, headers=_auth_header())
-        assert response.status_code == 403
+
+        assert response.status_code == 201
+        insert_payload = db_supabase.table.return_value.insert.call_args[0][0]
+        assert insert_payload["auth_user_id"] == AUTH_USER_ID
 
 
 class TestPhoneValidation:

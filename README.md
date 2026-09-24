@@ -107,12 +107,12 @@ The dispatcher dashboard authenticates with Supabase Auth using a single dispatc
 
 #### Enable Anonymous Sign-Ins for the Public Demo (One-Time)
 
-The public demo starts each visitor with a short-lived **anonymous** Supabase Auth session (no named account). Email/password sign-ups stay disabled, so this does not open public account creation.
+The public demo starts each visitor with a short-lived **anonymous** Supabase Auth session (no named account). Email/password sign-ups stay disabled, so this does not open public account creation. Any already signed-in account (such as the dispatcher) may also start a demo — the backend accepts any authenticated token and scopes reads by ownership, not anonymity.
 
 1. In the Supabase Dashboard, open **Authentication → Sign In / Providers** and enable **Anonymous** sign-ins. Local development mirrors this in `supabase/config.toml` (`enable_anonymous_sign_ins = true`).
-2. The backend validates the visitor's anonymous access token on `POST /api/v1/demo-sessions` using the service-role Supabase client; no new secret is required.
+2. The backend validates the visitor's access token on `POST /api/v1/demo-sessions` using the service-role Supabase client; no new secret is required.
 3. As with the dispatcher dashboard, browsers only ever hold the public project URL and anon/publishable key — never the service-role key.
-4. Row Level Security scopes what an anonymous session can read: its own unexpired `demo_sessions` row (via the `Demo user can read own demo session` policy) and only the `assistance_requests` row linked to that session while it is still valid (via the restrictive `Demo users read only their linked assistance requests` policy). The dispatcher account keeps full read access, demo sessions stay read-only, and access is never granted from `caller_phone`. Supabase Realtime applies the same SELECT policies to INSERT/UPDATE subscription events.
+4. Row Level Security scopes what an authenticated session can read: its own unexpired `demo_sessions` row (via the `Demo user can read own demo session` policy, which applies to anonymous and signed-in owners alike) and — for anonymous sessions — only the `assistance_requests` row linked to that session while it is still valid (via the restrictive `Demo users read only their linked assistance requests` policy). The dispatcher account keeps full read access, demo sessions stay read-only, and access is never granted from `caller_phone`. Supabase Realtime applies the same SELECT policies to INSERT/UPDATE subscription events.
 
 ### 5. Configure Twilio Phone Number
 
@@ -194,7 +194,7 @@ npm run dev
 
 Open [http://localhost:3000/admin](http://localhost:3000/admin) and sign in with the dispatcher account created in [Create the Dispatcher Account (One-Time)](#create-the-dispatcher-account-one-time). The home route (`/`) serves the public demo; the dispatcher login and dashboard live at `/admin`. Never put `SUPABASE_SERVICE_ROLE_KEY` in the frontend environment. Production deployments of the dashboard go to Firebase Hosting — see [Production Deployment (Firebase Hosting)](#production-deployment-firebase-hosting).
 
-The demo start helper in `frontend/src/lib/demoSession.ts` (`startDemoSession(phone)`) creates or reuses the visitor's anonymous Supabase session and calls `POST /api/v1/demo-sessions` on the backend URL from `VITE_API_BASE_URL`. For the browser to reach a backend on a different origin, list that frontend origin in the backend's `FRONTEND_ORIGINS` setting.
+The demo start helper in `frontend/src/lib/demoSession.ts` (`startDemoSession(phone)`) creates or reuses the browser's current Supabase session (an anonymous one for a public visitor, or the signed-in account's session) and calls `POST /api/v1/demo-sessions` on the backend URL from `VITE_API_BASE_URL`. For the browser to reach a backend on a different origin, list that frontend origin in the backend's `FRONTEND_ORIGINS` setting.
 
 ---
 
