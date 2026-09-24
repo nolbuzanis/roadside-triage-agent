@@ -24,6 +24,10 @@ import psycopg.rows
 import pytest
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "supabase" / "migrations"
+# Behavior tests run against the full chain: the fixture applies this target
+# and then every later migration (see _migration_split), so
+# 20260924170000_allow_any_auth_demo_session_owner_rls.sql is exercised through
+# the `after` step rather than as a target of its own.
 TARGET_MIGRATION = "20260924120000_restrict_demo_request_access_rls.sql"
 
 USER_A = "11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -303,6 +307,9 @@ class TestPolicyCatalog:
         assert row["roles"] == ["authenticated"]
         assert "auth_user_id" in row["qual"]
         assert "expires_at" in row["qual"]
+        # Ownership is identity + validity only — any authenticated owner,
+        # not just an anonymous session, may read their own row.
+        assert "is_anonymous" not in row["qual"]
 
     def test_no_write_policy_for_authenticated(self, migration_db: MigrationDb) -> None:
         row = migration_db.conn.execute(
@@ -406,6 +413,50 @@ class TestDemoUserAccess:
         rows = _as_authenticated(
             migration_db.conn,
             _anonymous_claims(USER_A),
+            "select id from demo_sessions where id = %s",
+            (SESSION_A_EXPIRED,),
+        )
+        assert rows == []
+
+
+# ---------------------------------------------------------------------------
+# Any authenticated owner reads their own demo session row
+# ---------------------------------------------------------------------------
+
+
+class TestDemoSessionOwnerReads:
+    """Demo-session reads derive from ownership + validity, not anonymity.
+
+    A non-anonymous authenticated user (e.g. the dispatcher running the
+    public demo from a signed-in browser) can read back the unexpired demo
+    session they own; non-owners — signed-in or not — read none."""
+
+    def test_permanent_owner_reads_own_demo_session(
+        self, migration_db: MigrationDb
+    ) -> None:
+        rows = _as_authenticated(
+            migration_db.conn,
+            _permanent_claims(USER_A),
+            "select id::text as id from demo_sessions order by id",
+        )
+        assert [row["id"] for row in rows] == [SESSION_A]
+
+    def test_permanent_non_owner_reads_no_demo_session(
+        self, migration_db: MigrationDb
+    ) -> None:
+        rows = _as_authenticated(
+            migration_db.conn,
+            _permanent_claims(USER_DISPATCHER),
+            "select id::text as id from demo_sessions order by id",
+        )
+        assert rows == []
+
+    def test_permanent_owner_cannot_read_expired_own_session(
+        self, migration_db: MigrationDb
+    ) -> None:
+        rows = _as_authenticated(
+            migration_db.conn,
+            _permanent_claims(USER_A),
             "select id from demo_sessions where id = %s",
             (SESSION_A_EXPIRED,),
         )

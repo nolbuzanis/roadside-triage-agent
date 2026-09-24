@@ -1,10 +1,11 @@
 /**
  * Public demo session start flow.
  *
- * The visitor signs in anonymously with Supabase Auth (or reuses the existing
- * anonymous session) and the access token authorizes POST /api/v1/demo-sessions
- * on the backend. Only public configuration may appear here — never backend
- * secrets such as the service-role key.
+ * The visitor signs in anonymously with Supabase Auth (or reuses the current
+ * session, which may be a signed-in account such as the dispatcher) and the
+ * access token authorizes POST /api/v1/demo-sessions on the backend. Only
+ * public configuration may appear here — never backend secrets such as the
+ * service-role key.
  */
 
 import { supabase } from './supabaseClient'
@@ -29,8 +30,9 @@ function apiBaseUrl(): string {
 }
 
 /**
- * Create or reuse the browser's anonymous Supabase session, then start a
- * short-lived demo session for the given call-back-from number.
+ * Create or reuse the browser's Supabase session (anonymous for a public
+ * visitor, or the signed-in account's session), then start a short-lived
+ * demo session for the given call-back-from number.
  *
  * Throws when anonymous sign-in or the backend request fails, so callers can
  * surface the failure instead of silently continuing without a session.

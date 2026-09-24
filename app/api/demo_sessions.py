@@ -1,4 +1,4 @@
-"""Secure demo-session start flow: anonymous visitors create short-lived sessions."""
+"""Secure demo-session start flow: authenticated visitors create short-lived sessions."""
 
 from __future__ import annotations
 
@@ -40,7 +40,12 @@ def _bearer_token(request: Request) -> str:
 
 
 async def _authenticate_demo_visitor(token: str) -> str:
-    """Validate the Supabase access token and return the anonymous auth user id."""
+    """Validate the Supabase access token and return the auth user id.
+
+    Any authenticated Supabase user may start a demo session — the browser's
+    anonymous visitor session or a signed-in account such as the dispatcher.
+    Ownership (not anonymity) is what scopes the session's reads under RLS.
+    """
 
     def _get_user() -> Any:
         return _get_supabase().auth.get_user(jwt=token)
@@ -55,16 +60,6 @@ async def _authenticate_demo_visitor(token: str) -> str:
     if user is None:
         logger.warning("Demo session auth rejected", reason="no_user")
         raise HTTPException(status_code=401, detail="Invalid access token")
-    if not user.is_anonymous:
-        logger.warning(
-            "Demo session auth rejected",
-            reason="not_anonymous",
-            auth_user_id=str(user.id),
-        )
-        raise HTTPException(
-            status_code=403,
-            detail="Demo sessions require an anonymous user",
-        )
     return str(user.id)
 
 
