@@ -1,4 +1,7 @@
 import { useState, type FormEvent } from 'react'
+import { SPEAKING_BARS, WAVEFORM_BARS } from '../lib/waveform'
+import { CarIcon, PinIcon, WrenchIcon } from './icons'
+import LandingHeader from './LandingHeader'
 
 interface DemoStartFormProps {
   onSubmit: (phone: string) => Promise<void>
@@ -11,12 +14,6 @@ const STEPS = [
   { number: '2', lead: 'Call', rest: 'the agent' },
   { number: '3', lead: 'Watch', rest: 'it work' },
 ]
-
-const WAVEFORM_BARS = [
-  10, 18, 26, 34, 22, 40, 30, 44, 34, 24, 38, 46, 32, 20, 28, 42, 36, 24, 14,
-  26, 36, 28, 16, 12,
-]
-const SPEAKING_BARS = 18
 
 type IconProps = { size?: number }
 
@@ -58,64 +55,6 @@ function LockIcon({ size = 15 }: IconProps) {
   )
 }
 
-function PinIcon() {
-  return (
-    <svg
-      width="22"
-      height="22"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
-      <circle cx="12" cy="10" r="3" />
-    </svg>
-  )
-}
-
-function CarIcon() {
-  return (
-    <svg
-      width="22"
-      height="22"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M4 13l1.8-4.6A2 2 0 0 1 7.6 7h8.8a2 2 0 0 1 1.8 1.2L20 13" />
-      <rect x="3" y="13" width="18" height="4" rx="1" />
-      <circle cx="7" cy="17" r="2" />
-      <circle cx="17" cy="17" r="2" />
-    </svg>
-  )
-}
-
-function WrenchIcon() {
-  return (
-    <svg
-      width="22"
-      height="22"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
-    </svg>
-  )
-}
-
 const PREVIEW_FIELDS = [
   { label: 'Location', icon: <PinIcon /> },
   { label: 'Vehicle', icon: <CarIcon /> },
@@ -136,16 +75,7 @@ export default function DemoStartForm({
 
   return (
     <main className="demo-landing">
-      <header className="landing-top">
-        <span className="landing-brand">
-          <span className="brand-dot" aria-hidden="true" />
-          Roadside AI
-        </span>
-        <span className="landing-live-pill">
-          <span className="pill-dot" aria-hidden="true" />
-          LIVE DEMO
-        </span>
-      </header>
+      <LandingHeader />
 
       <section className="landing-hero">
         <div className="hero-copy">
