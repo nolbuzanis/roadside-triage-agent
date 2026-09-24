@@ -3,7 +3,12 @@ import type { Session } from '@supabase/supabase-js'
 import { supabase } from './lib/supabaseClient'
 import AuthScreen from './components/AuthScreen'
 import Dashboard from './components/Dashboard'
+import DemoScreen from './components/DemoScreen'
 import './App.css'
+
+function isDemoPath(pathname: string): boolean {
+  return pathname.replace(/\/+$/, '') === '/demo'
+}
 
 function App() {
   const [session, setSession] = useState<Session | null>(null)
@@ -25,6 +30,10 @@ function App() {
 
   if (!ready) {
     return <div className="app-loading">Loading…</div>
+  }
+
+  if (isDemoPath(window.location.pathname)) {
+    return <DemoScreen />
   }
 
   if (!session) {

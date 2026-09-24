@@ -1,9 +1,16 @@
 import type { AssistanceRequest } from '../types'
 import { fieldValue, formatTime, STATUS_LABELS } from '../lib/requestFields'
 
-export default function RequestCard({ request }: { request: AssistanceRequest }) {
+/**
+ * Live request view for the public demo. Never renders the caller's phone
+ * number — only the intake fields the visitor watched being collected.
+ */
+export default function DemoRequestCard({
+  request,
+}: {
+  request: AssistanceRequest
+}) {
   const escalated = request.intake_status === 'escalated'
-  const label = STATUS_LABELS[request.intake_status]
 
   return (
     <article
@@ -11,15 +18,11 @@ export default function RequestCard({ request }: { request: AssistanceRequest })
     >
       <div className="card-top">
         <span className={`status-badge status-${request.intake_status}`}>
-          {label}
+          {STATUS_LABELS[request.intake_status]}
         </span>
         <time dateTime={request.created_at}>{formatTime(request.created_at)}</time>
       </div>
       <dl className="card-fields">
-        <div>
-          <dt>Caller</dt>
-          <dd>{fieldValue(request.caller_phone, request.intake_status)}</dd>
-        </div>
         <div>
           <dt>Location</dt>
           <dd>{fieldValue(request.location, request.intake_status)}</dd>

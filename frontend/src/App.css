@@ -281,10 +281,135 @@
   overflow-wrap: anywhere;
 }
 
+/* Public demo */
+
+.demo-screen {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 24px;
+  min-height: 100svh;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.demo-header {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.demo-subtitle {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.demo-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.demo-countdown {
+  color: var(--text-h);
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.demo-error {
+  color: var(--danger);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-size: 14px;
+}
+
+.demo-panel {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  text-align: center;
+}
+
+.demo-panel h2 {
+  margin: 0;
+}
+
+.demo-call {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.demo-call > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.demo-call dt {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.demo-call dd {
+  margin: 0;
+  color: var(--text-h);
+}
+
+.demo-call-number {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.demo-masked-phone {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+}
+
+.demo-expired p {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.demo-expired button {
+  align-self: center;
+  padding: 10px 16px;
+  border: none;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.demo-expired button:hover {
+  background: var(--accent-hover);
+}
+
 /* Tablet / small desktop */
 
 @media (max-width: 768px) {
   .dashboard {
+    padding: 16px;
+  }
+
+  .demo-screen {
     padding: 16px;
   }
 

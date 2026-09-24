@@ -14,4 +14,5 @@ export interface AssistanceRequest {
   notification_status: string
   created_at: string
   updated_at: string
+  demo_session_id: string | null
 }
