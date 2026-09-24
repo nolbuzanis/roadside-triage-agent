@@ -27,14 +27,6 @@ export default function DemoScreen() {
   const [nowMs, setNowMs] = useState(() => Date.now())
 
   useEffect(() => {
-    const previousTitle = document.title
-    document.title = 'Roadside AI Demo'
-    return () => {
-      document.title = previousTitle
-    }
-  }, [])
-
-  useEffect(() => {
     let cancelled = false
 
     async function restore() {

@@ -6,13 +6,19 @@ import Dashboard from './components/Dashboard'
 import DemoScreen from './components/DemoScreen'
 import './App.css'
 
-function isDemoPath(pathname: string): boolean {
-  return pathname.replace(/\/+$/, '') === '/demo'
+function isAdminPath(pathname: string): boolean {
+  return pathname.replace(/\/+$/, '') === '/admin'
 }
 
 function App() {
   const [session, setSession] = useState<Session | null>(null)
   const [ready, setReady] = useState(false)
+
+  useEffect(() => {
+    document.title = isAdminPath(window.location.pathname)
+      ? 'Dispatcher Dashboard'
+      : 'Roadside AI Demo'
+  }, [])
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
@@ -32,15 +38,14 @@ function App() {
     return <div className="app-loading">Loading…</div>
   }
 
-  if (isDemoPath(window.location.pathname)) {
-    return <DemoScreen />
+  if (isAdminPath(window.location.pathname)) {
+    if (!session) {
+      return <AuthScreen />
+    }
+    return <Dashboard session={session} />
   }
 
-  if (!session) {
-    return <AuthScreen />
-  }
-
-  return <Dashboard session={session} />
+  return <DemoScreen />
 }
 
 export default App

@@ -192,7 +192,7 @@ cp .env.example .env.local
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) and sign in with the dispatcher account created in [Create the Dispatcher Account (One-Time)](#create-the-dispatcher-account-one-time). Never put `SUPABASE_SERVICE_ROLE_KEY` in the frontend environment. Production deployments of the dashboard go to Firebase Hosting — see [Production Deployment (Firebase Hosting)](#production-deployment-firebase-hosting).
+Open [http://localhost:3000/admin](http://localhost:3000/admin) and sign in with the dispatcher account created in [Create the Dispatcher Account (One-Time)](#create-the-dispatcher-account-one-time). The home route (`/`) serves the public demo; the dispatcher login and dashboard live at `/admin`. Never put `SUPABASE_SERVICE_ROLE_KEY` in the frontend environment. Production deployments of the dashboard go to Firebase Hosting — see [Production Deployment (Firebase Hosting)](#production-deployment-firebase-hosting).
 
 The demo start helper in `frontend/src/lib/demoSession.ts` (`startDemoSession(phone)`) creates or reuses the visitor's anonymous Supabase session and calls `POST /api/v1/demo-sessions` on the backend URL from `VITE_API_BASE_URL`. For the browser to reach a backend on a different origin, list that frontend origin in the backend's `FRONTEND_ORIGINS` setting.
 
@@ -242,10 +242,10 @@ supabase/
   config.toml                      # Supabase CLI configuration
   migrations/                      # SQL migrations (table, RLS, webhooks)
 frontend/
-  index.html                       # Dispatcher dashboard entry point
+  index.html                       # Frontend entry point (public demo)
   src/
-    App.tsx                        # Session gate (auth screen vs dashboard)
-    components/                    # AuthScreen, Dashboard, RequestCard
+    App.tsx                        # Route gate (public demo at /, dispatcher at /admin)
+    components/                    # DemoScreen, AuthScreen, Dashboard, RequestCard
     lib/supabaseClient.ts          # Public Supabase client (anon key only)
 ```
 
@@ -840,20 +840,22 @@ Until the variables and secret from step 3 are configured, the workflow fails fa
 
 ### 5. Production URL
 
-After the first successful deploy the dashboard is served at:
+After the first successful deploy the public demo is served at:
 
 ```
 https://<firebase-project-id>.web.app
 ```
 
-The workflow verifies and prints this URL on every deploy; record the concrete URL here once the first deploy has run.
+and the dispatcher dashboard at `https://<firebase-project-id>.web.app/admin`.
+
+The workflow verifies and prints these URLs on every deploy; record the concrete URL here once the first deploy has run.
 
 ### 6. SPA Routing and Caching
 
 `firebase.json` configures:
 
-- **SPA fallback:** every path rewrites to `/index.html`, so refreshing or deep-linking the dashboard never returns a Firebase 404.
-- **`/` and `**/*.html` → `no-cache`:** Firebase matches custom-header rules against the request path *before* rewrites apply, so the root request is matched explicitly; this guarantees each refresh revalidates the HTML instead of serving a stale copy that points at removed asset hashes after a redeploy.
+- **SPA fallback:** every path rewrites to `/index.html`, so refreshing or deep-linking the public demo or the `/admin` dashboard never returns a Firebase 404.
+- **`/`, `/admin`, `/admin/**`, and `**/*.html` → `no-cache`:** Firebase matches custom-header rules against the request path *before* rewrites apply, so the root and dispatcher routes are matched explicitly; this guarantees each refresh revalidates the HTML instead of serving a stale copy that points at removed asset hashes after a redeploy.
 - **`/assets/**` → `immutable`, 1-year cache:** Vite content-hashes these files, so they can be cached indefinitely.
 
 ### 7. Security
@@ -866,12 +868,13 @@ The workflow verifies and prints this URL on every deploy; record the concrete U
 
 After the first deploy (tracked by the post-deploy smoke-check TODO in `TODO.md`):
 
-1. Open `https://<firebase-project-id>.web.app` — the auth screen loads (no Firebase 404)
-2. Sign in with the dispatcher account
-3. Active/Past sections load, and a live assistance request appears without a manual refresh
-4. Refreshing restores the same database-backed state
-5. Inspect the served bundle (view source → search `service_role`, `TWILIO_`, `OPENAI_`) — no backend secrets are present
-6. The Cloud Run deploy workflow still runs unchanged on the same push
+1. Open `https://<firebase-project-id>.web.app` — the public demo loads (no Firebase 404)
+2. Open `https://<firebase-project-id>.web.app/admin` — the auth screen loads
+3. Sign in with the dispatcher account
+4. Active/Past sections load, and a live assistance request appears without a manual refresh
+5. Refreshing restores the same database-backed state
+6. Inspect the served bundle (view source → search `service_role`, `TWILIO_`, `OPENAI_`) — no backend secrets are present
+7. The Cloud Run deploy workflow still runs unchanged on the same push
 
 ---
 
