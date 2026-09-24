@@ -187,11 +187,13 @@ The read-only dispatcher UI lives in `frontend/` (Vite + React + TypeScript). It
 cd frontend
 npm install
 cp .env.example .env.local
-# Fill VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in .env.local
+# Fill VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY, and VITE_API_BASE_URL in .env.local
 npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) and sign in with the dispatcher account created in [Create the Dispatcher Account (One-Time)](#create-the-dispatcher-account-one-time). Never put `SUPABASE_SERVICE_ROLE_KEY` in the frontend environment. Production deployments of the dashboard go to Firebase Hosting — see [Production Deployment (Firebase Hosting)](#production-deployment-firebase-hosting).
+
+The demo start helper in `frontend/src/lib/demoSession.ts` (`startDemoSession(phone)`) creates or reuses the visitor's anonymous Supabase session and calls `POST /api/v1/demo-sessions` on the backend URL from `VITE_API_BASE_URL`. For the browser to reach a backend on a different origin, list that frontend origin in the backend's `FRONTEND_ORIGINS` setting.
 
 ---
 
