@@ -179,7 +179,7 @@ cp .env.example .env.local
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) and sign in with the dispatcher account created in [Create the Dispatcher Account (One-Time)](#create-the-dispatcher-account-one-time). Never put `SUPABASE_SERVICE_ROLE_KEY` in the frontend environment.
+Open [http://localhost:3000](http://localhost:3000) and sign in with the dispatcher account created in [Create the Dispatcher Account (One-Time)](#create-the-dispatcher-account-one-time). Never put `SUPABASE_SERVICE_ROLE_KEY` in the frontend environment. Production deployments of the dashboard go to Firebase Hosting — see [Production Deployment (Firebase Hosting)](#production-deployment-firebase-hosting).
 
 ---
 
@@ -706,6 +706,155 @@ Key metrics to monitor:
 - **Max instances**: Set to 10 to prevent excessive scaling
 
 For production workloads, adjust these values based on your traffic patterns.
+
+---
+
+## Production Deployment (Firebase Hosting)
+
+The dispatcher dashboard deploys to Firebase Hosting as a static bundle, separate from the Cloud Run voice service. Merging a PR that touches the frontend to `main` automatically builds and deploys the latest dashboard.
+
+### Architecture
+
+```
+GitHub main (frontend/** or firebase.json change)
+    ↓
+GitHub Actions (.github/workflows/deploy-frontend.yml)
+    ↓
+npm ci → oxlint → tsc + vite build
+    (VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY inlined)
+    ↓
+FirebaseExtended/action-hosting-deploy → live channel
+    ↓
+Firebase Hosting CDN
+    ↓
+https://<firebase-project-id>.web.app
+    ↓
+Browser → Supabase (public URL + anon/publishable key only)
+```
+
+The Cloud Run workflow (`.github/workflows/deploy-production.yml`) is unaffected: it still runs on every `main` push for the backend, while the Hosting workflow only triggers on `frontend/**`, `firebase.json`, or its own workflow file.
+
+### 1. Firebase Project and Hosting Site (One-Time)
+
+1. Create a Firebase project in the [Firebase console](https://console.firebase.google.com/) — either a new project or by adding Firebase to an existing Google Cloud project.
+2. Add **Hosting** to the project and create the default Hosting site (**Build → Hosting → Get started**).
+3. Install and log in with the Firebase CLI:
+
+```bash
+npm install -g firebase-tools
+firebase login
+```
+
+The repository already contains `firebase.json` (serves `frontend/dist/` with SPA fallback and cache headers), so no `firebase init` is required for the deploy configuration itself.
+
+### 2. Deploy Service Account (One-Time)
+
+Create a dedicated service account for GitHub Actions deploys. Alternatively, run `firebase init hosting:github` from the repository root to have the Firebase CLI create the service account, store the secret, and wire up GitHub for you (it may propose its own workflow file — keep `.github/workflows/deploy-frontend.yml` as the single deploy workflow).
+
+```bash
+PROJECT_ID=<your-firebase-project-id>
+
+gcloud iam service-accounts create github-action-dispatcher-dashboard \
+  --display-name="GitHub Actions Firebase Hosting Deployer"
+
+DEPLOYER_SA="github-action-dispatcher-dashboard@${PROJECT_ID}.iam.gserviceaccount.com"
+
+gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+  --member="serviceAccount:${DEPLOYER_SA}" \
+  --role="roles/firebasehosting.admin"
+
+gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+  --member="serviceAccount:${DEPLOYER_SA}" \
+  --role="roles/serviceusage.apiKeysViewer"
+
+gcloud iam service-accounts keys create firebase-service-account.json \
+  --iam-account="${DEPLOYER_SA}"
+```
+
+- `roles/firebasehosting.admin` deploys releases to the live channel; `roles/serviceusage.apiKeysViewer` is required by the Firebase CLI the action runs under the hood (see the [action's service-account documentation](https://github.com/FirebaseExtended/action-hosting-deploy/blob/master/docs/service-account.md)).
+- The additional roles from that documentation are only needed for features this workflow does not use: `roles/firebaseauth.admin` for PR preview channels, `roles/run.viewer` for Hosting rewrites to Cloud Run/Functions.
+- Paste the entire contents of `firebase-service-account.json` into the repository secret `FIREBASE_SERVICE_ACCOUNT` (step 3), then delete the local file. **Never commit the JSON key.** GitHub encrypts the secret at rest and exposes it only to the deploy job.
+
+### 3. GitHub Repository Configuration
+
+#### Required Repository Variables
+
+Set these in **Settings → Secrets and variables → Actions → Variables**:
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `FIREBASE_PROJECT_ID` | Firebase/Google Cloud project ID that owns the Hosting site | `my-roadside-project` |
+| `VITE_SUPABASE_URL` | Public Supabase project URL (inlined into the browser bundle) | `https://xyzcompany.supabase.co` |
+| `VITE_SUPABASE_ANON_KEY` | Public Supabase anon/publishable key (inlined into the browser bundle) | `eyJhbGciOi...` or `sb_publishable_...` |
+
+#### Required Repository Secrets
+
+Set these in **Settings → Secrets and variables → Actions → Secrets**:
+
+| Secret | Description |
+|--------|-------------|
+| `FIREBASE_SERVICE_ACCOUNT` | Service account JSON key for Hosting deploys (see step 2) |
+
+> **Security:** Only the public Supabase URL and anon/publishable key may be set as `VITE_*` variables — they ship in the browser bundle by design. Never place `SUPABASE_SERVICE_ROLE_KEY`, Twilio, or OpenAI credentials in these variables or anywhere under `frontend/`. The deploy workflow fails before building if `VITE_SUPABASE_ANON_KEY` is an `sb_secret_…` key or decodes to a `service_role` JWT.
+
+### 4. Deployment Workflow
+
+The GitHub Actions workflow (`.github/workflows/deploy-frontend.yml`) automatically:
+
+1. Verifies the required repository variables and secret exist, and that `VITE_SUPABASE_ANON_KEY` is not a service-role key
+2. Installs dependencies (`npm ci`) and lints (oxlint)
+3. Type-checks and builds the production bundle (`tsc -b && vite build`)
+4. Deploys `frontend/dist/` to the Hosting **live** channel
+5. Verifies the deployed site responds with the app shell
+6. Prints the production dashboard URL
+
+#### Triggering a Deployment
+
+```bash
+# Automatic: merge a PR that touches frontend/** or firebase.json to main
+git checkout main
+git merge feat/your-frontend-change
+git push origin main
+```
+
+Or manually: **Actions → Deploy Dispatcher Dashboard → Run workflow**.
+
+Until the variables and secret from step 3 are configured, the workflow fails fast at the configuration check — by design, so a missing configuration is loud rather than a silent broken deploy.
+
+### 5. Production URL
+
+After the first successful deploy the dashboard is served at:
+
+```
+https://<firebase-project-id>.web.app
+```
+
+The workflow verifies and prints this URL on every deploy; record the concrete URL here once the first deploy has run.
+
+### 6. SPA Routing and Caching
+
+`firebase.json` configures:
+
+- **SPA fallback:** every path rewrites to `/index.html`, so refreshing or deep-linking the dashboard never returns a Firebase 404.
+- **`/` and `**/*.html` → `no-cache`:** Firebase matches custom-header rules against the request path *before* rewrites apply, so the root request is matched explicitly; this guarantees each refresh revalidates the HTML instead of serving a stale copy that points at removed asset hashes after a redeploy.
+- **`/assets/**` → `immutable`, 1-year cache:** Vite content-hashes these files, so they can be cached indefinitely.
+
+### 7. Security
+
+- The build step receives only `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`; no other workflow secrets are passed to `npm run build`.
+- No `SUPABASE_SERVICE_ROLE_KEY`, Twilio, or OpenAI credentials appear in the frontend repository, the workflow configuration, or the deployed bundle.
+- The Cloud Run voice deployment and its Secret Manager credentials are entirely separate.
+
+### 8. Verify the Production Dashboard
+
+After the first deploy (tracked by the post-deploy smoke-check TODO in `TODO.md`):
+
+1. Open `https://<firebase-project-id>.web.app` — the auth screen loads (no Firebase 404)
+2. Sign in with the dispatcher account
+3. Active/Past sections load, and a live assistance request appears without a manual refresh
+4. Refreshing restores the same database-backed state
+5. Inspect the served bundle (view source → search `service_role`, `TWILIO_`, `OPENAI_`) — no backend secrets are present
+6. The Cloud Run deploy workflow still runs unchanged on the same push
 
 ---
 

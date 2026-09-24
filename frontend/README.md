@@ -36,6 +36,12 @@ npm run build
 
 Type-checks with `tsc -b` and produces a static bundle in `dist/`.
 
+## Deploy
+
+Production deployments run automatically from `main` via `.github/workflows/deploy-frontend.yml`: the workflow builds `dist/` with the GitHub repository variables `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY`, then deploys to Firebase Hosting's live channel. The production URL is `https://<firebase-project-id>.web.app`.
+
+One-time setup (Firebase project, deploy service account, repository variables/secret) is documented in the root README under "Production Deployment (Firebase Hosting)".
+
 ## Scope
 
 This first version is intentionally minimal and read-only:
