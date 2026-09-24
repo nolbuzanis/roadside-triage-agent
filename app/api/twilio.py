@@ -18,6 +18,7 @@ from app.realtime.tools import (
     EmergencyTransferResult,
 )
 from app.services.calls import EarlyConnection, call_manager
+from app.services.demo_sessions import match_demo_session_for_call
 from app.services.emergency import transfer_call
 from app.services.hangup import hangup_call
 from app.services.notifier import notify_dispatcher
@@ -26,6 +27,7 @@ from app.services.tickets import (
     complete_intake,
     create_ticket,
     is_intake_complete,
+    link_demo_session,
     start_assistance_request,
     update_ticket_hazard,
 )
@@ -37,6 +39,10 @@ _background_tasks: set[asyncio.Task[object]] = set()
 # Bound the early assistance-request insert so a stalled Supabase call can
 # never hang the TwiML response (Twilio expects a voice webhook reply in ~15s).
 _ASSISTANCE_REQUEST_START_TIMEOUT_SECONDS = 5.0
+
+# Bound demo-session matching + linking for the same reason; the two webhook
+# timeboxes run sequentially but stay within Twilio's ~15s webhook budget.
+_DEMO_SESSION_MATCH_TIMEOUT_SECONDS = 5.0
 
 # Pending early OpenAI connections, keyed by Twilio CallSid.
 # Created in the voice webhook; consumed in the media stream handler.
@@ -377,6 +383,46 @@ def _validate_twilio_request(url: str, signature: str, params: dict[str, str]) -
     return bool(validator.validate(url, params, signature))
 
 
+async def _match_and_link_demo_session(*, call_sid: str, caller_phone: str) -> None:
+    """Claim a demo session for this call and link the assistance request.
+
+    Never raises: each step logs its own failure with call correlation only
+    (no phone or HMAC material), so a matching failure can never fail or
+    delay the voice path beyond the caller's timebox. A miss (no active
+    session for this number) is a normal outcome for non-demo calls.
+    """
+    try:
+        claimed = await asyncio.to_thread(
+            match_demo_session_for_call,
+            call_id=call_sid,
+            caller_phone=caller_phone,
+        )
+    except Exception:
+        logger.exception("demo_session_match_failed", call_sid=call_sid)
+        return
+
+    if not claimed:
+        logger.info("demo_session_match_miss", call_sid=call_sid)
+        return
+
+    demo_session_id = str(claimed.get("id") or "")
+    if not demo_session_id:
+        logger.error("demo_session_match_failed", call_sid=call_sid, reason="no_id")
+        return
+
+    logger.info(
+        "demo_session_matched",
+        call_sid=call_sid,
+        demo_session_id=demo_session_id,
+    )
+    # link_demo_session is non-blocking internally (logs, never raises).
+    await asyncio.to_thread(
+        link_demo_session,
+        call_id=call_sid,
+        demo_session_id=demo_session_id,
+    )
+
+
 @router.post("/twilio/voice")
 async def twilio_voice_webhook(request: Request) -> PlainTextResponse:
     """Handle incoming Twilio voice webhook and return TwiML to start a Media Stream.
@@ -434,6 +480,22 @@ async def twilio_voice_webhook(request: Request) -> PlainTextResponse:
         )
     except Exception:
         logger.exception("assistance_request_start_failed", call_sid=call_sid)
+
+    # Match the inbound caller to an active demo session and link the row.
+    # Failure or timeout is logged loudly but must never block the call path.
+    try:
+        await asyncio.wait_for(
+            _match_and_link_demo_session(call_sid=call_sid, caller_phone=caller_phone),
+            timeout=_DEMO_SESSION_MATCH_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        logger.error(
+            "demo_session_match_failed",
+            call_sid=call_sid,
+            reason="timeout",
+        )
+    except Exception:
+        logger.exception("demo_session_match_failed", call_sid=call_sid)
 
     _pending_connections[call_sid] = EarlyConnection(
         call_sid=call_sid,
