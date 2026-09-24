@@ -199,6 +199,31 @@ async def handle_transfer_to_emergency(
 router = APIRouter()
 
 
+async def send_clear_to_twilio(
+    websocket: WebSocket, *, stream_sid: str, call_sid: str | None
+) -> None:
+    """Send Twilio's clear message to empty the outbound audio buffer.
+
+    Twilio buffers media messages before playing them to the caller, so
+    cancelling the OpenAI response alone leaves already-forwarded assistant
+    audio audibly playing. The clear message empties that buffer so an
+    interrupted assistant stops speaking immediately. Failures are logged
+    and never raised into the event loop.
+    """
+    try:
+        await websocket.send_json({
+            "event": "clear",
+            "streamSid": stream_sid,
+        })
+        logger.info(
+            "twilio_playback_cleared",
+            call_sid=call_sid,
+            stream_sid=stream_sid,
+        )
+    except Exception:
+        logger.warning("Failed to clear Twilio playback", call_sid=call_sid)
+
+
 async def handle_closing_finished(call_sid: str) -> None:
     """Hang up the Twilio call after the closing flow safely finished.
 
@@ -475,6 +500,12 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
         except Exception:
             logger.warning("Failed to send audio to Twilio", call_sid=call_sid)
 
+    async def clear_playback() -> None:
+        """Flush assistant audio buffered for Twilio playback on interruption."""
+        if stream_sid is None:
+            return
+        await send_clear_to_twilio(websocket, stream_sid=stream_sid, call_sid=call_sid)
+
     async def handle_session_error(error: Exception) -> None:
         """Log errors from the OpenAI Realtime session."""
         logger.error("Realtime session error", call_sid=call_sid, error=str(error))
@@ -537,6 +568,7 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                         session = await early_connection.connection_task
                         # Attach callbacks that need the WebSocket
                         session.on_audio_delta = send_audio_to_twilio
+                        session.on_clear_playback = clear_playback
                         session.on_tool_call = handle_tool_call
                         session.on_error = handle_session_error
                         session.on_closing_finished = handle_closing_finished
@@ -591,6 +623,7 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                         greeting=OPENING_GREETING,
                         tools=REALTIME_TOOLS,
                         on_audio_delta=send_audio_to_twilio,
+                        on_clear_playback=clear_playback,
                         on_tool_call=handle_tool_call,
                         on_error=handle_session_error,
                         on_closing_finished=handle_closing_finished,

@@ -55,6 +55,7 @@ class RealtimeSession:
     on_audio_delta: Callable[[str], Coroutine[Any, Any, None]] | None = None
     on_error: Callable[[Exception], Coroutine[Any, Any, None]] | None = None
     on_closing_finished: Callable[[str], Coroutine[Any, Any, None]] | None = None
+    on_clear_playback: Callable[[], Coroutine[Any, Any, None]] | None = None
 
     _ws: ClientConnection | None = field(default=None, init=False, repr=False)
     _connected: bool = field(default=False, init=False, repr=False)
@@ -77,6 +78,8 @@ class RealtimeSession:
     _assistance_request_id: str | None = field(default=None, init=False, repr=False)
     _response_create_reasons: deque[str] = field(default_factory=deque, init=False, repr=False)
     _hangup_grace_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
+    _active_response_id: str | None = field(default=None, init=False, repr=False)
+    _interrupted_response_id: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize the latency tracker for this call."""
@@ -168,6 +171,7 @@ class RealtimeSession:
                     "turn_detection": {
                         "type": "server_vad",
                         "create_response": False,
+                        "interrupt_response": False,
                     },
                 },
                 "output": {
@@ -411,6 +415,7 @@ class RealtimeSession:
                 "input_audio_buffer.speech_started",
                 call_sid=self.call_sid,
             )
+            await self._interrupt_assistant_speech()
 
         elif event_type == "input_audio_buffer.speech_stopped":
             self._caller_speaking = False
@@ -443,7 +448,13 @@ class RealtimeSession:
                 # Record first audio received (only once per call)
                 assert self.latency_tracker is not None
                 self.latency_tracker.record_event("first_openai_audio_received")
-                if self.on_audio_delta:
+                if self._interrupted_response_id is not None:
+                    logger.debug(
+                        "assistant_audio_dropped_after_interruption",
+                        call_sid=self.call_sid,
+                        response_id=self._interrupted_response_id,
+                    )
+                elif self.on_audio_delta:
                     await self.on_audio_delta(audio_b64)
 
         elif event_type == "response.created":
@@ -455,6 +466,13 @@ class RealtimeSession:
                 response_id=response_id,
                 status=response.get("status"),
             )
+            if response_id:
+                self._active_response_id = response_id
+                if (
+                    self._interrupted_response_id is not None
+                    and response_id != self._interrupted_response_id
+                ):
+                    self._interrupted_response_id = None
             reason = self._response_create_reasons.popleft() if self._response_create_reasons else None
             if reason == "post_intake_closing":
                 self.closing_response_id = response_id
@@ -476,6 +494,12 @@ class RealtimeSession:
                 response_id=response_id,
                 status=status,
             )
+
+            if response_id is not None:
+                if response_id == self._active_response_id:
+                    self._active_response_id = None
+                if response_id == self._interrupted_response_id:
+                    self._interrupted_response_id = None
 
             # The greeting gates all further response creation: no assistant
             # output may begin before the fixed greeting finishes streaming and
@@ -518,6 +542,34 @@ class RealtimeSession:
 
         else:
             logger.debug("Unhandled OpenAI event", event_type=event_type, call_sid=self.call_sid)
+
+    async def _interrupt_assistant_speech(self) -> None:
+        """Stop assistant speech now that the caller has started talking.
+
+        Cancels the in-progress OpenAI response via the supported
+        ``response.cancel`` client event, drops any audio deltas still
+        arriving for the cancelled response, and asks the Twilio bridge to
+        clear assistant audio already buffered for playback. Runs on every
+        caller speech start so a buffered playback tail is flushed even when
+        no response is still generating.
+        """
+        interrupted_response_id = self._active_response_id
+        cancel_sent = False
+        if interrupted_response_id is not None:
+            self._active_response_id = None
+            self._interrupted_response_id = interrupted_response_id
+            cancel_sent = await self._send({
+                "type": "response.cancel",
+                "response_id": interrupted_response_id,
+            })
+            logger.info(
+                "caller_interruption_detected",
+                call_sid=self.call_sid,
+                response_id=interrupted_response_id,
+                response_cancel_sent=cancel_sent,
+            )
+        if self.on_clear_playback:
+            await self.on_clear_playback()
 
     async def _handle_function_call(self, item: dict[str, Any]) -> None:
         """Handle a function_call output item from the model."""
