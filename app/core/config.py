@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
@@ -13,6 +14,8 @@ class Settings(BaseSettings):
     TWILIO_PHONE_NUMBER: str
     DISPATCHER_ALERT_PHONE: str
     EMERGENCY_TRANSFER_PHONE: str
+    DEMO_PHONE_HMAC_SECRET: str = Field(min_length=1)
+    DEMO_SESSION_TTL_SECONDS: int = 900
 
     model_config = {"env_file": ".env"}
 
