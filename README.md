@@ -65,6 +65,7 @@ cp .env.example .env
 | `EMERGENCY_TRANSFER_PHONE`   | Yes      | Emergency transfer destination (911 or local emergency number)                                  |
 | `DEMO_PHONE_HMAC_SECRET`     | Yes      | Server-side keyed HMAC secret for demo phone matching (generate with `openssl rand -hex 32`)     |
 | `DEMO_SESSION_TTL_SECONDS`   | No       | Demo session lifetime in seconds (default `900` = 15 minutes)                                   |
+| `FRONTEND_ORIGINS`           | No       | Comma-separated browser origins allowed to call the API cross-origin (default: none)             |
 
 ### 4. Set Up Supabase
 
@@ -103,6 +104,14 @@ The dispatcher dashboard authenticates with Supabase Auth using a single dispatc
 2. Disable public sign-ups so no additional accounts can be created: under **Authentication → Sign In / Providers → Email**, turn off **Enable sign ups**. Local development mirrors this in `supabase/config.toml` (`enable_signup = false`).
 3. From **Settings → API**, note the **Project URL** and the **anon/publishable key**. These two values are the only Supabase credentials a browser dashboard may contain.
 4. Never place `SUPABASE_SERVICE_ROLE_KEY` (or any other backend secret) in frontend code or frontend environment variables. The service-role key stays server-side only: `.env` locally, Secret Manager in production.
+
+#### Enable Anonymous Sign-Ins for the Public Demo (One-Time)
+
+The public demo starts each visitor with a short-lived **anonymous** Supabase Auth session (no named account). Email/password sign-ups stay disabled, so this does not open public account creation.
+
+1. In the Supabase Dashboard, open **Authentication → Sign In / Providers** and enable **Anonymous** sign-ins. Local development mirrors this in `supabase/config.toml` (`enable_anonymous_sign_ins = true`).
+2. The backend validates the visitor's anonymous access token on `POST /api/v1/demo-sessions` using the service-role Supabase client; no new secret is required.
+3. As with the dispatcher dashboard, browsers only ever hold the public project URL and anon/publishable key — never the service-role key.
 
 ### 5. Configure Twilio Phone Number
 
@@ -178,11 +187,13 @@ The read-only dispatcher UI lives in `frontend/` (Vite + React + TypeScript). It
 cd frontend
 npm install
 cp .env.example .env.local
-# Fill VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in .env.local
+# Fill VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY, and VITE_API_BASE_URL in .env.local
 npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) and sign in with the dispatcher account created in [Create the Dispatcher Account (One-Time)](#create-the-dispatcher-account-one-time). Never put `SUPABASE_SERVICE_ROLE_KEY` in the frontend environment. Production deployments of the dashboard go to Firebase Hosting — see [Production Deployment (Firebase Hosting)](#production-deployment-firebase-hosting).
+
+The demo start helper in `frontend/src/lib/demoSession.ts` (`startDemoSession(phone)`) creates or reuses the visitor's anonymous Supabase session and calls `POST /api/v1/demo-sessions` on the backend URL from `VITE_API_BASE_URL`. For the browser to reach a backend on a different origin, list that frontend origin in the backend's `FRONTEND_ORIGINS` setting.
 
 ---
 

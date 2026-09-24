@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     EMERGENCY_TRANSFER_PHONE: str
     DEMO_PHONE_HMAC_SECRET: str = Field(min_length=1)
     DEMO_SESSION_TTL_SECONDS: int = 900
+    FRONTEND_ORIGINS: str = ""
 
     model_config = {"env_file": ".env"}
 
