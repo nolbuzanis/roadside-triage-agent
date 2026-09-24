@@ -360,7 +360,9 @@ class TestAssistanceRequestLinkage:
 
 
 class TestSecurityUnchanged:
-    """RLS is on with a deny-all policy; no client roles are granted."""
+    """RLS is on with a deny-all policy; the only client read grant (added by
+    the demo request access RLS migration in the chain's "after" step) is the
+    owner-scoped demo session SELECT — never a write policy."""
 
     def test_row_level_security_enabled(self, migration_db: MigrationDb) -> None:
         row = migration_db.conn.execute(
@@ -392,15 +394,35 @@ class TestSecurityUnchanged:
         assert policy["cmd"] in ("*", "ALL")
         assert policy["qual"] == "false"
 
-    def test_no_read_policy_for_client_roles(self, migration_db: MigrationDb) -> None:
+    def test_only_owner_scoped_read_policy_for_client_roles(
+        self, migration_db: MigrationDb
+    ) -> None:
         rows = migration_db.conn.execute(
             """
             select policyname, cmd, roles
             from pg_policies
             where tablename = 'demo_sessions'
+            order by policyname
             """
         ).fetchall()
-        # Only the deny-all policy exists; nothing grants authenticated/anon access.
-        assert len(rows) == 1
-        assert rows[0]["policyname"] == DENY_POLICY_NAME
-        assert rows[0]["cmd"] in ("*", "ALL")
+        # The deny-all policy plus exactly one SELECT grant for authenticated
+        # (the owner-scoped demo session read from the later RLS migration);
+        # anon gets nothing and no write policy exists for any client role.
+        assert len(rows) == 2
+        by_name = {row["policyname"]: row for row in rows}
+        assert set(by_name) == {DENY_POLICY_NAME, "Demo user can read own demo session"}
+        assert by_name[DENY_POLICY_NAME]["cmd"] in ("*", "ALL")
+        read = by_name["Demo user can read own demo session"]
+        assert read["cmd"] == "SELECT"
+        assert read["roles"] == ["authenticated"]
+
+        write = migration_db.conn.execute(
+            """
+            select count(*) as n
+            from pg_policies
+            where tablename = 'demo_sessions'
+              and cmd in ('INSERT', 'UPDATE', 'DELETE')
+            """
+        ).fetchone()
+        assert write is not None
+        assert write["n"] == 0

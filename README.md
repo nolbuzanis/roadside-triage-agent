@@ -112,6 +112,7 @@ The public demo starts each visitor with a short-lived **anonymous** Supabase Au
 1. In the Supabase Dashboard, open **Authentication → Sign In / Providers** and enable **Anonymous** sign-ins. Local development mirrors this in `supabase/config.toml` (`enable_anonymous_sign_ins = true`).
 2. The backend validates the visitor's anonymous access token on `POST /api/v1/demo-sessions` using the service-role Supabase client; no new secret is required.
 3. As with the dispatcher dashboard, browsers only ever hold the public project URL and anon/publishable key — never the service-role key.
+4. Row Level Security scopes what an anonymous session can read: its own unexpired `demo_sessions` row (via the `Demo user can read own demo session` policy) and only the `assistance_requests` row linked to that session while it is still valid (via the restrictive `Demo users read only their linked assistance requests` policy). The dispatcher account keeps full read access, demo sessions stay read-only, and access is never granted from `caller_phone`. Supabase Realtime applies the same SELECT policies to INSERT/UPDATE subscription events.
 
 ### 5. Configure Twilio Phone Number
 
