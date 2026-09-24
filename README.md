@@ -104,6 +104,14 @@ The dispatcher dashboard authenticates with Supabase Auth using a single dispatc
 3. From **Settings → API**, note the **Project URL** and the **anon/publishable key**. These two values are the only Supabase credentials a browser dashboard may contain.
 4. Never place `SUPABASE_SERVICE_ROLE_KEY` (or any other backend secret) in frontend code or frontend environment variables. The service-role key stays server-side only: `.env` locally, Secret Manager in production.
 
+#### Enable Anonymous Sign-Ins for the Public Demo (One-Time)
+
+The public demo starts each visitor with a short-lived **anonymous** Supabase Auth session (no named account). Email/password sign-ups stay disabled, so this does not open public account creation.
+
+1. In the Supabase Dashboard, open **Authentication → Sign In / Providers** and enable **Anonymous** sign-ins. Local development mirrors this in `supabase/config.toml` (`enable_anonymous_sign_ins = true`).
+2. The backend validates the visitor's anonymous access token on `POST /api/v1/demo-sessions` using the service-role Supabase client; no new secret is required.
+3. As with the dispatcher dashboard, browsers only ever hold the public project URL and anon/publishable key — never the service-role key.
+
 ### 5. Configure Twilio Phone Number
 
 1. Purchase a phone number in the [Twilio Console](https://console.twilio.com/)
