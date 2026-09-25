@@ -1732,4 +1732,4 @@ Ensure public demo sessions and demo data do not accumulate indefinitely.
 
 ### Status
 
-- [ ] Not started
+- [x] Skipped — superseded by the product decision to keep all demo data indefinitely: no cleanup, deletion, or anonymization implemented; expiry enforcement verified against the existing claim/RLS tests and the retention policy documented in README in the `docs/demo-data-retention` PR
