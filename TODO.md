@@ -61,7 +61,7 @@ Twilio owns PSTN calling and dispatcher SMS.
 
 # Demo Ready
 
-The gate items that must land before the demo is considered ready. Items are listed in the order they should be worked.
+The highest-priority items gating the demo (other demo-visible follow-ups remain in Post-MVP → P1). Open items are listed in the order they should be worked; the completed production-wiring item is retained here for the record.
 
 ## P1 — Cancel a create-in-flight response when the caller interrupts
 
@@ -167,6 +167,7 @@ A second webhook currently overwrites `_pending_connections[call_sid]`, orphanin
 ### Acceptance Criteria
 
 - A duplicate webhook does not leak the superseded connection task or its realtime session/WebSocket
+- The media stream still consumes exactly one live connection
 - Exactly one entry remains in `_pending_connections` for the call
 - A unit test issues two webhook posts for the same `CallSid` and asserts the first task is cancelled/closed (or reused)
 - Existing early-connection and webhook suites still pass
@@ -1674,7 +1675,7 @@ Allow a visitor to start a demo without creating a permanent account.
 
 ### Status
 
-- [x] Completed in `feat/secure-demo-session-start-flow` PR (automated verification passed: endpoint/auth/phone/response-safety tests, full backend suite, ruff, mypy, frontend oxlint + strict `tsc` build, bundle secret scan — live browser smoke deferred to the public demo UI TODO and the deployed-flow wiring TODO in Post-MVP → P1)
+- [x] Completed in `feat/secure-demo-session-start-flow` PR (automated verification passed: endpoint/auth/phone/response-safety tests, full backend suite, ruff, mypy, frontend oxlint + strict `tsc` build, bundle secret scan — live browser smoke deferred to the public demo UI TODO and the deployed-flow wiring TODO in `# Demo Ready`)
 
 ---
 
