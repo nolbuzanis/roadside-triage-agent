@@ -83,6 +83,55 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verify required configuration
+        env:
+          FRONTEND_ORIGINS: ${{ vars.FRONTEND_ORIGINS }}
+        run: |
+          if [ -z "${FRONTEND_ORIGINS}" ]; then
+            echo "::error::Missing required repository variable: FRONTEND_ORIGINS (comma-separated browser origins, e.g. https://<project-id>.web.app,http://localhost:3000)"
+            echo "Configure it under Settings -> Secrets and variables -> Actions -> Variables (README.md, 'GitHub Repository Configuration')."
+            exit 1
+          fi
+          # Each entry must be a bare origin (scheme + host[:port]) and at least
+          # one entry must survive: the backend matches the browser's Origin
+          # header as an exact string, so a path, trailing slash, credentials, or
+          # a blank value would silently reject every cross-origin preflight.
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+
+          entries = [
+              part.strip()
+              for part in os.environ["FRONTEND_ORIGINS"].split(",")
+              if part.strip()
+          ]
+          if not entries:
+              print(
+                  "::error::FRONTEND_ORIGINS must contain at least one origin, "
+                  "got a blank or comma-only value"
+              )
+              sys.exit(1)
+
+          errors = []
+          for origin in entries:
+              if origin.startswith("https://"):
+                  rest = origin[len("https://"):]
+              elif origin.startswith("http://"):
+                  rest = origin[len("http://"):]
+              else:
+                  errors.append(f"{origin!r} must start with http:// or https://")
+                  continue
+              if not re.fullmatch(r"[A-Za-z0-9._\-:\[\]]+", rest):
+                  errors.append(
+                      f"{origin!r} must be scheme + host[:port] only — no path, "
+                      "query, fragment, credentials, or whitespace"
+                  )
+          for error in errors:
+              print(f"::error::Invalid FRONTEND_ORIGINS entry: {error}")
+          sys.exit(1 if errors else 0)
+          PY
+
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
@@ -102,7 +151,15 @@ jobs:
 
       - name: Deploy to Cloud Run
         id: deploy
+        env:
+          FRONTEND_ORIGINS: ${{ vars.FRONTEND_ORIGINS }}
         run: |
+          # FRONTEND_ORIGINS holds a comma-separated origin list, and gcloud
+          # splits --set-env-vars on commas. The documented "^@^" prefix (gcloud
+          # "Escape comma characters") switches the pair separator to "@" so the
+          # commas inside the value stay literal. The value is passed through
+          # step env rather than interpolated directly from a repository-variable
+          # expression, so untrusted content can never reach the shell script.
           gcloud run deploy ${{ env.SERVICE }} \
             --image ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:${{ github.sha }} \
             --region ${{ env.REGION }} \
@@ -110,6 +167,7 @@ jobs:
             --allow-unauthenticated \
             --service-account ${{ vars.RUNTIME_SA }} \
             --set-secrets "SUPABASE_URL=SUPABASE_URL:latest,SUPABASE_SERVICE_ROLE_KEY=SUPABASE_SERVICE_ROLE_KEY:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest,OPENAI_REALTIME_MODEL=OPENAI_REALTIME_MODEL:latest,TWILIO_ACCOUNT_SID=TWILIO_ACCOUNT_SID:latest,TWILIO_AUTH_TOKEN=TWILIO_AUTH_TOKEN:latest,TWILIO_PHONE_NUMBER=TWILIO_PHONE_NUMBER:latest,DISPATCHER_ALERT_PHONE=DISPATCHER_ALERT_PHONE:latest,EMERGENCY_TRANSFER_PHONE=EMERGENCY_TRANSFER_PHONE:latest,DEMO_PHONE_HMAC_SECRET=DEMO_PHONE_HMAC_SECRET:latest" \
+            --set-env-vars "^@^FRONTEND_ORIGINS=${FRONTEND_ORIGINS}" \
             --timeout 300 \
             --concurrency 8 \
             --max-instances 10 \

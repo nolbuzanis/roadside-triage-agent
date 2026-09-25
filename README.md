@@ -558,6 +558,7 @@ Set these in **Settings → Secrets and variables → Actions → Variables**:
 | `GCP_PROJECT_ID` | Google Cloud project ID | `my-project-id` |
 | `GCP_REGION` | Cloud Run region | `us-central1` |
 | `RUNTIME_SA` | Runtime service account email | `roadside-agent-runtime@my-project.iam.gserviceaccount.com` |
+| `FRONTEND_ORIGINS` | Comma-separated browser origins allowed to call the API cross-origin; deployed to Cloud Run as the `FRONTEND_ORIGINS` env var | `https://my-project.web.app,http://localhost:3000` |
 
 #### Required Repository Secrets
 
@@ -579,11 +580,12 @@ WIF_SERVICE_ACCOUNT: github-cloud-run-deployer@my-project.iam.gserviceaccount.co
 The GitHub Actions workflow (`.github/workflows/deploy-production.yml`) automatically:
 
 1. Runs tests on every push to `main`
-2. Builds the Docker container
-3. Pushes to Artifact Registry
-4. Deploys to Cloud Run
-5. Verifies the deployment with a health check
-6. Outputs the production URL
+2. Verifies required repository configuration (`FRONTEND_ORIGINS` must be a non-empty, well-formed origin list) and fails fast otherwise
+3. Builds the Docker container
+4. Pushes to Artifact Registry
+5. Deploys to Cloud Run with the Secret Manager secrets and the `FRONTEND_ORIGINS` env var
+6. Verifies the deployment with a health check
+7. Outputs the production URL
 
 #### Triggering a Deployment
 
@@ -738,7 +740,7 @@ GitHub main (frontend/** or firebase.json change)
 GitHub Actions (.github/workflows/deploy-frontend.yml)
     ↓
 npm ci → oxlint → tsc + vite build
-    (VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY inlined)
+    (VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY / VITE_API_BASE_URL inlined)
     ↓
 FirebaseExtended/action-hosting-deploy → live channel
     ↓
@@ -803,6 +805,7 @@ Set these in **Settings → Secrets and variables → Actions → Variables**:
 | `FIREBASE_PROJECT_ID` | Firebase/Google Cloud project ID that owns the Hosting site | `my-roadside-project` |
 | `VITE_SUPABASE_URL` | Public Supabase project URL (inlined into the browser bundle) | `https://xyzcompany.supabase.co` |
 | `VITE_SUPABASE_ANON_KEY` | Public Supabase anon/publishable key (inlined into the browser bundle) | `eyJhbGciOi...` or `sb_publishable_...` |
+| `VITE_API_BASE_URL` | Backend base URL the browser calls (inlined into the browser bundle); must be an absolute http(s) URL | `https://roadside-agent-<hash>-<region>.a.run.app` |
 
 #### Required Repository Secrets
 
@@ -818,7 +821,7 @@ Set these in **Settings → Secrets and variables → Actions → Secrets**:
 
 The GitHub Actions workflow (`.github/workflows/deploy-frontend.yml`) automatically:
 
-1. Verifies the required repository variables and secret exist, and that `VITE_SUPABASE_ANON_KEY` is not a service-role key
+1. Verifies the required repository variables and secret exist, that `VITE_API_BASE_URL` is an absolute http(s) URL with a host, and that `VITE_SUPABASE_ANON_KEY` is not a service-role key
 2. Installs dependencies (`npm ci`) and lints (oxlint)
 3. Type-checks and builds the production bundle (`tsc -b && vite build`)
 4. Deploys `frontend/dist/` to the Hosting **live** channel
@@ -860,7 +863,7 @@ The workflow verifies and prints these URLs on every deploy; record the concrete
 
 ### 7. Security
 
-- The build step receives only `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`; no other workflow secrets are passed to `npm run build`.
+- The build step receives only `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, and `VITE_API_BASE_URL` (all public values); no other workflow secrets are passed to `npm run build`.
 - No `SUPABASE_SERVICE_ROLE_KEY`, Twilio, or OpenAI credentials appear in the frontend repository, the workflow configuration, or the deployed bundle.
 - The Cloud Run voice deployment and its Secret Manager credentials are entirely separate.
 
