@@ -39,10 +39,11 @@ def _make_twilio_headers(signature: str = "valid_signature") -> dict[str, str]:
     }
 
 
-def _make_settings(*, ttl_seconds: int = 900) -> MagicMock:
+def _make_settings(*, ttl_seconds: int = 900, claimed_ttl_seconds: int = 1800) -> MagicMock:
     settings = MagicMock()
     settings.DEMO_PHONE_HMAC_SECRET = HMAC_SECRET
     settings.DEMO_SESSION_TTL_SECONDS = ttl_seconds
+    settings.DEMO_CLAIMED_SESSION_TTL_SECONDS = claimed_ttl_seconds
     return settings
 
 
@@ -68,6 +69,11 @@ def _mock_supabase_match(
     - existing-claim lookup: select -> eq(call_id) -> limit -> execute
     - candidate lookup:      select -> eq(phone_hmac) -> is_ -> gt -> order -> limit -> execute
     - guarded claim:         update -> eq(id) -> is_ -> gt -> execute
+
+    The claim's current-deadline read (select -> eq(id) -> limit) shares the
+    existing-claim lookup's mock chain, so it returns the same `existing`
+    data — normally an empty list, which models "no prior deadline read" and
+    lets the claim fall back to now + DEMO_CLAIMED_SESSION_TTL_SECONDS.
     """
     sb = MagicMock()
     select_eq = sb.table.return_value.select.return_value.eq
@@ -191,7 +197,10 @@ class TestMatchDemoSessionForCall:
 
         # The claim itself is the atomic guarded update by session id.
         update = sb.table.return_value.update
-        assert update.call_args.args[0]["call_id"] == CALL_ID
+        payload = update.call_args.args[0]
+        assert payload["call_id"] == CALL_ID
+        # The winning claim also extends the deadline in the same update.
+        datetime.fromisoformat(payload["expires_at"])
         update.return_value.eq.assert_called_once_with("id", SESSION_ID)
         update.return_value.eq.return_value.is_.assert_called_once_with("claimed_at", None)
 
@@ -279,9 +288,12 @@ class TestMatchDemoSessionForCall:
         mock_settings.return_value = _make_settings()
         claimed_row = {"id": SESSION_ID, "call_id": CALL_ID, "claimed_at": "now"}
         sb = _mock_supabase_match(candidates=[{"id": SESSION_ID}], claims=[claimed_row])
-        # First delivery: no claim yet; second: delivery one's claim is visible.
+        # The existing-claim lookup chain is shared with the claim's current-
+        # deadline read, so: delivery one lookup, delivery one claim read,
+        # delivery two lookup (sees delivery one's claim).
         sb.table.return_value.select.return_value.eq.return_value.limit.return_value.execute.side_effect = [
             MagicMock(data=[]),
+            MagicMock(data=[{"id": SESSION_ID, "expires_at": "2099-01-01T00:00:00+00:00"}]),
             MagicMock(data=[claimed_row]),
         ]
         mock_get_sb.return_value = sb
