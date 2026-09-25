@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -16,10 +16,13 @@ PHONE_E164 = "+16045551234"
 HMAC_SECRET = "test-demo-hmac-secret"
 
 
-def _make_settings(*, ttl_seconds: int = 900) -> MagicMock:
+def _make_settings(
+    *, ttl_seconds: int = 900, claimed_ttl_seconds: int = 1800
+) -> MagicMock:
     settings = MagicMock()
     settings.DEMO_PHONE_HMAC_SECRET = HMAC_SECRET
     settings.DEMO_SESSION_TTL_SECONDS = ttl_seconds
+    settings.DEMO_CLAIMED_SESSION_TTL_SECONDS = claimed_ttl_seconds
     return settings
 
 
@@ -29,8 +32,21 @@ def _mock_supabase_insert(row: dict[str, Any]) -> MagicMock:
     return sb
 
 
-def _mock_supabase_claim(row: dict[str, Any] | None) -> MagicMock:
+def _mock_supabase_claim(
+    row: dict[str, Any] | None,
+    *,
+    current_expires_at: str | None = None,
+) -> MagicMock:
+    """Mock the two Supabase chains used by claim_demo_session.
+
+    - current-deadline read: select -> eq(id) -> limit -> execute
+    - guarded claim:         update -> eq(id) -> is_(claimed_at) -> gt(expires_at) -> execute
+    """
     sb = MagicMock()
+    read = sb.table.return_value.select.return_value.eq.return_value.limit.return_value
+    read.execute.return_value = MagicMock(
+        data=[{"id": SESSION_ID, "expires_at": current_expires_at}] if current_expires_at else []
+    )
     chain = (
         sb.table.return_value.update.return_value.eq.return_value.is_.return_value.gt.return_value
     )
@@ -273,61 +289,213 @@ class TestCreateDemoSession:
         assert created["id"] == SESSION_ID
 
 
+class TestParseExpiryTimestamp:
+    """The claim-time deadline extension rejects malformed database values."""
+
+    def test_aware_iso_timestamp_parses_to_same_instant(self) -> None:
+        from app.services.demo_sessions import _parse_expiry_timestamp
+
+        raw = datetime(2026, 9, 24, 12, 0, 0, tzinfo=UTC).isoformat()
+        assert _parse_expiry_timestamp(raw) == datetime(2026, 9, 24, 12, 0, 0, tzinfo=UTC)
+
+    def test_naive_timestamp_is_treated_as_utc(self) -> None:
+        from app.services.demo_sessions import _parse_expiry_timestamp
+
+        assert _parse_expiry_timestamp("2026-09-24T12:00:00") == datetime(
+            2026, 9, 24, 12, 0, 0, tzinfo=UTC
+        )
+
+    def test_invalid_timestamp_raises(self) -> None:
+        from app.services.demo_sessions import _parse_expiry_timestamp
+
+        with pytest.raises(ValueError, match="ISO-8601"):
+            _parse_expiry_timestamp("not-a-timestamp")
+
+    def test_non_string_value_raises(self) -> None:
+        from app.services.demo_sessions import _parse_expiry_timestamp
+
+        with pytest.raises(ValueError, match="ISO-8601"):
+            _parse_expiry_timestamp(None)
+
+
 class TestClaimDemoSession:
     @patch("app.services.demo_sessions._get_supabase")
-    def test_claim_updates_guarded_row(self, mock_get_sb: MagicMock) -> None:
+    @patch("app.services.demo_sessions.get_settings")
+    def test_claim_updates_guarded_row(
+        self,
+        mock_settings: MagicMock,
+        mock_get_sb: MagicMock,
+    ) -> None:
         from app.services.demo_sessions import claim_demo_session
 
+        mock_settings.return_value = _make_settings(claimed_ttl_seconds=1800)
         claimed_row = {
             "id": SESSION_ID,
             "claimed_at": "2026-09-23T12:00:00+00:00",
             "call_id": CALL_ID,
         }
-        sb = _mock_supabase_claim(claimed_row)
+        current_expires_at = (datetime.now(UTC) + timedelta(seconds=300)).isoformat()
+        sb = _mock_supabase_claim(claimed_row, current_expires_at=current_expires_at)
         mock_get_sb.return_value = sb
 
+        before = datetime.now(UTC)
         result = claim_demo_session(session_id=SESSION_ID, call_id=CALL_ID)
+        after = datetime.now(UTC)
 
         assert result == claimed_row
-        sb.table.assert_called_once_with("demo_sessions")
+        # The current deadline is read first, then the guarded claim runs.
+        assert sb.table.call_args_list == [call("demo_sessions"), call("demo_sessions")]
+        select_eq = sb.table.return_value.select.return_value.eq
+        select_eq.assert_called_once_with("id", SESSION_ID)
+        select_eq.return_value.limit.assert_called_once_with(1)
+
         update = sb.table.return_value.update
         payload = update.call_args[0][0]
         assert payload["call_id"] == CALL_ID
         assert "claimed_at" in payload
-        sb.table.return_value.update.return_value.eq.assert_called_once_with("id", SESSION_ID)
-        sb.table.return_value.update.return_value.eq.return_value.is_.assert_called_once_with(
-            "claimed_at", None
-        )
-        gt = sb.table.return_value.update.return_value.eq.return_value.is_.return_value.gt
+        # greatest(expires_at, now + 1800): the claimed TTL wins here.
+        extended = datetime.fromisoformat(payload["expires_at"])
+        assert before + timedelta(seconds=1800) <= extended <= after + timedelta(seconds=1800)
+        assert extended > datetime.fromisoformat(current_expires_at)
+
+        update.return_value.eq.assert_called_once_with("id", SESSION_ID)
+        update.return_value.eq.return_value.is_.assert_called_once_with("claimed_at", None)
+        gt = update.return_value.eq.return_value.is_.return_value.gt
         assert gt.call_args[0][0] == "expires_at"
         datetime.fromisoformat(gt.call_args[0][1])
 
     @patch("app.services.demo_sessions._get_supabase")
-    def test_expired_or_claimed_session_returns_none(self, mock_get_sb: MagicMock) -> None:
+    @patch("app.services.demo_sessions.get_settings")
+    def test_claim_extends_expiry_to_claimed_ttl(
+        self,
+        mock_settings: MagicMock,
+        mock_get_sb: MagicMock,
+    ) -> None:
+        """A winning claim moves the deadline to now + DEMO_CLAIMED_SESSION_TTL_SECONDS."""
         from app.services.demo_sessions import claim_demo_session
 
-        sb = _mock_supabase_claim(None)
+        mock_settings.return_value = _make_settings(claimed_ttl_seconds=1800)
+        current_expires_at = (datetime.now(UTC) + timedelta(seconds=300)).isoformat()
+        sb = _mock_supabase_claim(
+            {"id": SESSION_ID, "call_id": CALL_ID}, current_expires_at=current_expires_at
+        )
+        mock_get_sb.return_value = sb
+
+        before = datetime.now(UTC)
+        claim_demo_session(session_id=SESSION_ID, call_id=CALL_ID)
+        after = datetime.now(UTC)
+
+        payload = sb.table.return_value.update.call_args[0][0]
+        extended = datetime.fromisoformat(payload["expires_at"])
+        assert before + timedelta(seconds=1800) <= extended <= after + timedelta(seconds=1800)
+        assert extended > datetime.fromisoformat(current_expires_at)
+
+    @patch("app.services.demo_sessions._get_supabase")
+    @patch("app.services.demo_sessions.get_settings")
+    def test_claim_falls_back_to_now_plus_claimed_ttl_when_no_current_row(
+        self,
+        mock_settings: MagicMock,
+        mock_get_sb: MagicMock,
+    ) -> None:
+        """With no current-deadline row the claim still writes now + TTL."""
+        from app.services.demo_sessions import claim_demo_session
+
+        mock_settings.return_value = _make_settings(claimed_ttl_seconds=1800)
+        sb = _mock_supabase_claim({"id": SESSION_ID, "call_id": CALL_ID})
+        mock_get_sb.return_value = sb
+
+        before = datetime.now(UTC)
+        claim_demo_session(session_id=SESSION_ID, call_id=CALL_ID)
+        after = datetime.now(UTC)
+
+        payload = sb.table.return_value.update.call_args[0][0]
+        extended = datetime.fromisoformat(payload["expires_at"])
+        assert before + timedelta(seconds=1800) <= extended <= after + timedelta(seconds=1800)
+
+    @patch("app.services.demo_sessions._get_supabase")
+    @patch("app.services.demo_sessions.get_settings")
+    def test_claim_never_shortens_existing_deadline(
+        self,
+        mock_settings: MagicMock,
+        mock_get_sb: MagicMock,
+    ) -> None:
+        """greatest() keeps an already-longer deadline untouched."""
+        from app.services.demo_sessions import claim_demo_session
+
+        mock_settings.return_value = _make_settings(claimed_ttl_seconds=1800)
+        current_expires_at = (datetime.now(UTC) + timedelta(seconds=100_000)).isoformat()
+        sb = _mock_supabase_claim(
+            {"id": SESSION_ID, "call_id": CALL_ID}, current_expires_at=current_expires_at
+        )
+        mock_get_sb.return_value = sb
+
+        claim_demo_session(session_id=SESSION_ID, call_id=CALL_ID)
+
+        payload = sb.table.return_value.update.call_args[0][0]
+        assert payload["expires_at"] == current_expires_at
+
+    @patch("app.services.demo_sessions._get_supabase")
+    @patch("app.services.demo_sessions.get_settings")
+    def test_expired_or_claimed_session_returns_none(
+        self,
+        mock_settings: MagicMock,
+        mock_get_sb: MagicMock,
+    ) -> None:
+        """A claim after the original deadline matches no row."""
+        from app.services.demo_sessions import claim_demo_session
+
+        mock_settings.return_value = _make_settings()
+        past_expires_at = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
+        sb = _mock_supabase_claim(None, current_expires_at=past_expires_at)
         mock_get_sb.return_value = sb
 
         result = claim_demo_session(session_id=SESSION_ID, call_id="CA_SECOND_CALL")
 
         assert result is None
+        # The pre-update WHERE still enforces the original claim deadline.
+        gt = sb.table.return_value.update.return_value.eq.return_value.is_.return_value.gt
+        assert gt.call_args[0][0] == "expires_at"
+        assert datetime.fromisoformat(gt.call_args[0][1]) > datetime.fromisoformat(
+            past_expires_at
+        )
 
     @patch("app.services.demo_sessions._get_supabase")
+    @patch("app.services.demo_sessions.get_settings")
     def test_second_claim_of_same_session_yields_none(
         self,
+        mock_settings: MagicMock,
         mock_get_sb: MagicMock,
     ) -> None:
         """A claimed session can never be claimed by a second call."""
         from app.services.demo_sessions import claim_demo_session
 
-        first = _mock_supabase_claim({"id": SESSION_ID, "call_id": CALL_ID})
+        mock_settings.return_value = _make_settings()
+        current_expires_at = (datetime.now(UTC) + timedelta(seconds=300)).isoformat()
+        first = _mock_supabase_claim(
+            {"id": SESSION_ID, "call_id": CALL_ID}, current_expires_at=current_expires_at
+        )
         mock_get_sb.return_value = first
         assert claim_demo_session(session_id=SESSION_ID, call_id=CALL_ID) is not None
 
-        second = _mock_supabase_claim(None)
+        second = _mock_supabase_claim(None, current_expires_at=current_expires_at)
         mock_get_sb.return_value = second
         assert claim_demo_session(session_id=SESSION_ID, call_id="CA_SECOND_CALL") is None
+
+    @patch("app.services.demo_sessions._get_supabase")
+    @patch("app.services.demo_sessions.get_settings")
+    def test_non_positive_claimed_ttl_rejected(
+        self,
+        mock_settings: MagicMock,
+        mock_get_sb: MagicMock,
+    ) -> None:
+        """A misconfigured claimed TTL fails loudly before touching the database."""
+        from app.services.demo_sessions import claim_demo_session
+
+        mock_settings.return_value = _make_settings(claimed_ttl_seconds=0)
+
+        with pytest.raises(ValueError, match="DEMO_CLAIMED_SESSION_TTL_SECONDS"):
+            claim_demo_session(session_id=SESSION_ID, call_id=CALL_ID)
+        mock_get_sb.assert_not_called()
 
     @patch("app.services.demo_sessions._get_supabase")
     def test_invalid_session_id_rejected(self, mock_get_sb: MagicMock) -> None:
@@ -338,13 +506,16 @@ class TestClaimDemoSession:
         mock_get_sb.return_value.table.return_value.update.assert_not_called()
 
     @patch("app.services.demo_sessions._get_supabase")
+    @patch("app.services.demo_sessions.get_settings")
     def test_rejection_is_logged_without_phone_data(
         self,
+        mock_settings: MagicMock,
         mock_get_sb: MagicMock,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         from app.services.demo_sessions import claim_demo_session
 
+        mock_settings.return_value = _make_settings()
         mock_get_sb.return_value = _mock_supabase_claim(None)
 
         with caplog.at_level("INFO"):
@@ -422,3 +593,52 @@ class TestDemoSessionSettings:
             DEMO_PHONE_HMAC_SECRET="secret",
         )
         assert settings.DEMO_SESSION_TTL_SECONDS == 900
+
+    def test_claimed_session_ttl_defaults_to_thirty_minutes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.core.config import Settings
+
+        monkeypatch.delenv("DEMO_CLAIMED_SESSION_TTL_SECONDS", raising=False)
+        settings = Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            SUPABASE_URL="https://example.supabase.co",
+            SUPABASE_SERVICE_ROLE_KEY="service-role-key",
+            OPENAI_API_KEY="openai-key",
+            OPENAI_REALTIME_MODEL="gpt-realtime",
+            TWILIO_ACCOUNT_SID="ACxxxx",
+            TWILIO_AUTH_TOKEN="token",
+            TWILIO_PHONE_NUMBER="+16045550100",
+            DISPATCHER_ALERT_PHONE="+16045550101",
+            EMERGENCY_TRANSFER_PHONE="911",
+            DEMO_PHONE_HMAC_SECRET="secret",
+        )
+        assert settings.DEMO_CLAIMED_SESSION_TTL_SECONDS == 1800
+
+    @pytest.mark.parametrize("bad_value", [0, -1])
+    def test_claimed_session_ttl_rejects_non_positive_values(
+        self,
+        bad_value: int,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A non-positive claimed TTL fails startup validation loudly."""
+        from pydantic import ValidationError
+
+        from app.core.config import Settings
+
+        monkeypatch.setenv("DEMO_CLAIMED_SESSION_TTL_SECONDS", str(bad_value))
+        with pytest.raises(ValidationError) as excinfo:
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                SUPABASE_URL="https://example.supabase.co",
+                SUPABASE_SERVICE_ROLE_KEY="service-role-key",
+                OPENAI_API_KEY="openai-key",
+                OPENAI_REALTIME_MODEL="gpt-realtime",
+                TWILIO_ACCOUNT_SID="ACxxxx",
+                TWILIO_AUTH_TOKEN="token",
+                TWILIO_PHONE_NUMBER="+16045550100",
+                DISPATCHER_ALERT_PHONE="+16045550101",
+                EMERGENCY_TRANSFER_PHONE="911",
+                DEMO_PHONE_HMAC_SECRET="secret",
+            )
+        assert "DEMO_CLAIMED_SESSION_TTL_SECONDS" in str(excinfo.value)

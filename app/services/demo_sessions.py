@@ -119,25 +119,87 @@ def create_demo_session(
     return created
 
 
+def _parse_expiry_timestamp(value: Any) -> datetime:
+    """Parse a demo_sessions ``expires_at`` value into a UTC datetime.
+
+    Rejects anything that is not an ISO-8601 timestamp so a malformed
+    database value fails loudly instead of silently corrupting the
+    claim-time deadline extension.
+    """
+    if not isinstance(value, str):
+        raise ValueError("demo session expires_at must be an ISO-8601 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError("demo session expires_at must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
 def claim_demo_session(*, session_id: str, call_id: str) -> dict[str, Any] | None:
     """Atomically claim an unexpired, unclaimed demo session for one call.
 
     Guarded update: the claim only lands while the row still has
     ``claimed_at IS NULL`` and ``expires_at`` in the future, so a second
     call (or a duplicate Twilio webhook) cannot claim the same session and
-    an expired session cannot be claimed at all. Returns the claimed row,
-    or None when nothing matched (missing, expired, or already claimed).
+    an expired session cannot be claimed at all.
+
+    A winning claim also extends the deadline in the same update to
+    ``greatest(expires_at, now + DEMO_CLAIMED_SESSION_TTL_SECONDS)``, so
+    browser access follows the claimed call instead of the creation clock.
+    The pre-update WHERE clause still enforces the original claim deadline,
+    and the extension can only ever move ``expires_at`` forward — the
+    existing RLS policies (gated on ``expires_at > now()``) pick up the
+    longer window with no schema or policy change.
+
+    The ``max`` of the pre-read value and ``now + TTL`` is safe because the
+    claim is the only writer of ``expires_at`` (creation writes it once) and
+    the ``claimed_at IS NULL`` guard serializes concurrent claims — a losing
+    claim writes nothing, so the pre-read value can never be stale-shortened
+    by another writer. Any future writer of ``expires_at`` must preserve
+    that invariant.
+
+    Returns the claimed row, or None when nothing matched (missing, expired,
+    or already claimed).
     """
     try:
         uuid.UUID(session_id)
     except (TypeError, ValueError) as exc:
         raise ValueError("session_id must be a valid UUID") from exc
 
-    now = datetime.now(UTC).isoformat()
+    claimed_ttl_seconds = get_settings().DEMO_CLAIMED_SESSION_TTL_SECONDS
+    if claimed_ttl_seconds <= 0:
+        raise ValueError("DEMO_CLAIMED_SESSION_TTL_SECONDS must be positive")
+
+    supabase = _get_supabase()
+    current = (
+        supabase.table("demo_sessions")
+        .select("expires_at")
+        .eq("id", session_id)
+        .limit(1)
+        .execute()
+    )
+
+    now_dt = datetime.now(UTC)
+    now = now_dt.isoformat()
+    extended_expires_at = now_dt + timedelta(seconds=claimed_ttl_seconds)
+    if current.data:
+        current_row = dict(current.data[0])  # type: ignore[arg-type]
+        extended_expires_at = max(
+            _parse_expiry_timestamp(current_row.get("expires_at")),
+            extended_expires_at,
+        )
+
     result = (
-        _get_supabase()
-        .table("demo_sessions")
-        .update({"claimed_at": now, "call_id": call_id})
+        supabase.table("demo_sessions")
+        .update(
+            {
+                "claimed_at": now,
+                "call_id": call_id,
+                "expires_at": extended_expires_at.isoformat(),
+            }
+        )
         .eq("id", session_id)
         .is_("claimed_at", None)
         .gt("expires_at", now)
@@ -156,6 +218,7 @@ def claim_demo_session(*, session_id: str, call_id: str) -> dict[str, Any] | Non
         "Demo session claimed",
         demo_session_id=session_id,
         call_id=call_id,
+        expires_at=extended_expires_at.isoformat(),
     )
     return dict(result.data[0])  # type: ignore[arg-type]
 

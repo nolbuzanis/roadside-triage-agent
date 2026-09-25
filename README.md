@@ -65,6 +65,7 @@ cp .env.example .env
 | `EMERGENCY_TRANSFER_PHONE`   | Yes      | Emergency transfer destination (911 or local emergency number)                                  |
 | `DEMO_PHONE_HMAC_SECRET`     | Yes      | Server-side keyed HMAC secret for demo phone matching (generate with `openssl rand -hex 32`)     |
 | `DEMO_SESSION_TTL_SECONDS`   | No       | Demo session lifetime in seconds (default `900` = 15 minutes)                                   |
+| `DEMO_CLAIMED_SESSION_TTL_SECONDS` | No  | Lifetime added when a call claims the session, applied as `greatest(expires_at, now + value)` (default `1800` = 30 minutes) |
 | `FRONTEND_ORIGINS`           | No       | Comma-separated browser origins allowed to call the API cross-origin (default: none)             |
 
 ### 4. Set Up Supabase
@@ -118,11 +119,11 @@ The public demo starts each visitor with a short-lived **anonymous** Supabase Au
 
 Demo **expiry** and demo **retention** are separate concerns:
 
-- **Expiry controls access, not storage.** `DEMO_SESSION_TTL_SECONDS` (default `900` = 15 minutes) bounds how long a demo session is usable. Once `expires_at` passes:
+- **Expiry controls access, not storage.** Expiry is two-phase. `DEMO_SESSION_TTL_SECONDS` (default `900` = 15 minutes) bounds only *starting* the demo — a session must be unexpired before an inbound Twilio call can claim it. When a call claims the session, the backend extends `expires_at` inside the same guarded claim update to `greatest(expires_at, now + DEMO_CLAIMED_SESSION_TTL_SECONDS)` (default `1800` = 30 minutes): the extension can never shorten an existing deadline, and the pre-update `WHERE` clause still enforces the original claim deadline. Because every demo read policy is already gated on `expires_at > now()`, the longer window takes effect with no schema or RLS policy change. Once `expires_at` passes:
   - the session can no longer be claimed by an inbound Twilio call (the guarded claim requires `expires_at > now()`);
   - the browser can no longer read the session's own `demo_sessions` row (the owner-read policy requires `expires_at > now()`);
   - an anonymous session's browser can no longer read the linked `assistance_requests` row or receive its Realtime events (the restrictive demo-read policy requires `expires_at > now()` for anonymous sessions, as described above — signed-in accounts keep their normal read access, but the demo page has already switched to its expired state and stopped reading);
-  - the demo page switches to its expired state when the countdown ends.
+  - the demo page switches to its expired state only when the countdown reaches zero *and* the session row is no longer readable: the countdown re-reads its own `demo_sessions` row when it hits zero and when the linked request first appears, adopts the extended deadline when a row comes back, and shows the expired screen only when the row is hidden (an unclaimed session therefore still expires at `created_at + DEMO_SESSION_TTL_SECONDS`).
 - **Retention is indefinite.** All demo data is kept for historical and dispatcher review. The application performs no retention-driven deletes or anonymization: `demo_sessions` rows and demo-linked `assistance_requests` rows (including `caller_phone`, intake fields, status, and timestamps) are never deleted or anonymized after expiry — normal in-flight intake/status writes during a live call still apply — and requests without a `demo_session_id` (production calls) are subject to the same rule. There is no cleanup job, cron, or background task that purges demo data.
 - **History stays visible.** Expired demo requests are never hidden or removed by the application; completed ones remain in the dispatcher dashboard's Past Requests section (the dashboard lists the 100 most recent requests, and a still-open call appears under Active Requests).
 - **Purging is manual and operator-driven.** If demo data ever needs to be removed (e.g. a privacy request), do it directly in the Supabase dashboard or SQL editor — never from within the application.
@@ -911,6 +912,7 @@ After the first deploy (tracked by the post-deploy smoke-check TODO in `TODO.md`
 | `EMERGENCY_TRANSFER_PHONE` | Yes | Emergency transfer number |
 | `DEMO_PHONE_HMAC_SECRET` | Yes | Keyed HMAC secret for demo phone matching (`openssl rand -hex 32`) |
 | `DEMO_SESSION_TTL_SECONDS` | No | Demo session lifetime in seconds (default `900` = 15 minutes) |
+| `DEMO_CLAIMED_SESSION_TTL_SECONDS` | No | Deadline added when a call claims the session, `greatest(expires_at, now + value)` (default `1800` = 30 minutes) |
 
 ### Production (Secret Manager)
 

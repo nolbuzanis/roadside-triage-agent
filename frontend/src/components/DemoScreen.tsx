@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { REALTIME_SUBSCRIBE_STATES } from '@supabase/supabase-js'
 import { supabase } from '../lib/supabaseClient'
 import { startDemoSession } from '../lib/demoSession'
@@ -25,6 +25,57 @@ export default function DemoScreen() {
   const [realtimeStatus, setRealtimeStatus] =
     useState<RealtimeStatus>('connecting')
   const [nowMs, setNowMs] = useState(() => Date.now())
+  const expiryRecheckRef = useRef(false)
+  const currentDemoIdRef = useRef<string | null>(null)
+
+  // Two-phase expiry: the deadline moves forward when a real inbound call
+  // claims the session, so the page re-reads its own demo_sessions row
+  // instead of trusting the creation-anchored value. A returned row means
+  // access was extended (adopt the new deadline and keep counting); a null
+  // row (RLS-hidden) means the session is genuinely expired. A read error
+  // keeps the session and lets the next trigger retry.
+  const recheckExpiry = useCallback(async (demoId: string) => {
+    if (expiryRecheckRef.current) {
+      return
+    }
+    expiryRecheckRef.current = true
+    try {
+      const { data, error } = await supabase
+        .from('demo_sessions')
+        .select('id, expires_at')
+        .eq('id', demoId)
+        .maybeSingle()
+      if (error) {
+        return
+      }
+      if (!data) {
+        if (currentDemoIdRef.current !== demoId) {
+          // A different session is active now — never expire it from a
+          // stale read of the previous one.
+          return
+        }
+        clearStoredDemoSession()
+        setDemo(null)
+        setRequests([])
+        setPhase('expired')
+        return
+      }
+      const nextExpiresAt = (data as { id: string; expires_at: string })
+        .expires_at
+      setDemo((current) =>
+        current && current.id === demoId
+          ? { ...current, expires_at: nextExpiresAt }
+          : current,
+      )
+      setNowMs(Date.now())
+    } finally {
+      expiryRecheckRef.current = false
+    }
+  }, [])
+
+  useEffect(() => {
+    currentDemoIdRef.current = demo ? demo.id : null
+  }, [demo])
 
   useEffect(() => {
     let cancelled = false
@@ -98,35 +149,37 @@ export default function DemoScreen() {
   }, [])
 
   const activeDemoId = phase === 'active' && demo ? demo.id : null
+  const linkedRequestSeenRef = useRef(false)
 
   useEffect(() => {
     if (!activeDemoId) {
       return
     }
+    linkedRequestSeenRef.current = false
     let active = true
+    const handleLinkedRequestEvent = (incoming: AssistanceRequest) => {
+      if (incoming.demo_session_id !== activeDemoId) {
+        return
+      }
+      setRequests((current) => upsertRequest(current, incoming))
+      if (!linkedRequestSeenRef.current) {
+        linkedRequestSeenRef.current = true
+        // The claim extends expires_at before the row links, so the first
+        // linked-request event is when the countdown should adopt it.
+        void recheckExpiry(activeDemoId)
+      }
+    }
     const channel = supabase
       .channel(`demo-request-${activeDemoId}`)
       .on(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'assistance_requests' },
-        (payload) => {
-          const incoming = payload.new as AssistanceRequest
-          if (incoming.demo_session_id !== activeDemoId) {
-            return
-          }
-          setRequests((current) => upsertRequest(current, incoming))
-        },
+        (payload) => handleLinkedRequestEvent(payload.new as AssistanceRequest),
       )
       .on(
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'assistance_requests' },
-        (payload) => {
-          const incoming = payload.new as AssistanceRequest
-          if (incoming.demo_session_id !== activeDemoId) {
-            return
-          }
-          setRequests((current) => upsertRequest(current, incoming))
-        },
+        (payload) => handleLinkedRequestEvent(payload.new as AssistanceRequest),
       )
       .subscribe((status) => {
         if (!active) {
@@ -142,33 +195,25 @@ export default function DemoScreen() {
       active = false
       supabase.removeChannel(channel)
     }
-  }, [activeDemoId])
+  }, [activeDemoId, recheckExpiry])
 
   const expiresAtMs = demo ? Date.parse(demo.expires_at) : null
 
   useEffect(() => {
-    if (phase !== 'active' || expiresAtMs === null) {
+    if (phase !== 'active' || !activeDemoId || expiresAtMs === null) {
       return
-    }
-    function expire() {
-      clearStoredDemoSession()
-      setDemo(null)
-      setRequests([])
-      setPhase('expired')
     }
     if (expiresAtMs - Date.now() <= 0) {
-      expire()
-      return
+      void recheckExpiry(activeDemoId)
     }
     const timer = window.setInterval(() => {
+      setNowMs(Date.now())
       if (expiresAtMs - Date.now() <= 0) {
-        expire()
-      } else {
-        setNowMs(Date.now())
+        void recheckExpiry(activeDemoId)
       }
     }, 1000)
     return () => window.clearInterval(timer)
-  }, [phase, expiresAtMs])
+  }, [phase, activeDemoId, expiresAtMs, recheckExpiry])
 
   async function handleStart(phone: string) {
     setSubmitting(true)
