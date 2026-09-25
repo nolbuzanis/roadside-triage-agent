@@ -114,6 +114,19 @@ The public demo starts each visitor with a short-lived **anonymous** Supabase Au
 3. As with the dispatcher dashboard, browsers only ever hold the public project URL and anon/publishable key — never the service-role key.
 4. Row Level Security scopes what an authenticated session can read: its own unexpired `demo_sessions` row (via the `Demo user can read own demo session` policy, which applies to anonymous and signed-in owners alike) and — for anonymous sessions — only the `assistance_requests` row linked to that session while it is still valid (via the restrictive `Demo users read only their linked assistance requests` policy). The dispatcher account keeps full read access, demo sessions stay read-only, and access is never granted from `caller_phone`. Supabase Realtime applies the same SELECT policies to INSERT/UPDATE subscription events.
 
+#### Demo Data Expiry and Retention
+
+Demo **expiry** and demo **retention** are separate concerns:
+
+- **Expiry controls access, not storage.** `DEMO_SESSION_TTL_SECONDS` (default `900` = 15 minutes) bounds how long a demo session is usable. Once `expires_at` passes:
+  - the session can no longer be claimed by an inbound Twilio call (the guarded claim requires `expires_at > now()`);
+  - the browser can no longer read the session's own `demo_sessions` row (the owner-read policy requires `expires_at > now()`);
+  - an anonymous session's browser can no longer read the linked `assistance_requests` row or receive its Realtime events (the restrictive demo-read policy requires `expires_at > now()` for anonymous sessions, as described above — signed-in accounts keep their normal read access, but the demo page has already switched to its expired state and stopped reading);
+  - the demo page switches to its expired state when the countdown ends.
+- **Retention is indefinite.** All demo data is kept for historical and dispatcher review. The application performs no retention-driven deletes or anonymization: `demo_sessions` rows and demo-linked `assistance_requests` rows (including `caller_phone`, intake fields, status, and timestamps) are never deleted or anonymized after expiry — normal in-flight intake/status writes during a live call still apply — and requests without a `demo_session_id` (production calls) are subject to the same rule. There is no cleanup job, cron, or background task that purges demo data.
+- **History stays visible.** Expired demo requests are never hidden or removed by the application; completed ones remain in the dispatcher dashboard's Past Requests section (the dashboard lists the 100 most recent requests, and a still-open call appears under Active Requests).
+- **Purging is manual and operator-driven.** If demo data ever needs to be removed (e.g. a privacy request), do it directly in the Supabase dashboard or SQL editor — never from within the application.
+
 ### 5. Configure Twilio Phone Number
 
 1. Purchase a phone number in the [Twilio Console](https://console.twilio.com/)
