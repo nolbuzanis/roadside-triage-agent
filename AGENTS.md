@@ -130,6 +130,7 @@ One meaningful TODO item should normally correspond to one PR. Do not combine un
 
 A PR should include:
 
+- a stakeholder-facing "What this changes for users" section at the top
 - a concise description of what changed
 - why the change exists
 - the TODO item being completed
@@ -137,10 +138,45 @@ A PR should include:
 - verification performed
 - any known limitations
 
-**Long PR messages:** When the PR body exceeds a single line, pipe a heredoc into `gh pr create --body-file -`. Avoid passing long multi-line strings directly in `--body` arguments, as shell quoting of special characters (backticks, parentheses, URLs) frequently causes parsing errors. Example:
+**Stakeholder section:** Every PR must begin with a short plain-English section placed directly above the existing `## Summary` section:
+
+```markdown
+## What this changes for users
+
+<2–4 sentences in plain English explaining:
+- what problem the user/stakeholder experiences today
+- what changes after this PR
+- why the change matters
+>
+```
+
+Writing rules:
+
+- Write for someone with no knowledge of the codebase.
+- Avoid file names, function names, classes, internal state names, API names, and implementation details.
+- Explain the behavior or experience, not the code.
+- Keep it concise: usually 2–4 sentences.
+- State the user-visible problem first, then the improvement.
+- If there is no direct end-user impact, explain the stakeholder/operational value instead, such as reliability, safety, cost control, maintainability, or reduced risk.
+- Do not exaggerate impact or claim benefits the PR does not actually provide.
+- Keep the existing technical `## Summary`, `## Why`, acceptance criteria, verification, known limitations, and other PR sections unchanged.
+
+Example:
+
+```markdown
+## What this changes for users
+
+Before this change, a caller who said "no," gave an uncertain answer, or did not respond to the final summary could leave the conversation in an unclear state. After this change, the agent only completes the request after the caller clearly confirms the location, vehicle, and issue, and it asks for corrections when needed. This reduces the chance of submitting incorrect roadside-assistance details.
+```
+
+**Long PR messages:** When the PR body exceeds a single line, pipe a heredoc into `gh pr create --body-file -`. Avoid passing long multi-line strings directly to `--body` arguments, as shell quoting of special characters (backticks, parentheses, URLs) frequently causes parsing errors. Example:
 
 ```bash
 cat <<'EOF' | gh pr create --fill --body-file -
+## What this changes for users
+
+Plain-English stakeholder summary goes here.
+
 ## Summary
 
 Describe the change here.
