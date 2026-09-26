@@ -396,7 +396,7 @@ What is already ruled out by inspection (so the fix must look elsewhere): demo-s
 
 ### Status
 
-- [ ] Not started
+- [x] Completed in `fix/demo-call-card-terminal-state` PR (#98, open at check-off — merge pending; frontend unit-test coverage of the fixed path awaits the frontend test-runner item)
 
 ---
 
