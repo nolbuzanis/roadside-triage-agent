@@ -243,6 +243,40 @@ Do not hang up based only on OpenAI `response.done`. Verify that the final closi
 
 - [x] Completed in `feat/hangup-after-closing-audio` PR
 
+## P0 — Show escalated calls on the demo screen during the call and after hangup
+
+Reported against a live demo call: after the call escalated to emergency, no request ever appeared on the demo screen, and it was still absent after hangup. This violates the shipped P0 demo acceptance that completed/abandoned/escalated state appears without refreshing.
+
+What is already ruled out by inspection (so the fix must look elsewhere): demo-session claim and `link_demo_session` run once in the voice webhook (`_match_and_link_demo_session` in `app/api/twilio.py`), before any emergency is known; `update_ticket_hazard` (`app/services/tickets.py`) never touches `demo_session_id`; the demo RLS policy (`20260924120000_restrict_demo_request_access_rls.sql`) has no status filter; and `DemoScreen.tsx` renders whatever linked rows it receives with no status filter. A linked escalated row would therefore render — non-appearance means the row was never linked, never created, unclaimed, unreadable, or never delivered.
+
+- Diagnose the reported call from structured logs and row state: claim outcome (`demo_session_matched` / `demo_session_match_miss`), link outcome, and the escalated row's `demo_session_id` for that `call_id`
+- Prime suspects to confirm or rule out: claim miss (wrong caller number, expired/already-claimed session), the link-miss race where `link_demo_session` matches zero rows because the request row did not exist yet (see the related Post-MVP item on recovering a claimed-but-unlinked session — if this is the root cause, that item may be subsumed here), and a realtime/backfill delivery gap on the escalation timeline
+- Fix the confirmed cause so the escalated request appears live with its escalated state, persists after hangup, and survives refresh without duplicates; do not change dispatcher or emergency-transfer behavior
+
+### Acceptance Criteria
+
+- Root cause for the reported call is identified from logs/row state and recorded on this item
+- A demo call that escalates shows its request on the demo screen live with escalated state, without refresh
+- After hangup the escalated request remains visible, and refresh restores it with no duplicates
+- Unit tests cover the fixed path (claim/link/escalation visibility); existing demo-session, webhook, escalation, and closing suites still pass
+- The call-status card reflects terminal state after hangup (no stuck "connected" display or running timer for escalated/completed/abandoned rows)
+- Verification: live demo call with real escalation plus hangup, correlating the voice-webhook claim/link logs with the demo-screen realtime/backfill reads
+
+### Dependencies
+
+- none
+
+### Diagnosis evidence (2026-09-26)
+
+- Live call `CAcdf391ac3b5f191ce3983b19e838282c` escalated ("Escalation state recorded", `app.api.twilio`, 23:30:32Z) after the caller reported a smoking hood; transfer to emergency services was initiated.
+- After hangup, refreshing the demo page still showed the call as connected. Refresh re-reads the linked row from the database, so the row is linked and readable — ruling out never-linked/RLS causes for this call.
+- Confirmed frontend gap (code inspection): `DemoActiveView.tsx` derives `connected = request !== null`, so any terminal row (escalated/completed/abandoned) still renders the on-call card ("You're on the call" / "Connected to AI agent" with a running elapsed timer). The call card never reflects terminal state.
+- Unconfirmed: the accompanying timeline analysis claims teardown finalized the row as `abandoned` before escalation was recorded — verify the row's final `status`/`intake_status` for this `call_id` before relying on it; only the "Escalation state recorded" line is a verbatim log entry.
+
+### Status
+
+- [ ] Not started
+
 ---
 
 # Progressive `assistance_request` Lifecycle — P0 Sequence
