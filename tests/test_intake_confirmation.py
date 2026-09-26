@@ -20,7 +20,7 @@ from app.api.twilio import (
     handle_confirm_assistance_request,
     handle_update_assistance_request,
 )
-from app.realtime.instructions import CLOSING_MESSAGE
+from app.realtime.instructions import CLOSING_MESSAGE, ROADSIDE_ASSISTANT_INSTRUCTIONS
 from app.realtime.session import RealtimeSession
 
 CALL_SID = "CA_confirm_flow"
@@ -585,3 +585,243 @@ class TestEmergencyBeatsConfirmation:
         assert len(_events_named(caplog, "confirmation_suppressed_transfer")) == 1
         assert session.intake_completed is False
         assert session.closing_response_started is False
+
+
+# ---------------------------------------------------------------------------
+# 7. Caller answer scenarios for the final confirmation summary
+#
+# The caller's answer is classified by the prompt: this codebase has no
+# transcript gate, so each scenario pins both the prompt rule for that
+# answer and the runtime invariant that keeps a mis-classified answer from
+# completing the intake.
+# ---------------------------------------------------------------------------
+
+
+def _instruction_text() -> str:
+    return ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
+
+
+def _install_tool_handler(session: RealtimeSession) -> AsyncMock:
+    """Attach one shared handler so every dispatch in a test is recorded."""
+
+    def _respond(call_id: str, func_name: str, arguments: str) -> str:
+        if func_name == "confirm_assistance_request":
+            return '{"status": "confirmed", "assistance_request_id": "req_1"}'
+        return '{"status": "ready_for_confirmation", "assistance_request_id": "req_1"}'
+
+    handler = AsyncMock(side_effect=_respond)
+    session.on_tool_call = handler
+    return handler
+
+
+async def _call_tool(session: RealtimeSession, name: str, arguments: str = "{}") -> None:
+    await session._handle_function_call({
+        "call_id": f"call_{name}",
+        "type": "function_call",
+        "name": name,
+        "arguments": arguments,
+    })
+
+
+def _dispatched(handler: AsyncMock) -> list[str]:
+    """Names of the tool handlers actually dispatched, in order."""
+    return [call.args[1] for call in handler.await_args_list]
+
+
+def _closing_turns(creates: list[dict]) -> list[dict]:
+    return [c for c in creates if "instructions" in c.get("response", {})]
+
+
+class TestConfirmationAnswerScenarios:
+    async def test_clear_affirmative_completes_intake_exactly_once(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A clear "yes, that's right" confirms once and closes once."""
+        lower = _instruction_text()
+        assert "clear affirmative" in lower
+        assert "call confirm_assistance_request, exactly once" in lower
+
+        on_closing_finished = AsyncMock()
+        session = _make_session(on_closing_finished=on_closing_finished)
+        ws = await _connect_session(session)
+        handler = _install_tool_handler(session)
+
+        with caplog.at_level("INFO"):
+            await _call_tool(session, "update_assistance_request", THREE_FIELD_ARGS)
+            # The caller clearly confirms the summary...
+            await _call_tool(session, "confirm_assistance_request")
+            # ...and the model's confirm call is retried once.
+            await _call_tool(session, "confirm_assistance_request")
+
+        assert _dispatched(handler) == [
+            "update_assistance_request",
+            "confirm_assistance_request",
+            "confirm_assistance_request",
+        ]
+        assert session.intake_completed is True
+        closing_turns = _closing_turns(_response_creates(ws))
+        assert len(closing_turns) == 1
+        assert CLOSING_MESSAGE in closing_turns[0]["response"]["instructions"]
+        assert len(_events_named(caplog, "closing_response_started")) == 1
+        on_closing_finished.assert_not_called()
+
+    async def test_clear_rejection_saves_only_the_changed_field_and_reasks(
+        self, _mock_complete_intake: MagicMock, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A "no, the location is ..." re-saves only that field and re-asks."""
+        lower = _instruction_text()
+        assert "clear rejection" in lower
+        assert "do not call confirm_assistance_request" in lower
+        assert "ask briefly what needs correcting" in lower
+
+        session = _make_session()
+        ws = await _connect_session(session)
+        handler = _install_tool_handler(session)
+
+        with caplog.at_level("INFO"):
+            await _call_tool(session, "update_assistance_request", THREE_FIELD_ARGS)
+            # The rejection turn persists the correction instead of confirming.
+            await _call_tool(
+                session, "update_assistance_request", '{"location": "Main and 13th"}'
+            )
+
+        assert session.intake_completed is False
+        assert session.closing_response_started is False
+        assert _dispatched(handler) == [
+            "update_assistance_request",
+            "update_assistance_request",
+        ]
+        # Summary turn + correction turn: the model gets a turn to re-ask.
+        assert len(_response_creates(ws)) == 2
+        assert _events_named(caplog, "closing_response_started") == []
+
+        # Persistence side: only the corrected field is written.
+        corrected = _row(location="Main and 13th")
+        with patch("app.api.twilio.create_ticket", return_value=corrected) as mock_save:
+            with patch("app.api.twilio.notify_dispatcher") as mock_notify:
+                result = await handle_update_assistance_request(
+                    call_sid=CALL_SID,
+                    caller_phone=CALLER_PHONE,
+                    arguments='{"location": "Main and 13th"}',
+                )
+
+        assert result.status == "ready_for_confirmation"
+        saved = mock_save.call_args.kwargs
+        assert saved["location"] == "Main and 13th"
+        # The untouched fields are omitted, so the merge cannot overwrite them.
+        assert saved["vehicle"] is None
+        assert saved["issue"] is None
+        _mock_complete_intake.assert_not_called()
+        mock_notify.assert_not_called()
+        assert _events_named(caplog, "assistance_request_confirmed") == []
+
+    async def test_ambiguous_response_never_completes_intake(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """An "I think so" gets an explicit re-ask; no confirm tool runs."""
+        lower = _instruction_text()
+        assert "ambiguous or hedged" in lower
+        assert "i think so" in lower
+        assert "ask the caller to answer with a clear yes or no" in lower
+
+        on_closing_finished = AsyncMock()
+        session = _make_session(on_closing_finished=on_closing_finished)
+        ws = await _connect_session(session)
+        handler = _install_tool_handler(session)
+
+        with caplog.at_level("INFO"):
+            await _call_tool(session, "update_assistance_request", THREE_FIELD_ARGS)
+            # The summary response finishes, opening the gate for caller turns.
+            await session._handle_event({
+                "type": "response.done",
+                "response": {"id": "resp_summary", "status": "completed", "output": []},
+            })
+            # The caller hedges; per the prompt the model asks for an explicit
+            # yes/no and calls no tool at all.
+            await session._handle_event({
+                "type": "input_audio_buffer.committed",
+                "item_id": "item_ambiguous",
+            })
+
+        assert session.intake_completed is False
+        assert session.closing_response_started is False
+        # Only the save ran — no confirm was dispatched for the hedge.
+        assert _dispatched(handler) == ["update_assistance_request"]
+        # Save/summary turn + the clarifying re-ask turn, and nothing else.
+        assert len(_response_creates(ws)) == 2
+        assert _events_named(caplog, "closing_response_started") == []
+        on_closing_finished.assert_not_called()
+
+    async def test_unanswered_confirmation_never_completes_intake(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Dead air after the summary completes nothing: no confirm, no closing."""
+        lower = _instruction_text()
+        assert "silence or no answer" in lower
+        assert "dead air is not a confirmation" in lower
+        assert "do not assume silence means confirmation" in lower
+
+        on_closing_finished = AsyncMock()
+        session = _make_session(on_closing_finished=on_closing_finished)
+        ws = await _connect_session(session)
+        handler = _install_tool_handler(session)
+
+        with caplog.at_level("INFO"):
+            await _call_tool(session, "update_assistance_request", THREE_FIELD_ARGS)
+            # The confirmation question is out and the caller never answers,
+            # so there is no affirmative for the model to act on.
+
+        assert session.intake_completed is False
+        assert session.closing_response_started is False
+        assert session.hangup_started is False
+        # Silence produced no confirm dispatch and no extra turn.
+        assert _dispatched(handler) == ["update_assistance_request"]
+        assert len(_response_creates(ws)) == 1
+        assert _events_named(caplog, "closing_response_started") == []
+        on_closing_finished.assert_not_called()
+
+    async def test_correction_is_persisted_then_reconfirmed_before_completion(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Save → correction → full re-summary → clear "yes" completes once."""
+        lower = _instruction_text()
+        assert "call update_assistance_request with only the corrected field or fields" in lower
+        assert "summarize the complete current location, vehicle, and issue again" in lower
+        assert "ask for confirmation again" in lower
+
+        on_closing_finished = AsyncMock()
+        session = _make_session(on_closing_finished=on_closing_finished)
+        ws = await _connect_session(session)
+        handler = _install_tool_handler(session)
+
+        with caplog.at_level("INFO"):
+            await _call_tool(session, "update_assistance_request", THREE_FIELD_ARGS)
+
+            # The caller rejects the location: only the changed field is saved.
+            await _call_tool(
+                session, "update_assistance_request", '{"location": "Main and 13th"}'
+            )
+
+            assert session.intake_completed is False
+            assert session.closing_response_started is False
+
+            # The caller now clearly confirms the re-summarized three fields.
+            await _call_tool(session, "confirm_assistance_request")
+
+        assert _dispatched(handler) == [
+            "update_assistance_request",
+            "update_assistance_request",
+            "confirm_assistance_request",
+        ]
+        # The correction carried only the changed field.
+        correction_args = json.loads(handler.await_args_list[1].args[2])
+        assert correction_args == {"location": "Main and 13th"}
+
+        assert session.intake_completed is True
+        creates = _response_creates(ws)
+        closing_turns = _closing_turns(creates)
+        assert len(closing_turns) == 1
+        assert CLOSING_MESSAGE in closing_turns[0]["response"]["instructions"]
+        # save turn + correction turn + closing turn, in that order.
+        assert len(creates) == 3
+        assert len(_events_named(caplog, "closing_response_started")) == 1

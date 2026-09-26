@@ -95,6 +95,77 @@ def test_instructions_require_reconfirmation_after_correction() -> None:
     assert "ask for confirmation again" in lower
 
 
+def test_instructions_define_clear_affirmative_as_only_completion_path() -> None:
+    """Only an unambiguous agreement may call the confirmation tool."""
+    lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
+    assert "clear affirmative" in lower
+    assert "unambiguous agreement" in lower
+    assert "only reply that completes the intake" in lower
+    assert "call confirm_assistance_request, exactly once" in lower
+    assert "that's right" in lower
+
+
+def test_instructions_define_declined_confirmation_fallback() -> None:
+    """A clear rejection must never confirm; the model asks what to correct."""
+    lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
+    assert "clear rejection" in lower
+    assert "not quite" in lower
+    assert "that's wrong" in lower
+    assert "ask briefly what needs correcting" in lower
+    assert "do not call confirm_assistance_request" in lower
+
+
+def test_instructions_reject_ambiguous_confirmation_responses() -> None:
+    """Hedged answers are not confirmation and require an explicit yes/no."""
+    lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
+    assert "ambiguous or hedged" in lower
+    for hedge in ("i think so", "probably", "maybe", "i guess"):
+        assert hedge in lower
+    assert "this is not a confirmation" in lower
+    assert "clear yes or no" in lower
+
+
+def test_instructions_reject_silence_and_dead_air_confirmation() -> None:
+    """Unanswered confirmation must never be treated as agreement."""
+    lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
+    assert "silence or no answer" in lower
+    assert "dead air is not a confirmation" in lower
+    assert "do not assume silence means confirmation" in lower
+    # The defined fallback turn for dead air.
+    assert "ask the same confirmation question once more" in lower
+
+
+def test_instructions_never_complete_on_declined_ambiguous_or_unanswered_summary() -> None:
+    """The prompt must state the no-completion rule for non-answers outright."""
+    lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
+    assert (
+        "declined, ambiguous, or unanswered confirmation never completes the intake"
+        in lower
+    )
+    # Restated where completion itself is defined.
+    assert "summary never completes the intake" in lower
+
+
+def test_instructions_persist_correction_before_re_summarizing() -> None:
+    """A correction is saved first, then all three fields are re-confirmed."""
+    lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
+    assert "only the corrected field or fields" in lower
+    assert "summarize the complete current location, vehicle, and issue again" in lower
+
+
+def test_instructions_keep_emergency_priority_over_confirmation_fallback() -> None:
+    """The decline/ambiguity fallbacks must not outrank an emergency transfer."""
+    lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
+    assert "transfer immediately instead of asking for confirmation" in lower
+    assert "including while clarifying" in lower
+
+
+def test_instructions_add_no_closing_language_of_their_own() -> None:
+    """The closing line stays system-owned; no model-written closing."""
+    lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
+    assert "never add a closing of your own" in lower
+
+
 def test_instructions_do_not_claim_saving_closes_the_call() -> None:
     """The prompt must not promise an automatic closing on the third save."""
     instructions = ROADSIDE_ASSISTANT_INSTRUCTIONS
