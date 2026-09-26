@@ -270,15 +270,19 @@ _OPEN_INTAKE_STATUSES = ("in_progress",)
 _COMPLETABLE_INTAKE_STATUSES = ("in_progress", "abandoned")
 
 
-def complete_intake(*, call_id: str) -> None:
+def complete_intake(*, call_id: str) -> bool:
     """Set the assistance request's intake_status to 'completed' when intake completes.
 
     Guarded update keyed on the canonical intake_status column: only
     'in_progress' rows and 'abandoned' rows (self-heal for calls in flight
     during the one-time backfill) are flipped; 'escalated' and
     already-'completed' rows are never overwritten, so retried completions
-    are idempotent. `status` is written in tandem. Non-blocking: logs
-    failures but does not raise.
+    are idempotent. `status` is written in tandem.
+
+    Returns True when the completion write landed — including the idempotent
+    no-op where the row is already completed — and False when the database
+    write failed, so callers never treat an unpersisted completion as done.
+    Failures are logged loudly but never raised across the thread boundary.
     """
     try:
         supabase = _get_supabase()
@@ -296,10 +300,12 @@ def complete_intake(*, call_id: str) -> None:
             status="completed",
             rows_updated=rows_updated,
         )
+        return True
     except Exception:
         logger.exception(
             "Failed to finalize intake status", call_id=call_id, status="completed"
         )
+        return False
 
 
 def abandon_if_open(*, call_id: str) -> None:

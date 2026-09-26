@@ -219,6 +219,19 @@ def test_instructions_require_use_of_transfer_tool() -> None:
     assert "transfer_to_emergency" in lower
 
 
+def test_instructions_handle_failed_completion() -> None:
+    """A failed confirmation must be reported to the caller, not claimed as success."""
+    lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
+    assert "if confirm_assistance_request reports an error, the intake was not completed" in lower
+    assert "request could not be completed" in lower
+    assert "wait for their response" in lower
+    assert "never claim success" in lower
+    assert "the request stays open" in lower
+    assert "never add a closing of your own" in lower
+    # Other tool failures keep the generic report-and-wait turn.
+    assert "if any other tool reports an error, tell the caller briefly and wait for their response" in lower
+
+
 def test_greeting_constant_value() -> None:
     """The greeting constant must be the exact expected string."""
     assert OPENING_GREETING == "This is roadside assistance. How can I help?"

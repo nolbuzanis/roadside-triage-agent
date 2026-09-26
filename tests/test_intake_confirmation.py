@@ -836,3 +836,162 @@ class TestConfirmationAnswerScenarios:
         # save turn + correction turn + closing turn, in that order.
         assert len(creates) == 3
         assert len(_events_named(caplog, "closing_response_started")) == 1
+
+
+# ---------------------------------------------------------------------------
+# 8. Completion persistence failure fails safe
+# ---------------------------------------------------------------------------
+
+
+class TestCompletionPersistenceFailure:
+    """A completion write that never lands must fail the whole confirmation."""
+
+    async def test_failed_completion_write_returns_error_and_sends_no_sms(
+        self,
+        _mock_complete_intake: MagicMock,
+        _mock_claim_notification_status: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _mock_complete_intake.return_value = False
+        with patch("app.api.twilio.get_assistance_request", return_value=_row()):
+            with patch("app.api.twilio.notify_dispatcher") as mock_notify:
+                with caplog.at_level("INFO"):
+                    result = await handle_confirm_assistance_request(
+                        call_sid=CALL_SID,
+                        caller_phone=CALLER_PHONE,
+                    )
+                    await _drain_background_tasks()
+
+        assert result.status == "error"
+        assert result.error
+        assert "could not be saved" in result.error
+        _mock_complete_intake.assert_called_once_with(call_id=CALL_SID)
+        _mock_claim_notification_status.assert_not_called()
+        mock_notify.assert_not_called()
+        assert _events_named(caplog, "assistance_request_completion_not_persisted")
+        assert _events_named(caplog, "assistance_request_confirmed") == []
+
+    async def test_forced_completion_write_failure_returns_error_via_real_finalizer(
+        self,
+        _mock_claim_notification_status: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Drive the real finalizer against a database that refuses the write."""
+        from app.services import tickets
+
+        with patch("app.api.twilio.complete_intake", tickets.complete_intake):
+            with patch("app.services.tickets._get_supabase") as mock_supabase:
+                mock_supabase.side_effect = RuntimeError("DB down")
+                with patch("app.api.twilio.get_assistance_request", return_value=_row()):
+                    with patch("app.api.twilio.notify_dispatcher") as mock_notify:
+                        with caplog.at_level("INFO"):
+                            result = await handle_confirm_assistance_request(
+                                call_sid=CALL_SID,
+                                caller_phone=CALLER_PHONE,
+                            )
+                            await _drain_background_tasks()
+
+        assert result.status == "error"
+        assert result.assistance_request_id == "req_1"
+        assert mock_supabase.called
+        _mock_claim_notification_status.assert_not_called()
+        mock_notify.assert_not_called()
+        assert _events_named(caplog, "assistance_request_completion_not_persisted")
+        assert _events_named(caplog, "assistance_request_confirmed") == []
+
+    async def test_completion_write_exception_returns_error_result(
+        self,
+        _mock_complete_intake: MagicMock,
+        _mock_claim_notification_status: MagicMock,
+    ) -> None:
+        """An unexpected raise out of the finalizer is still a failure result."""
+        _mock_complete_intake.side_effect = RuntimeError("sensitive internal detail")
+        with patch("app.api.twilio.get_assistance_request", return_value=_row()):
+            with patch("app.api.twilio.notify_dispatcher") as mock_notify:
+                result = await handle_confirm_assistance_request(
+                    call_sid=CALL_SID,
+                    caller_phone=CALLER_PHONE,
+                )
+
+        assert result.status == "error"
+        assert "sensitive internal detail" not in result.model_dump_json()
+        _mock_claim_notification_status.assert_not_called()
+        mock_notify.assert_not_called()
+
+    async def test_failure_then_retry_completes_the_same_request_once(
+        self,
+        _mock_complete_intake: MagicMock,
+        _mock_claim_notification_status: MagicMock,
+    ) -> None:
+        """The retry after a transient failure completes and notifies exactly once."""
+        _mock_complete_intake.side_effect = [False, True]
+        with patch("app.api.twilio.get_assistance_request", return_value=_row()):
+            with patch("app.api.twilio.notify_dispatcher") as mock_notify:
+                first = await handle_confirm_assistance_request(
+                    call_sid=CALL_SID,
+                    caller_phone=CALLER_PHONE,
+                )
+                await _drain_background_tasks()
+                second = await handle_confirm_assistance_request(
+                    call_sid=CALL_SID,
+                    caller_phone=CALLER_PHONE,
+                )
+                await _drain_background_tasks()
+
+        assert first.status == "error"
+        assert second.status == "confirmed"
+        assert _mock_complete_intake.call_count == 2
+        mock_notify.assert_called_once()
+
+    async def test_failed_completion_starts_no_closing_and_retry_closes_once(
+        self, no_grace: None, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """No closing or hangup arms on a failed completion; a retry still closes."""
+        on_closing_finished = AsyncMock()
+        session = _make_session(on_closing_finished=on_closing_finished)
+        ws = await _connect_session(session)
+
+        failure = (
+            '{"status": "error", "assistance_request_id": "req_1", "error": '
+            '"Unable to complete the assistance request: the completion could not be '
+            'saved, so the request is still open."}'
+        )
+        with caplog.at_level("INFO"):
+            await _confirm(session, result=failure)
+
+        creates = _response_creates(ws)
+        assert len(creates) == 1
+        # The model gets a plain turn to tell the caller; no closing directive.
+        assert "instructions" not in creates[0].get("response", {})
+        assert CLOSING_MESSAGE not in str(creates[0])
+        assert session.intake_completed is False
+        assert session.closing_response_started is False
+        assert session.hangup_started is False
+        assert _events_named(caplog, "closing_response_started") == []
+        on_closing_finished.assert_not_called()
+
+        # The model's failure message plays out as an ordinary assistant turn.
+        await session._handle_event({
+            "type": "response.created",
+            "response": {"id": "resp_failure_turn", "status": "in_progress"},
+        })
+        await session._handle_event({
+            "type": "response.done",
+            "response": {"id": "resp_failure_turn", "status": "completed", "output": []},
+        })
+
+        # The same request is retried and now persists: one closing, one hangup.
+        with caplog.at_level("INFO"):
+            await _confirm(session)
+
+        creates = _response_creates(ws)
+        assert len(creates) == 2
+        assert CLOSING_MESSAGE in creates[1]["response"]["instructions"]
+        assert session.intake_completed is True
+        assert session.closing_response_started is True
+        assert len(_events_named(caplog, "closing_response_started")) == 1
+
+        await _finish_closing_response(session)
+        assert session._hangup_grace_task is not None
+        await session._hangup_grace_task
+        on_closing_finished.assert_called_once_with(CALL_SID)

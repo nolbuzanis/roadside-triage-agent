@@ -1081,6 +1081,109 @@ class TestCompleteIntake:
         # Should not raise
         complete_intake(call_id="CA_err")
 
+    @patch("app.services.tickets._get_supabase")
+    def test_successful_write_reports_true(self, mock_get_sb: MagicMock) -> None:
+        """A landed completion write is reported as a success to the caller."""
+        sb = _mock_guarded_update()
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import complete_intake
+
+        assert complete_intake(call_id="CA_done") is True
+
+    @patch("app.services.tickets._get_supabase")
+    def test_idempotent_noop_reports_true(self, mock_get_sb: MagicMock) -> None:
+        """Matching no rows (already completed) is still a success: retries stay safe."""
+        sb = _mock_guarded_update(rows_updated=0)
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import complete_intake
+
+        assert complete_intake(call_id="CA_done") is True
+
+    @patch("app.services.tickets._get_supabase")
+    def test_forced_completion_write_failure_reports_false(
+        self, mock_get_sb: MagicMock
+    ) -> None:
+        """A write that fails at execute() surfaces failure instead of success."""
+        sb = _mock_guarded_update()
+        sb.table.return_value.update.return_value.eq.return_value.in_.return_value.execute.side_effect = RuntimeError(
+            "DB down"
+        )
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import complete_intake
+
+        assert complete_intake(call_id="CA_err") is False
+
+
+class _FailingGuardedUpdate:
+    """In-memory guarded update whose execute() fails the first N times.
+
+    Applies the update payload only when execute() succeeds and the row is in
+    a completable intake_status, mirroring the server-side guard, so a test can
+    observe exactly what a forced write failure left behind.
+    """
+
+    def __init__(self, row: dict, *, fail_times: int) -> None:
+        self._row = row
+        self._fail_times = fail_times
+        self._payload: dict = {}
+        self.attempts = 0
+
+    def update(self, payload: dict) -> _FailingGuardedUpdate:
+        self._payload = payload
+        return self
+
+    def eq(self, *_args: object) -> _FailingGuardedUpdate:
+        return self
+
+    def in_(self, *_args: object) -> _FailingGuardedUpdate:
+        return self
+
+    def execute(self) -> MagicMock:
+        self.attempts += 1
+        if self.attempts <= self._fail_times:
+            raise RuntimeError("DB down")
+        result = MagicMock()
+        if self._row.get("intake_status") in ("in_progress", "abandoned"):
+            self._row.update(self._payload)
+            result.data = [dict(self._row)]
+        else:
+            result.data = []
+        return result
+
+
+@patch("app.services.tickets._get_supabase")
+def test_completion_write_failure_then_retry_completes_exactly_once(
+    mock_get_sb: MagicMock,
+) -> None:
+    """A failed completion write leaves the request open; a retry completes it once."""
+    from app.services.tickets import complete_intake
+
+    row = {
+        "call_id": "CA_retry",
+        "status": "in_progress",
+        "intake_status": "in_progress",
+    }
+    guarded = _FailingGuardedUpdate(row, fail_times=1)
+    mock_get_sb.return_value.table.return_value = guarded
+
+    # First attempt: the write fails, so nothing is marked completed.
+    assert complete_intake(call_id="CA_retry") is False
+    assert row["intake_status"] == "in_progress"
+    assert row["status"] == "in_progress"
+
+    # Retry: the still-open row completes exactly once.
+    assert complete_intake(call_id="CA_retry") is True
+    assert row["intake_status"] == "completed"
+    assert row["status"] == "completed"
+
+    # Further retries are idempotent no-ops, never a second completion.
+    assert complete_intake(call_id="CA_retry") is True
+    assert row["intake_status"] == "completed"
+    assert guarded.attempts == 3
+
 
 # ---------------------------------------------------------------------------
 # abandon_if_open

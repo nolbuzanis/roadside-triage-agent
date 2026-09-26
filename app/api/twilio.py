@@ -124,6 +124,10 @@ async def handle_confirm_assistance_request(
     intake lifecycle is finalized idempotently, and the dispatcher
     notification fires exactly once (gated on the atomic notification
     claim). An incomplete or escalated request is never completed.
+
+    If the completion write fails to persist, an error result is returned:
+    the request stays open, no dispatcher SMS fires, and no closing flow or
+    hangup begins, so a later confirmation can still complete it.
     """
     call_id = call_sid or "unknown"
     logger.info(
@@ -180,7 +184,33 @@ async def handle_confirm_assistance_request(
 
     # Guarded update: open rows become completed, abandoned rows self-heal,
     # and escalated/completed are never touched (idempotent on retries).
-    await asyncio.to_thread(complete_intake, call_id=call_id)
+    # The completion write must land before anything downstream: a failed
+    # write means no SMS, no closing flow, and no hangup, because none of
+    # them may follow a request that was never actually completed.
+    try:
+        persisted = await asyncio.to_thread(complete_intake, call_id=call_id)
+    except Exception:
+        logger.exception(
+            "assistance_request_completion_write_exception",
+            call_sid=call_sid,
+            assistance_request_id=request.get("id"),
+        )
+        persisted = False
+
+    if not persisted:
+        logger.error(
+            "assistance_request_completion_not_persisted",
+            call_sid=call_sid,
+            assistance_request_id=request.get("id"),
+        )
+        return AssistanceRequestToolResult(
+            status="error",
+            assistance_request_id=request.get("id"),
+            error=(
+                "Unable to complete the assistance request: the completion could not "
+                "be saved, so the request is still open."
+            ),
+        )
 
     # Atomic claim: only a row still in a pre-send state ('pending', or
     # 'failed' for a retry) wins the send, so concurrent duplicate
