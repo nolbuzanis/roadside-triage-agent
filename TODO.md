@@ -1945,7 +1945,7 @@ Capture transcript text in `app/realtime/session.py` without affecting the voice
 
 ### Status
 
-- [ ] Not started
+- [x] Completed in `feat/enable-transcript-events` PR
 
 ---
 
