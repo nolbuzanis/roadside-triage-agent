@@ -54,10 +54,12 @@ UPDATE_ASSISTANCE_REQUEST_TOOL: dict[str, Any] = {
     "description": (
         "Save the caller's roadside assistance details progressively. Call with "
         "whatever fields are available (location, vehicle, issue) as soon as the "
-        "caller provides them, and call again to update previously saved details. "
-        "Do not wait until all three fields are collected before the first call, "
-        "and never invent missing values. Once all three fields are saved the "
-        "result status is 'created' and the call can close."
+        "caller provides them, and call again to update or correct previously "
+        "saved details. Do not wait until all three fields are collected before "
+        "the first call, and never invent missing values. Saving all three fields "
+        "returns status 'ready_for_confirmation' — the request is saved but NOT "
+        "complete; the caller must still confirm the summary via "
+        "confirm_assistance_request."
     ),
     "parameters": {
         "type": "object",
@@ -75,6 +77,24 @@ UPDATE_ASSISTANCE_REQUEST_TOOL: dict[str, Any] = {
                 "description": "Description of the breakdown or problem",
             },
         },
+        "required": [],
+    },
+}
+
+CONFIRM_ASSISTANCE_REQUEST_TOOL: dict[str, Any] = {
+    "type": "function",
+    "name": "confirm_assistance_request",
+    "description": (
+        "Mark the roadside assistance request as complete once the caller has "
+        "verbally confirmed the summarized location, vehicle, and issue. Takes no "
+        "arguments: the backend reads the saved request for this call. Call it "
+        "only after the caller clearly confirms the full summary — never before, "
+        "and never to save or correct details (use update_assistance_request for "
+        "that). On success the system delivers the fixed closing line."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {},
         "required": [],
     },
 }
@@ -103,4 +123,8 @@ TRANSFER_TO_EMERGENCY_TOOL = {
     },
 }
 
-REALTIME_TOOLS = [UPDATE_ASSISTANCE_REQUEST_TOOL, TRANSFER_TO_EMERGENCY_TOOL]
+REALTIME_TOOLS = [
+    UPDATE_ASSISTANCE_REQUEST_TOOL,
+    CONFIRM_ASSISTANCE_REQUEST_TOOL,
+    TRANSFER_TO_EMERGENCY_TOOL,
+]

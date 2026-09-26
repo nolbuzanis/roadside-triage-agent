@@ -335,13 +335,13 @@ class TestCreateInFlightCancellation:
         ws = await _connect_session(session)
 
         session.on_tool_call = AsyncMock(
-            return_value='{"status": "created", "assistance_request_id": "tkt_1"}'
+            return_value='{"status": "confirmed", "assistance_request_id": "tkt_1"}'
         )
         await session._handle_function_call({
             "call_id": "call_close_in_flight",
             "type": "function_call",
-            "name": "update_assistance_request",
-            "arguments": '{"location":"A","vehicle":"B","issue":"C"}',
+            "name": "confirm_assistance_request",
+            "arguments": "{}",
         })
         assert len(_response_creates(ws)) == 1
 
@@ -599,13 +599,13 @@ class TestStateMachineCompatibility:
         ws = await _connect_session(session)
 
         session.on_tool_call = AsyncMock(
-            return_value='{"status": "created", "assistance_request_id": "tkt_1"}'
+            return_value='{"status": "confirmed", "assistance_request_id": "tkt_1"}'
         )
         await session._handle_function_call({
             "call_id": "call_close",
             "type": "function_call",
-            "name": "update_assistance_request",
-            "arguments": '{"location":"A","vehicle":"B","issue":"C"}',
+            "name": "confirm_assistance_request",
+            "arguments": "{}",
         })
         await _start_response(session, "resp_closing")
 

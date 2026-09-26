@@ -25,8 +25,21 @@ def _get_supabase() -> Client:
 
 
 def is_intake_complete(request: dict[str, Any]) -> bool:
-    """Return True when the assistance-request row has non-empty location, vehicle, and issue."""
+    """Return True when the assistance-request row has non-empty location, vehicle, and issue.
+
+    All three fields present means the request is ready for the caller to
+    confirm the summary — it does not by itself complete the intake.
+    """
     return all(request.get(field) for field in ("location", "vehicle", "issue"))
+
+
+def get_assistance_request(*, call_id: str) -> dict[str, Any] | None:
+    """Return the assistance-request row for a call, or None when it is missing."""
+    supabase = _get_supabase()
+    result = supabase.table("assistance_requests").select("*").eq("call_id", call_id).execute()
+    if not result.data:
+        return None
+    return dict(result.data[0])  # type: ignore[arg-type]
 
 
 def start_assistance_request(

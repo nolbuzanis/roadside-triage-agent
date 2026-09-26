@@ -16,6 +16,7 @@ from app.api.twilio import (
     _pending_connections,
     _send_media_stream_mark,
     handle_closing_finished,
+    handle_confirm_assistance_request,
     handle_update_assistance_request,
 )
 from app.main import app
@@ -44,7 +45,13 @@ TOOL_ITEM = {
     "name": "update_assistance_request",
     "arguments": '{"location": "Main St", "vehicle": "Honda", "issue": "Flat tire"}',
 }
-SUCCESS_RESULT = '{"status": "created", "assistance_request_id": "tkt_abc"}'
+CONFIRM_ITEM = {
+    "call_id": "call_close_1",
+    "name": "confirm_assistance_request",
+    "arguments": "{}",
+}
+READY_RESULT = '{"status": "ready_for_confirmation", "assistance_request_id": "tkt_abc"}'
+CONFIRM_RESULT = '{"status": "confirmed", "assistance_request_id": "tkt_abc"}'
 ERROR_RESULT = '{"status": "error", "error": "Unable to save the assistance request"}'
 TRANSFER_ITEM = {
     "type": "function_call",
@@ -139,11 +146,16 @@ async def _pump_hangup_task() -> None:
     await asyncio.sleep(0.01)
 
 
-async def _run_successful_intake(session: RealtimeSession) -> None:
-    """Drive a successful update_assistance_request tool call through the session."""
-    on_tool_call = AsyncMock(return_value=SUCCESS_RESULT)
-    session.on_tool_call = on_tool_call
+async def _run_ready_intake(session: RealtimeSession) -> None:
+    """Drive an update_assistance_request save that makes the request ready."""
+    session.on_tool_call = AsyncMock(return_value=READY_RESULT)
     await session._handle_function_call(dict(TOOL_ITEM))
+
+
+async def _run_successful_intake(session: RealtimeSession) -> None:
+    """Drive the confirm_assistance_request call that completes the intake."""
+    session.on_tool_call = AsyncMock(return_value=CONFIRM_RESULT)
+    await session._handle_function_call(dict(CONFIRM_ITEM))
 
 
 async def _finish_closing_response(
@@ -191,12 +203,12 @@ class TestClosingConstants:
 
 
 # ---------------------------------------------------------------------------
-# 1. Successful ticket creation triggers the exact closing message
+# 1. Successful confirmation triggers the exact closing message
 # ---------------------------------------------------------------------------
 
 
 class TestClosingResponseTriggered:
-    async def test_successful_ticket_sends_exact_closing_message(self) -> None:
+    async def test_confirmed_intake_sends_exact_closing_message(self) -> None:
         session = _make_session()
         ws = await _connect_session(session)
 
@@ -211,7 +223,7 @@ class TestClosingResponseTriggered:
         assert "?" not in instructions
         assert "say nothing after" in instructions or "do not say anything after" in instructions
 
-    async def test_successful_ticket_sends_post_intake_closing_reason(
+    async def test_confirmed_intake_sends_post_intake_closing_reason(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         session = _make_session(call_sid="CA_reason_log")
@@ -249,29 +261,51 @@ class TestClosingResponseTriggered:
         assert started[0]["reason"] == "post_intake_closing"
         assert started[0]["assistance_request_id"] == "tkt_abc"
 
-    async def test_intake_completed_logged_by_handler(self, caplog: pytest.LogCaptureFixture) -> None:
-        mock_ticket = {
+    async def test_confirmation_logged_by_handler(self, caplog: pytest.LogCaptureFixture) -> None:
+        mock_row = {
             "id": "ticket-log-1",
             "call_id": "CA_log",
             "location": "A",
             "vehicle": "B",
             "issue": "C",
+            "intake_status": "in_progress",
             "notification_status": "pending",
         }
-        with patch("app.api.twilio.create_ticket", return_value=mock_ticket):
+        with patch("app.api.twilio.get_assistance_request", return_value=mock_row):
             with patch("app.api.twilio.notify_dispatcher"):
                 with caplog.at_level("INFO"):
-                    result = await handle_update_assistance_request(
+                    result = await handle_confirm_assistance_request(
                         call_sid="CA_log",
                         caller_phone="+15551234567",
-                        arguments='{"location": "A", "vehicle": "B", "issue": "C"}',
                     )
 
-        assert result.status == "created"
-        entries = _events_named(caplog, "intake_completed")
+        assert result.status == "confirmed"
+        entries = _events_named(caplog, "assistance_request_confirmed")
         assert len(entries) == 1
         assert entries[0]["call_sid"] == "CA_log"
         assert entries[0]["assistance_request_id"] == "ticket-log-1"
+
+    async def test_saving_three_fields_does_not_start_closing(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Saving all three fields reports readiness; only confirmation closes."""
+        on_closing_finished = AsyncMock()
+        session = _make_session(on_closing_finished=on_closing_finished)
+        ws = await _connect_session(session)
+
+        with caplog.at_level("INFO"):
+            await _run_ready_intake(session)
+
+        creates = _response_creates(ws)
+        assert len(creates) == 1
+        # A normal tool_result turn lets the model summarize — no closing directive.
+        assert "instructions" not in creates[0].get("response", {})
+        assert CLOSING_MESSAGE not in str(creates[0])
+
+        assert session.intake_completed is False
+        assert session.closing_response_started is False
+        assert _events_named(caplog, "closing_response_started") == []
+        on_closing_finished.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +314,7 @@ class TestClosingResponseTriggered:
 
 
 class TestHangupWaitsForClosing:
-    async def test_no_hangup_immediately_after_ticket_tool(
+    async def test_no_hangup_immediately_after_confirmation(
         self, no_grace: None
     ) -> None:
         on_closing_finished = AsyncMock()
@@ -410,7 +444,7 @@ class TestHangupExactlyOnce:
             await session._hangup_grace_task
         on_closing_finished.assert_called_once()
 
-    async def test_duplicate_tool_call_closes_only_once(
+    async def test_duplicate_confirmation_closes_only_once(
         self, no_grace: None, caplog: pytest.LogCaptureFixture
     ) -> None:
         on_closing_finished = AsyncMock()
@@ -419,14 +453,14 @@ class TestHangupExactlyOnce:
 
         with caplog.at_level("INFO"):
             await _run_successful_intake(session)
-            # Duplicate/retried tool call with the same successful result.
-            session.on_tool_call = AsyncMock(return_value=SUCCESS_RESULT)
-            await session._handle_function_call({**TOOL_ITEM, "call_id": "call_close_2"})
+            # Duplicate/retried confirmation with the same successful result.
+            session.on_tool_call = AsyncMock(return_value=CONFIRM_RESULT)
+            await session._handle_function_call({**CONFIRM_ITEM, "call_id": "call_close_2"})
 
         creates = _response_creates(ws)
         assert len(creates) == 1
         assert CLOSING_MESSAGE in creates[0]["response"]["instructions"]
-        assert _events_named(caplog, "duplicate_assistance_request_tool_call_ignored")
+        assert _events_named(caplog, "duplicate_assistance_request_confirmation_ignored")
         assert len(_events_named(caplog, "closing_response_started")) == 1
 
         await _finish_closing_response(session)
@@ -434,18 +468,22 @@ class TestHangupExactlyOnce:
         await session._hangup_grace_task
         on_closing_finished.assert_called_once()
 
-    async def test_second_duplicate_after_close_still_no_extra_response(self) -> None:
-        on_closing_finished = AsyncMock()
-        session = _make_session(on_closing_finished=on_closing_finished)
+    async def test_update_after_confirmation_starts_no_extra_response(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A post-completion save is ignored too — the closing owns the turn."""
+        session = _make_session()
         ws = await _connect_session(session)
 
-        await _run_successful_intake(session)
-        session.on_tool_call = AsyncMock(return_value=SUCCESS_RESULT)
-        await session._handle_function_call({**TOOL_ITEM, "call_id": "call_close_3"})
-        session.on_tool_call = AsyncMock(return_value=SUCCESS_RESULT)
-        await session._handle_function_call({**TOOL_ITEM, "call_id": "call_close_4"})
+        with caplog.at_level("INFO"):
+            await _run_successful_intake(session)
+            session.on_tool_call = AsyncMock(return_value=CONFIRM_RESULT)
+            await session._handle_function_call({**CONFIRM_ITEM, "call_id": "call_close_3"})
+            session.on_tool_call = AsyncMock(return_value=READY_RESULT)
+            await session._handle_function_call({**TOOL_ITEM, "call_id": "call_close_4"})
 
         assert len(_response_creates(ws)) == 1
+        assert _events_named(caplog, "duplicate_assistance_request_tool_call_ignored")
 
 
 # ---------------------------------------------------------------------------
@@ -486,7 +524,7 @@ class TestFailedTicketNoHangup:
         on_closing_finished.assert_not_called()
         assert session.hangup_started is False
 
-    async def test_handler_failure_does_not_log_intake_completed(
+    async def test_handler_failure_logs_no_completion_events(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         with patch("app.api.twilio.create_ticket", side_effect=RuntimeError("db down")):
@@ -498,7 +536,8 @@ class TestFailedTicketNoHangup:
                 )
 
         assert result.status == "error"
-        assert _events_named(caplog, "intake_completed") == []
+        assert _events_named(caplog, "assistance_request_ready_for_confirmation") == []
+        assert _events_named(caplog, "assistance_request_confirmed") == []
 
 
 # ---------------------------------------------------------------------------

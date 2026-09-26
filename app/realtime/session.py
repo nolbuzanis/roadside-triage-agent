@@ -650,7 +650,26 @@ class RealtimeSession:
             )
 
         result = ""
-        if self.on_tool_call:
+        if func_name == "confirm_assistance_request" and self._transfer_requested:
+            # An emergency transfer owns the call. The confirm handler must never
+            # run: it would read a not-yet-escalated row, complete the intake, and
+            # fire a normal dispatcher SMS while the hazard write is still in
+            # flight. Synthesize the handler's own escalated result instead so the
+            # model gets a result and adds no closing of its own.
+            logger.info(
+                "confirmation_suppressed_transfer",
+                call_sid=self.call_sid,
+                tool_call_id=call_id,
+            )
+            result = json.dumps(
+                {
+                    "status": "escalated",
+                    "message": (
+                        "An emergency transfer owns this call; the intake was not completed."
+                    ),
+                }
+            )
+        elif self.on_tool_call:
             try:
                 result = await self.on_tool_call(call_id, func_name, arguments)
             except Exception as e:
@@ -689,7 +708,7 @@ class RealtimeSession:
 
         if func_name == "update_assistance_request":
             if self.intake_completed:
-                # Duplicate/retried intake tool after a successful completion:
+                # Duplicate/retried intake tool after a successful confirmation:
                 # the closing flow owns the end of the conversation, so no new
                 # response is created for the repeat call.
                 logger.info(
@@ -698,14 +717,35 @@ class RealtimeSession:
                     tool_call_id=call_id,
                 )
                 return
+            # Saving never completes the intake. All three fields merely make
+            # the request ready for confirmation, so the model always gets a
+            # normal tool_result turn to summarize and ask for confirmation.
+
+        elif func_name == "confirm_assistance_request":
+            if self.intake_completed:
+                # Duplicate/retried confirmation after a successful one: the
+                # closing flow already owns the end of the conversation.
+                logger.info(
+                    "duplicate_assistance_request_confirmation_ignored",
+                    call_sid=self.call_sid,
+                    tool_call_id=call_id,
+                )
+                return
+            if self._transfer_requested:
+                # Suppression was applied and logged before dispatch (the
+                # handler never ran); no response turn is created on top of a
+                # transfer-owned call.
+                return
             request_data = self._parse_assistance_request_result(result)
-            if request_data is not None and request_data.get("status") == "created":
+            if request_data is not None and request_data.get("status") == "confirmed":
                 self.intake_completed = True
                 await self._start_closing_response(
                     tool_call_id=call_id,
                     assistance_request_id=request_data.get("assistance_request_id"),
                 )
                 return
+            # Not confirmed (incomplete/escalated/error): keep the generic
+            # tool_result path so the model can respond to the caller.
 
         await self._send_response_create(
             reason="tool_result",
@@ -714,7 +754,7 @@ class RealtimeSession:
 
     @staticmethod
     def _parse_assistance_request_result(result: str) -> dict[str, Any] | None:
-        """Parse an update_assistance_request tool result, or None if unparseable."""
+        """Parse an assistance-request tool result, or None if unparseable."""
         try:
             data = json.loads(result)
         except (TypeError, ValueError):

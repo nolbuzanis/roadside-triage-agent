@@ -630,7 +630,7 @@ class TestStartAssistanceRequest:
 
 
 class TestIsIntakeComplete:
-    """Tests for the completion check used to gate the dispatcher SMS."""
+    """Tests for the check that gates caller confirmation of the summary."""
 
     def test_all_fields_non_empty_is_complete(self) -> None:
         from app.services.tickets import is_intake_complete
@@ -657,6 +657,41 @@ class TestIsIntakeComplete:
         assert not is_intake_complete(
             {"location": "A", "vehicle": "", "issue": "C"}
         )
+
+
+# ---------------------------------------------------------------------------
+# get_assistance_request
+# ---------------------------------------------------------------------------
+
+
+class TestGetAssistanceRequest:
+    """Tests for reading the current row back on the confirmation path."""
+
+    @patch("app.services.tickets._get_supabase")
+    def test_returns_row_for_call(self, mock_get_sb: MagicMock) -> None:
+        sb = _mock_supabase(
+            existing_data=[{"id": "uuid-1", "call_id": "CA_get", "location": "A"}]
+        )
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import get_assistance_request
+
+        row = get_assistance_request(call_id="CA_get")
+
+        assert row is not None
+        assert row["id"] == "uuid-1"
+        table = sb.table.return_value
+        table.select.assert_called_once_with("*")
+        table.eq.assert_called_once_with("call_id", "CA_get")
+
+    @patch("app.services.tickets._get_supabase")
+    def test_returns_none_when_missing(self, mock_get_sb: MagicMock) -> None:
+        sb = _mock_supabase(existing_data=[])
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import get_assistance_request
+
+        assert get_assistance_request(call_id="CA_none") is None
 
 
 # ---------------------------------------------------------------------------
