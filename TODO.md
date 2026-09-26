@@ -259,11 +259,19 @@ What is already ruled out by inspection (so the fix must look elsewhere): demo-s
 - A demo call that escalates shows its request on the demo screen live with escalated state, without refresh
 - After hangup the escalated request remains visible, and refresh restores it with no duplicates
 - Unit tests cover the fixed path (claim/link/escalation visibility); existing demo-session, webhook, escalation, and closing suites still pass
+- The call-status card reflects terminal state after hangup (no stuck "connected" display or running timer for escalated/completed/abandoned rows)
 - Verification: live demo call with real escalation plus hangup, correlating the voice-webhook claim/link logs with the demo-screen realtime/backfill reads
 
 ### Dependencies
 
 - none
+
+### Diagnosis evidence (2026-09-26)
+
+- Live call `CAcdf391ac3b5f191ce3983b19e838282c` escalated ("Escalation state recorded", `app.api.twilio`, 23:30:32Z) after the caller reported a smoking hood; transfer to emergency services was initiated.
+- After hangup, refreshing the demo page still showed the call as connected. Refresh re-reads the linked row from the database, so the row is linked and readable — ruling out never-linked/RLS causes for this call.
+- Confirmed frontend gap (code inspection): `DemoActiveView.tsx` derives `connected = request !== null`, so any terminal row (escalated/completed/abandoned) still renders the on-call card ("You're on the call" / "Connected to AI agent" with a running elapsed timer). The call card never reflects terminal state.
+- Unconfirmed: the accompanying timeline analysis claims teardown finalized the row as `abandoned` before escalation was recorded — verify the row's final `status`/`intake_status` for this `call_id` before relying on it; only the "Escalation state recorded" line is a verbatim log entry.
 
 ### Status
 
