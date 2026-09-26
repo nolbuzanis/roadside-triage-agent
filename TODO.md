@@ -1897,3 +1897,141 @@ Ensure public demo sessions and demo data do not accumulate indefinitely.
 ### Status
 
 - [x] Skipped — superseded by the product decision to keep all demo data indefinitely: no cleanup, deletion, or anonymization implemented; expiry enforcement verified against the existing claim/RLS tests and the retention policy documented in README in the `docs/demo-data-retention` PR
+
+---
+
+# Live Call Transcript — Feature Sequence
+
+Target experience:
+
+```text
+visitor on live demo call
+→ sees caller ("You") and assistant ("AI Agent") turns with timestamps appear in real time
+→ refresh restores prior turns (backfill)
+→ empty/dead-air states render clearly instead of the static sample
+```
+
+Design decisions (agreed 2026-09-26):
+
+- Storage: new Supabase table (queryable, RLS-isolated), kept indefinitely for debugging/history — no expiry/cleanup, consistent with the demo-data-retention decision above.
+- Delivery: Supabase Realtime (same pattern as `assistance_requests`), no custom backend WS/SSE.
+- Scope: demo UI only (`DemoLivePanel`); dispatcher dashboard stays transcript-free.
+- Presentation: speaker labels `You` / `AI Agent` + timestamps + autoscroll + backfill on restore/reconnect.
+- Transcription model: `gpt-4o-mini-transcribe` for caller input (cheapest); caller transcription adds separate billed usage, assistant `response.output_audio_transcript` is free side-effect text.
+
+Items below are listed in dependency order (A → B → C → D).
+
+---
+
+## P1 — Enable caller + assistant transcript events in the realtime session
+
+Capture transcript text in `app/realtime/session.py` without affecting the voice loop.
+
+- Enable caller transcription in `_configure_session` via `audio.input.transcription: {model: "gpt-4o-mini-transcribe"}` so OpenAI emits `conversation.item.input_audio_transcription.completed` (currently never arrives).
+- Keep assistant `response.output_audio_transcript.delta/done` handling (currently debug-log-only at `session.py:574-579`) and expose the completed text with its `response_id` for attribution (avoid mis-tagging greeting/closing/interrupted responses).
+- Capture must be non-blocking: never delay audio forwarding or tool dispatch; failures to transcribe must not break the call.
+- Coordinate with Post-MVP P1 transcription-based filtering (commit-gating on the same `input_audio_transcription` events): land the `audio.input.transcription` model config once to satisfy both.
+
+### Acceptance Criteria
+
+- A caller turn produces an `input_audio_transcription.completed` event with text.
+- An assistant turn produces an `output_audio_transcript.done` event with text and `response_id`.
+- A failed/empty transcription does not break turn-taking, greeting, or closing flows.
+- No audio payloads logged, only text + ids.
+
+### Dependencies
+
+- none
+
+### Status
+
+- [ ] Not started
+
+---
+
+## P1 — Add `call_transcripts` table with RLS + Realtime, keep-forever
+
+Add the minimum persistence for transcript turns, isolated per demo session.
+
+- Add a `call_transcripts` table containing at minimum:
+  - `id`
+  - `demo_session_id` (nullable for non-demo calls)
+  - `call_id`
+  - `speaker` (`caller` / `assistant`)
+  - `text`
+  - `seq` (per-call ordering)
+  - `created_at`
+- Add the table to the `supabase_realtime` publication.
+- Add RLS mirroring the demo-request isolation: owner-only reads on unexpired own session, dispatcher reads all, no anon cross-session reads, no client inserts/updates.
+- Keep rows indefinitely (no cleanup/deletion job), matching demo-data retention.
+
+### Acceptance Criteria
+
+- Migration applies cleanly; table + publication + RLS policies exist.
+- An anonymous demo session reads only its own rows; a foreign session id returns zero rows.
+- Dispatcher account reads all rows.
+- Realtime `INSERT` events flow only to the owning session subscriber.
+- README retention section updated to explicitly include `call_transcripts` (keep-forever).
+- Existing `assistance_requests` behavior unchanged.
+
+### Dependencies
+
+- P1 — Enable caller + assistant transcript events in the realtime session
+
+### Status
+
+- [ ] Not started
+
+---
+
+## P1 — Persist transcript turns from session events
+
+Write each completed turn to `call_transcripts` from the realtime event handler.
+
+- On `conversation.item.input_audio_transcription.completed`, insert `speaker = caller` with the committed text.
+- On `response.output_audio_transcript.done`, insert `speaker = assistant` with the response text + `response_id` attribution (skip drops for cancelled/interrupted responses to avoid partial-text spam, per chosen policy).
+- Resolve `demo_session_id` via `CallState.assistance_request_id → assistance_requests.demo_session_id` (or carry it through `twilio.py` → `session.py`).
+- Assign `seq` per `call_id` for ordering/dedup; writes run off the audio hot path (background task, same pattern as notification claim).
+
+### Acceptance Criteria
+
+- One caller turn yields exactly one `caller` row; one assistant turn yields exactly one `assistant` row.
+- Interrupted/cancelled assistant responses do not produce duplicate or truncated rows.
+- Rows carry the correct `demo_session_id` / `call_id` and monotonically increasing `seq`.
+- A DB write failure is logged loudly and never breaks the live call.
+
+### Dependencies
+
+- P1 — Add `call_transcripts` table with RLS + Realtime, keep-forever
+
+### Status
+
+- [ ] Not started
+
+---
+
+## P1 — Render the live transcript in the demo UI via Supabase Realtime + backfill
+
+Replace the static sample in `frontend/src/components/DemoLivePanel.tsx:14-39,194-214` with live data.
+
+- Add `TranscriptTurn{id, speaker: 'You' | 'AI Agent', text, seq, created_at}` to `frontend/src/types.ts`.
+- Subscribe in `DemoScreen.tsx` (same channel pattern as `assistance_requests`) to `INSERT` on `call_transcripts` filtered to the active `demo_session_id`; order/dedup by `seq`/`id`.
+- Backfill on restore and on realtime reconnect (re-run the linked query after `SUBSCRIBED`, same gap pattern as the request backfill TODO).
+- Replace `SAMPLE TRANSCRIPT` header + disclaimer with live header/indicator; render empty state (waiting for speech), autoscroll on new turns, relative timestamps from call start.
+- Dispatcher dashboard unchanged (explicitly out of scope).
+
+### Acceptance Criteria
+
+- Live caller + assistant turns appear without refresh during a real call.
+- Refresh restores the same turns in order with no duplicates.
+- Reconnect after a dropped network recovers missed turns.
+- Empty/dead-air call shows the empty state, never the old sample text.
+- `cd frontend && npm run lint && npm run build` pass.
+
+### Dependencies
+
+- P1 — Persist transcript turns from session events
+
+### Status
+
+- [ ] Not started
