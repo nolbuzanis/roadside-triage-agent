@@ -38,6 +38,13 @@ def _mock_complete_intake() -> Generator[MagicMock]:
         yield mock_complete
 
 
+@pytest.fixture(autouse=True)
+def _mock_claim_notification_status() -> Generator[MagicMock]:
+    """Claim the notification by default; tests modeling a lost claim patch it themselves."""
+    with patch("app.api.twilio.claim_notification_status", return_value=True) as mock_claim:
+        yield mock_claim
+
+
 def _row(**overrides: Any) -> dict[str, Any]:
     """Build a fully populated, still-open assistance-request row."""
     row: dict[str, Any] = {
@@ -449,15 +456,19 @@ class TestDuplicateConfirmation:
     ) -> None:
         rows = [_row(), _row(notification_status="sent")]
         with patch("app.api.twilio.get_assistance_request", side_effect=rows):
-            with patch("app.api.twilio.notify_dispatcher") as mock_notify:
-                first = await handle_confirm_assistance_request(
-                    call_sid=CALL_SID, caller_phone=CALLER_PHONE
-                )
-                await _drain_background_tasks()
-                second = await handle_confirm_assistance_request(
-                    call_sid=CALL_SID, caller_phone=CALLER_PHONE
-                )
-                await _drain_background_tasks()
+            with patch(
+                "app.api.twilio.claim_notification_status",
+                side_effect=[True, False],
+            ):
+                with patch("app.api.twilio.notify_dispatcher") as mock_notify:
+                    first = await handle_confirm_assistance_request(
+                        call_sid=CALL_SID, caller_phone=CALLER_PHONE
+                    )
+                    await _drain_background_tasks()
+                    second = await handle_confirm_assistance_request(
+                        call_sid=CALL_SID, caller_phone=CALLER_PHONE
+                    )
+                    await _drain_background_tasks()
 
         assert first.status == "confirmed"
         assert second.status == "confirmed"

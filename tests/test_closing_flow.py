@@ -272,12 +272,13 @@ class TestClosingResponseTriggered:
             "notification_status": "pending",
         }
         with patch("app.api.twilio.get_assistance_request", return_value=mock_row):
-            with patch("app.api.twilio.notify_dispatcher"):
-                with caplog.at_level("INFO"):
-                    result = await handle_confirm_assistance_request(
-                        call_sid="CA_log",
-                        caller_phone="+15551234567",
-                    )
+            with patch("app.api.twilio.claim_notification_status", return_value=True):
+                with patch("app.api.twilio.notify_dispatcher"):
+                    with caplog.at_level("INFO"):
+                        result = await handle_confirm_assistance_request(
+                            call_sid="CA_log",
+                            caller_phone="+15551234567",
+                        )
 
         assert result.status == "confirmed"
         entries = _events_named(caplog, "assistance_request_confirmed")

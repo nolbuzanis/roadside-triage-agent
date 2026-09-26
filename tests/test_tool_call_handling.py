@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from collections.abc import Generator
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
@@ -29,6 +31,14 @@ def _mock_complete_intake() -> Generator[MagicMock]:
     """Keep completion-path tests off the real database."""
     with patch("app.api.twilio.complete_intake") as mock_complete:
         yield mock_complete
+
+
+@pytest.fixture(autouse=True)
+def _mock_claim_notification_status() -> Generator[MagicMock]:
+    """Claim the notification by default; tests that model a lost claim patch it themselves."""
+    with patch("app.api.twilio.claim_notification_status", return_value=True) as mock_claim:
+        yield mock_claim
+
 
 # ---------------------------------------------------------------------------
 # UPDATE_ASSISTANCE_REQUEST_TOOL schema tests
@@ -517,7 +527,9 @@ class TestHandleConfirmAssistanceRequest:
 
     @pytest.mark.asyncio
     async def test_confirmation_requires_all_three_fields(
-        self, _mock_complete_intake: MagicMock
+        self,
+        _mock_complete_intake: MagicMock,
+        _mock_claim_notification_status: MagicMock,
     ) -> None:
         partial_row = {**self._COMPLETE_ROW, "issue": None}
         with patch("app.api.twilio.get_assistance_request", return_value=partial_row):
@@ -529,11 +541,14 @@ class TestHandleConfirmAssistanceRequest:
 
         assert result.status == "incomplete"
         _mock_complete_intake.assert_not_called()
+        _mock_claim_notification_status.assert_not_called()
         mock_notify.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_confirmation_without_a_row_is_incomplete(
-        self, _mock_complete_intake: MagicMock
+        self,
+        _mock_complete_intake: MagicMock,
+        _mock_claim_notification_status: MagicMock,
     ) -> None:
         with patch("app.api.twilio.get_assistance_request", return_value=None):
             with patch("app.api.twilio.notify_dispatcher") as mock_notify:
@@ -544,11 +559,14 @@ class TestHandleConfirmAssistanceRequest:
 
         assert result.status == "incomplete"
         _mock_complete_intake.assert_not_called()
+        _mock_claim_notification_status.assert_not_called()
         mock_notify.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_escalated_request_is_never_completed(
-        self, _mock_complete_intake: MagicMock
+        self,
+        _mock_complete_intake: MagicMock,
+        _mock_claim_notification_status: MagicMock,
     ) -> None:
         escalated_row = {
             **self._COMPLETE_ROW,
@@ -564,16 +582,120 @@ class TestHandleConfirmAssistanceRequest:
 
         assert result.status == "escalated"
         _mock_complete_intake.assert_not_called()
+        _mock_claim_notification_status.assert_not_called()
         mock_notify.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_duplicate_confirmation_does_not_resend_sms(
         self, _mock_complete_intake: MagicMock
     ) -> None:
+        """Wiring-level: a claim-lost duplicate returns confirmed without notifying.
+
+        The 'sent' row can never win the claim guard itself; that behavior is
+        pinned in tests/test_ticket_persistence.py::TestClaimNotificationStatus.
+        """
         already_notified = {**self._COMPLETE_ROW, "notification_status": "sent"}
         with patch(
             "app.api.twilio.get_assistance_request", return_value=already_notified
         ):
+            with patch(
+                "app.api.twilio.claim_notification_status",
+                return_value=False,
+            ):
+                with patch("app.api.twilio.notify_dispatcher") as mock_notify:
+                    result = await handle_confirm_assistance_request(
+                        call_sid="CA_confirm",
+                        caller_phone="+15551234567",
+                    )
+                    await self._drain_background_tasks()
+
+        # Idempotent success: the guarded finalizer re-runs, the claim is
+        # lost on the already-sent row, and the SMS does not re-send.
+        assert result.status == "confirmed"
+        mock_notify.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_confirmations_send_exactly_one_sms(
+        self, _mock_complete_intake: MagicMock
+    ) -> None:
+        """Two overlapping confirmations race on one claim; only the winner sends."""
+        row_status = {"notification_status": "pending"}
+        claim_lock = threading.Lock()
+
+        def _atomic_claim(*, call_id: str) -> bool:
+            with claim_lock:
+                if row_status["notification_status"] not in ("pending", "failed"):
+                    return False
+                row_status["notification_status"] = "sending"
+                return True
+
+        with patch(
+            "app.api.twilio.get_assistance_request",
+            side_effect=lambda **_: dict(self._COMPLETE_ROW),
+        ):
+            with patch(
+                "app.api.twilio.claim_notification_status",
+                side_effect=_atomic_claim,
+            ):
+                with patch("app.api.twilio.notify_dispatcher") as mock_notify:
+                    first, second = await asyncio.gather(
+                        handle_confirm_assistance_request(
+                            call_sid="CA_confirm",
+                            caller_phone="+15551234567",
+                        ),
+                        handle_confirm_assistance_request(
+                            call_sid="CA_confirm",
+                            caller_phone="+15551234567",
+                        ),
+                    )
+                    await self._drain_background_tasks()
+
+        assert first.status == "confirmed"
+        assert second.status == "confirmed"
+        mock_notify.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_claim_lost_duplicate_confirms_without_sending(
+        self, _mock_complete_intake: MagicMock, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A duplicate whose claim loses still confirms but never fires the notifier."""
+        with patch(
+            "app.api.twilio.get_assistance_request", return_value=dict(self._COMPLETE_ROW)
+        ):
+            with patch("app.api.twilio.claim_notification_status", return_value=False):
+                with patch("app.api.twilio.notify_dispatcher") as mock_notify:
+                    with caplog.at_level("INFO"):
+                        result = await handle_confirm_assistance_request(
+                            call_sid="CA_confirm",
+                            caller_phone="+15551234567",
+                        )
+                    await self._drain_background_tasks()
+
+        assert result.status == "confirmed"
+        assert result.assistance_request_id == "ticket-uuid-c1"
+        _mock_complete_intake.assert_called_once_with(call_id="CA_confirm")
+        mock_notify.assert_not_called()
+        claim_lost = [
+            json.loads(record.message)
+            for record in caplog.records
+            if record.message.startswith("{")
+            and json.loads(record.message).get("event")
+            == "dispatcher_notification_claim_lost"
+        ]
+        assert claim_lost, "expected a 'dispatcher_notification_claim_lost' event"
+        assert claim_lost[0]["call_sid"] == "CA_confirm"
+
+    @pytest.mark.asyncio
+    async def test_failed_notification_row_is_retried_by_confirmation(
+        self, _mock_complete_intake: MagicMock
+    ) -> None:
+        """Wiring-level: a 'failed' row's confirmation reaches the notifier.
+
+        That 'failed' is actually claimable is pinned in
+        tests/test_ticket_persistence.py::TestClaimNotificationStatus.
+        """
+        failed_row = {**self._COMPLETE_ROW, "notification_status": "failed"}
+        with patch("app.api.twilio.get_assistance_request", return_value=failed_row):
             with patch("app.api.twilio.notify_dispatcher") as mock_notify:
                 result = await handle_confirm_assistance_request(
                     call_sid="CA_confirm",
@@ -581,9 +703,8 @@ class TestHandleConfirmAssistanceRequest:
                 )
                 await self._drain_background_tasks()
 
-        # Idempotent success: the guarded finalizer re-runs, the SMS does not.
         assert result.status == "confirmed"
-        mock_notify.assert_not_called()
+        mock_notify.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_confirmation_fetch_failure_returns_safe_error(self) -> None:
