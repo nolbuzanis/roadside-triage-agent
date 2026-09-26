@@ -11,9 +11,8 @@ import { CarIcon, CheckIcon, PinIcon, WrenchIcon } from './icons'
 const STEPS = [
   'Collecting details',
   'Confirming information',
-  'Finding nearby provider',
+  'Request logged',
   'Dispatching assistance',
-  'Request complete',
 ]
 
 function formatElapsed(createdAt: string, originMs: number | null): string {
@@ -34,10 +33,11 @@ interface StepperState {
 }
 
 /**
- * Map the live request onto the five-step progress track:
+ * Map the live request onto the four-step progress track:
  * - no request / missing fields → still collecting details
  * - all fields collected → confirming information
- * - completed intake → every step done
+ * - completed intake → every step done (dispatching assistance closes the
+ *   story of what would happen next; it is not performed in the demo)
  * - escalated (hazard) → dispatching assistance
  * - abandoned → progress stops wherever intake left off
  */
@@ -54,7 +54,7 @@ function stepperState(request: AssistanceRequest | null): StepperState {
   }
   switch (request.intake_status) {
     case 'completed':
-      return { activeIndex: 4, completedCount: STEPS.length }
+      return { activeIndex: 3, completedCount: STEPS.length }
     case 'escalated':
       return { activeIndex: 3, completedCount: 3 }
     case 'abandoned':
