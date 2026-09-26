@@ -88,6 +88,8 @@ class RealtimeSession:
     _hangup_grace_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _active_response_id: str | None = field(default=None, init=False, repr=False)
     _interrupted_response_id: str | None = field(default=None, init=False, repr=False)
+    _response_create_pending: bool = field(default=False, init=False, repr=False)
+    _pending_create_cancel_requested: bool = field(default=False, init=False, repr=False)
     _closing_mark_event: asyncio.Event | None = field(default=None, init=False, repr=False)
     _closing_mark_name: str | None = field(default=None, init=False, repr=False)
     _closing_mark_seq: int = field(default=0, init=False, repr=False)
@@ -274,6 +276,9 @@ class RealtimeSession:
         # unrelated response to be mistaken for the closing response.
         if sent:
             self._response_create_reasons.append(reason)
+            # Mark the create as in flight so a caller speech start arriving
+            # before response.created can still cancel the response it yields.
+            self._response_create_pending = True
 
     @staticmethod
     def _extract_assistant_text(response: dict[str, Any]) -> str:
@@ -484,9 +489,20 @@ class RealtimeSession:
                     and response_id != self._interrupted_response_id
                 ):
                     self._interrupted_response_id = None
+            cancel_requested = self._pending_create_cancel_requested
+            self._response_create_pending = False
+            self._pending_create_cancel_requested = False
             reason = self._response_create_reasons.popleft() if self._response_create_reasons else None
             if reason == "post_intake_closing":
                 self.closing_response_id = response_id
+            if cancel_requested:
+                if response_id:
+                    await self._cancel_response(response_id, create_in_flight=True)
+                else:
+                    logger.warning(
+                        "in_flight_cancel_dropped_missing_response_id",
+                        call_sid=self.call_sid,
+                    )
 
         elif event_type == "response.output_audio.done":
             logger.info(
@@ -505,6 +521,13 @@ class RealtimeSession:
                 response_id=response_id,
                 status=status,
             )
+
+            # A response.done observed while a create is still awaiting its
+            # response.created belongs to an earlier response and must not
+            # disarm the deferred cancel for the pending one; response.created
+            # and error remain the pending create's only exits.
+            if not self._response_create_pending:
+                self._pending_create_cancel_requested = False
 
             if response_id is not None:
                 if response_id == self._active_response_id:
@@ -541,6 +564,10 @@ class RealtimeSession:
                 error_code=error_code,
                 error_message=error_msg,
             )
+            # A server-side failure means the in-flight create yields no
+            # response, so neither a pending nor a deferred cancel may fire.
+            self._response_create_pending = False
+            self._pending_create_cancel_requested = False
             if self.on_error:
                 await self.on_error(RuntimeError(f"OpenAI error [{error_code}]: {error_msg}"))
 
@@ -563,24 +590,36 @@ class RealtimeSession:
         clear assistant audio already buffered for playback. Runs on every
         caller speech start so a buffered playback tail is flushed even when
         no response is still generating.
+
+        When a ``response.create`` is still in flight, the response id is not
+        known yet, so the cancel is deferred until ``response.created``
+        arrives and then targets that response. No cancel is sent when no
+        create is pending, and a create that fails server-side clears the
+        pending state so nothing is ever cancelled for it.
         """
         interrupted_response_id = self._active_response_id
-        cancel_sent = False
         if interrupted_response_id is not None:
-            self._active_response_id = None
-            self._interrupted_response_id = interrupted_response_id
-            cancel_sent = await self._send({
-                "type": "response.cancel",
-                "response_id": interrupted_response_id,
-            })
-            logger.info(
-                "caller_interruption_detected",
-                call_sid=self.call_sid,
-                response_id=interrupted_response_id,
-                response_cancel_sent=cancel_sent,
-            )
+            await self._cancel_response(interrupted_response_id, create_in_flight=False)
+        elif self._response_create_pending:
+            self._pending_create_cancel_requested = True
         if self.on_clear_playback:
             await self.on_clear_playback()
+
+    async def _cancel_response(self, response_id: str, *, create_in_flight: bool) -> None:
+        """Cancel a specific response and suppress its remaining audio deltas."""
+        self._active_response_id = None
+        self._interrupted_response_id = response_id
+        cancel_sent = await self._send({
+            "type": "response.cancel",
+            "response_id": response_id,
+        })
+        logger.info(
+            "caller_interruption_detected",
+            call_sid=self.call_sid,
+            response_id=response_id,
+            response_cancel_sent=cancel_sent,
+            create_in_flight=create_in_flight,
+        )
 
     async def _handle_function_call(self, item: dict[str, Any]) -> None:
         """Handle a function_call output item from the model."""
