@@ -205,10 +205,12 @@ def update_ticket_hazard(
         logger.exception("Failed to update hazard state", call_id=call_id)
 
 
-def update_notification_status(*, call_id: str, status: str) -> None:
+def update_notification_status(*, call_id: str, status: str) -> bool:
     """Update the notification_status field on the assistance request.
 
-    Non-blocking: logs failures but does not raise.
+    Non-blocking: logs failures but does not raise. Returns True when the
+    write landed, False when it failed, so callers holding a send claim can
+    tell whether the row actually left its claimed state.
     """
     try:
         supabase = _get_supabase()
@@ -216,8 +218,51 @@ def update_notification_status(*, call_id: str, status: str) -> None:
             {"notification_status": status}
         ).eq("call_id", call_id).execute()
         logger.info("Notification status updated", call_id=call_id, status=status)
+        return True
     except Exception:
         logger.exception("Failed to update notification status", call_id=call_id)
+        return False
+
+
+# Pre-send notification states that may win the send claim: 'pending' for a
+# first send, 'failed' for a retry. 'sending' is an in-flight claim and
+# 'sent' is terminal, so neither is ever claimable.
+_CLAIMABLE_NOTIFICATION_STATUSES = ("pending", "failed")
+
+
+def claim_notification_status(*, call_id: str) -> bool:
+    """Atomically claim the dispatcher notification for sending.
+
+    Guarded update keyed on notification_status: only a row still in a
+    pre-send state flips to 'sending', and because concurrent updates to the
+    same row serialize on the server, exactly one caller wins. An in-flight
+    'sending' row, an already-'sent' row, or a lost race matches nothing and
+    the claim returns False, so the caller never sends an unclaimed SMS.
+    Non-blocking: logs failures but does not raise, returning False.
+    """
+    try:
+        supabase = _get_supabase()
+        result = (
+            supabase.table("assistance_requests")
+            .update({"notification_status": "sending"})
+            .eq("call_id", call_id)
+            .in_("notification_status", list(_CLAIMABLE_NOTIFICATION_STATUSES))
+            .execute()
+        )
+        rows_updated = len(result.data or [])
+    except Exception:
+        logger.exception("Failed to claim dispatcher notification", call_id=call_id)
+        return False
+
+    if rows_updated == 0:
+        logger.info("Dispatcher notification claim lost", call_id=call_id)
+        return False
+    logger.info(
+        "Dispatcher notification claimed",
+        call_id=call_id,
+        rows_updated=rows_updated,
+    )
+    return True
 
 
 # Canonical intake lifecycle statuses (intake_status column).

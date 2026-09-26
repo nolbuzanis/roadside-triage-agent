@@ -24,6 +24,7 @@ from app.services.hangup import hangup_call
 from app.services.notifier import notify_dispatcher
 from app.services.tickets import (
     abandon_if_open,
+    claim_notification_status,
     complete_intake,
     create_ticket,
     get_assistance_request,
@@ -121,8 +122,8 @@ async def handle_confirm_assistance_request(
     The model supplies no intake data: the current assistance-request row is
     read back for this call, all three required fields are verified, the
     intake lifecycle is finalized idempotently, and the dispatcher
-    notification fires exactly once (gated on notification_status). An
-    incomplete or escalated request is never completed.
+    notification fires exactly once (gated on the atomic notification
+    claim). An incomplete or escalated request is never completed.
     """
     call_id = call_sid or "unknown"
     logger.info(
@@ -181,9 +182,13 @@ async def handle_confirm_assistance_request(
     # and escalated/completed are never touched (idempotent on retries).
     await asyncio.to_thread(complete_intake, call_id=call_id)
 
-    # Confirmation-gated SMS: fire only while notification_status is still
-    # pending so a duplicate/retried confirmation never re-sends.
-    if request.get("notification_status") == "pending":
+    # Atomic claim: only a row still in a pre-send state ('pending', or
+    # 'failed' for a retry) wins the send, so concurrent duplicate
+    # confirmations and already-sent rows produce exactly one SMS. A losing
+    # duplicate still returns confirmed — the closing flow keys on that
+    # status — but never fires the notifier.
+    claimed = await asyncio.to_thread(claim_notification_status, call_id=call_id)
+    if claimed:
         task = asyncio.create_task(
             asyncio.to_thread(
                 notify_dispatcher,
@@ -197,6 +202,12 @@ async def handle_confirm_assistance_request(
         )
         _background_tasks.add(task)
         task.add_done_callback(_background_tasks.discard)
+    else:
+        logger.info(
+            "dispatcher_notification_claim_lost",
+            call_sid=call_sid,
+            assistance_request_id=request.get("id"),
+        )
 
     logger.info(
         "assistance_request_confirmed",

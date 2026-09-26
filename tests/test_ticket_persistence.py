@@ -851,8 +851,9 @@ class TestUpdateNotificationStatus:
 
         from app.services.tickets import update_notification_status
 
-        update_notification_status(call_id="CA_notif", status="sent")
+        written = update_notification_status(call_id="CA_notif", status="sent")
 
+        assert written is True
         update_payload = sb.table.return_value.update.call_args[0][0]
         assert update_payload["notification_status"] == "sent"
 
@@ -863,8 +864,9 @@ class TestUpdateNotificationStatus:
 
         from app.services.tickets import update_notification_status
 
-        update_notification_status(call_id="CA_notif", status="failed")
+        written = update_notification_status(call_id="CA_notif", status="failed")
 
+        assert written is True
         update_payload = sb.table.return_value.update.call_args[0][0]
         assert update_payload["notification_status"] == "failed"
 
@@ -894,8 +896,91 @@ class TestUpdateNotificationStatus:
 
         from app.services.tickets import update_notification_status
 
-        # Should not raise
-        update_notification_status(call_id="CA_err", status="sent")
+        # Should not raise, and the failure must be reported to claim holders
+        written = update_notification_status(call_id="CA_err", status="sent")
+
+        assert written is False
+
+
+# ---------------------------------------------------------------------------
+# claim_notification_status
+# ---------------------------------------------------------------------------
+
+
+class TestClaimNotificationStatus:
+    """Tests for the atomic dispatcher-notification send claim."""
+
+    @patch("app.services.tickets._get_supabase")
+    def test_winning_claim_moves_row_to_sending(self, mock_get_sb: MagicMock) -> None:
+        sb = _mock_guarded_update(rows_updated=1)
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import claim_notification_status
+
+        claimed = claim_notification_status(call_id="CA_claim")
+
+        assert claimed is True
+        update_payload = sb.table.return_value.update.call_args[0][0]
+        assert update_payload == {"notification_status": "sending"}
+        sb.table.return_value.update.return_value.eq.assert_called_once_with(
+            "call_id", "CA_claim"
+        )
+
+    @patch("app.services.tickets._get_supabase")
+    def test_guard_allows_only_pre_send_states(self, mock_get_sb: MagicMock) -> None:
+        """'pending' and 'failed' can win the claim; 'sent' and in-flight 'sending' never do."""
+        sb = _mock_guarded_update(rows_updated=1)
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import claim_notification_status
+
+        claim_notification_status(call_id="CA_guard")
+
+        in_mock = sb.table.return_value.update.return_value.eq.return_value.in_
+        in_mock.assert_called_once_with("notification_status", ["pending", "failed"])
+        allowed = in_mock.call_args[0][1]
+        assert "sent" not in allowed
+        assert "sending" not in allowed
+
+    @patch("app.services.tickets._get_supabase")
+    def test_lost_claim_returns_false(self, mock_get_sb: MagicMock) -> None:
+        sb = _mock_guarded_update(rows_updated=0)
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import claim_notification_status
+
+        assert claim_notification_status(call_id="CA_sent") is False
+
+    @patch("app.services.tickets._get_supabase")
+    def test_lost_claim_logs_claim_lost_event(
+        self, mock_get_sb: MagicMock, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        sb = _mock_guarded_update(rows_updated=0)
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import claim_notification_status
+
+        with caplog.at_level("INFO"):
+            claim_notification_status(call_id="CA_lost")
+
+        events = [
+            json.loads(r.message)
+            for r in caplog.records
+            if r.message.startswith("{")
+        ]
+        lost = [e for e in events if e.get("event") == "Dispatcher notification claim lost"]
+        assert lost, "expected a 'Dispatcher notification claim lost' log event"
+        assert lost[0]["call_id"] == "CA_lost"
+
+    @patch("app.services.tickets._get_supabase")
+    def test_exception_returns_false_without_raising(self, mock_get_sb: MagicMock) -> None:
+        sb = MagicMock()
+        sb.table.return_value.update.side_effect = RuntimeError("DB down")
+        mock_get_sb.return_value = sb
+
+        from app.services.tickets import claim_notification_status
+
+        assert claim_notification_status(call_id="CA_err") is False
 
 
 # ---------------------------------------------------------------------------
