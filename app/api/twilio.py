@@ -33,10 +33,82 @@ from app.services.tickets import (
     start_assistance_request,
     update_ticket_hazard,
 )
+from app.services.transcripts import insert_call_transcript
 
 logger = structlog.get_logger(__name__)
 
 _background_tasks: set[asyncio.Task[object]] = set()
+
+# Per-call transcript ordering for `call_transcripts.seq`, keyed by Twilio
+# CallSid. Assigned at schedule time on the event loop (no race), starting at
+# 0 to match the `seq >= 0` check. Entries are removed on media-stream
+# teardown; the UNIQUE(call_id, seq) constraint carries cross-restart dedup.
+_transcript_seq: dict[str, int] = {}
+
+
+async def _persist_transcript_turn(
+    *,
+    call_sid: str,
+    speaker: str,
+    text: str,
+    seq: int,
+) -> None:
+    """Resolve demo_session_id and insert one transcript turn off the hot path.
+
+    Never raises: DB failures are logged loudly by the service / here and the
+    live call continues unchanged.
+    """
+    try:
+        row = await asyncio.to_thread(get_assistance_request, call_id=call_sid)
+        demo_session_id = (row or {}).get("demo_session_id")
+    except Exception:
+        logger.exception(
+            "call_transcript_session_lookup_failed",
+            call_sid=call_sid,
+            speaker=speaker,
+            seq=seq,
+        )
+        demo_session_id = None
+    try:
+        await asyncio.to_thread(
+            insert_call_transcript,
+            call_id=call_sid,
+            demo_session_id=demo_session_id,
+            speaker=speaker,
+            text=text,
+            seq=seq,
+        )
+    except Exception:
+        logger.exception(
+            "call_transcript_persist_failed",
+            call_sid=call_sid,
+            speaker=speaker,
+            seq=seq,
+        )
+
+
+def _schedule_transcript_persist(
+    *,
+    call_sid: str,
+    speaker: str,
+    text: str,
+) -> None:
+    """Assign the next per-call seq and persist in the background.
+
+    Runs synchronously on the event loop so arrival order maps to seq order;
+    the DB write itself runs in a background task and never blocks audio or
+    tool dispatch.
+    """
+    seq = _transcript_seq.get(call_sid, 0)
+    _transcript_seq[call_sid] = seq + 1
+    task = asyncio.create_task(
+        _persist_transcript_turn(
+            call_sid=call_sid, speaker=speaker, text=text, seq=seq
+        ),
+        name=f"transcript-{call_sid}-{seq}",
+    )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 # Bound the early assistance-request insert so a stalled Supabase call can
 # never hang the TwiML response (Twilio expects a voice webhook reply in ~15s).
@@ -774,6 +846,20 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
         logger.warning("Unknown tool", function=func_name)
         return AssistanceRequestToolResult(status="error", error="Unknown tool").model_dump_json()
 
+    async def handle_caller_transcript(item_id: str, text: str) -> None:
+        """Schedule a caller transcript turn for background persistence."""
+        if call_sid is None:
+            return
+        _schedule_transcript_persist(call_sid=call_sid, speaker="caller", text=text)
+
+    async def handle_assistant_transcript(response_id: str, text: str) -> None:
+        """Schedule an assistant transcript turn for background persistence."""
+        if call_sid is None:
+            return
+        _schedule_transcript_persist(
+            call_sid=call_sid, speaker="assistant", text=text
+        )
+
     try:
         while True:
             data = await websocket.receive_json()
@@ -815,6 +901,8 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                         session.on_error = handle_session_error
                         session.on_closing_finished = handle_closing_finished
                         session.on_closing_mark_requested = send_closing_mark
+                        session.on_caller_transcript = handle_caller_transcript
+                        session.on_assistant_transcript = handle_assistant_transcript
                         # Start draining OpenAI events BEFORE the greeting so
                         # the greeting audio and its response.done are always
                         # observed, then deliver the deferred greeting.
@@ -871,6 +959,8 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                         on_error=handle_session_error,
                         on_closing_finished=handle_closing_finished,
                         on_closing_mark_requested=send_closing_mark,
+                        on_caller_transcript=handle_caller_transcript,
+                        on_assistant_transcript=handle_assistant_transcript,
                     )
 
                     # Record call started and twilio stream started events
@@ -951,6 +1041,7 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                     "Failed to finalize intake status on teardown", call_sid=call_sid
                 )
             call_manager.remove(call_sid)
+            _transcript_seq.pop(call_sid, None)
         if session:
             await session.close()
         if process_task:

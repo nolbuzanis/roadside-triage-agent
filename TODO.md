@@ -2007,7 +2007,7 @@ Write each completed turn to `call_transcripts` from the realtime event handler.
 
 ### Status
 
-- [ ] Not started
+- [x] Completed in `feat/persist-transcript-turns` PR
 
 ---
 

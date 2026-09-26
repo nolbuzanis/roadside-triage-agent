@@ -669,6 +669,17 @@ class RealtimeSession:
                 item_id=item_id,
             )
             return
+        if response_id and response_id == self._interrupted_response_id:
+            # Cancelled/interrupted responses can still emit a partial
+            # transcript.done; drop it so persistence never stores
+            # truncated-turn spam for a turn the caller talked over.
+            logger.info(
+                "assistant_transcript_skipped_interrupted",
+                call_sid=self.call_sid,
+                response_id=response_id,
+                item_id=item_id,
+            )
+            return
         logger.info(
             "assistant_transcript_completed",
             call_sid=self.call_sid,
