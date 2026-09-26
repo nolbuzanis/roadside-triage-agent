@@ -27,6 +27,13 @@ REALTIME_URL = "wss://api.openai.com/v1/realtime"
 # to avoid audio conversion overhead.
 TWILIO_AUDIO_RATE = 8000
 
+# Caller input transcription model. Enables
+# `conversation.item.input_audio_transcription.completed` events so caller turns
+# produce text without affecting the voice loop. Chosen as the cheapest
+# transcription model; assistant `response.output_audio_transcript` text remains
+# a free side-effect of audio output.
+CALLER_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
+
 # Grace period after Twilio acknowledges the closing playback mark (or after the
 # bounded mark timeout), giving the media pipeline a final moment to drain. The
 # mark acknowledgment — not this timer — is the primary delivery guarantee.
@@ -63,6 +70,8 @@ class RealtimeSession:
     on_closing_finished: Callable[[str], Coroutine[Any, Any, None]] | None = None
     on_clear_playback: Callable[[], Coroutine[Any, Any, None]] | None = None
     on_closing_mark_requested: Callable[[str], Coroutine[Any, Any, None]] | None = None
+    on_caller_transcript: Callable[[str, str], Coroutine[Any, Any, None]] | None = None
+    on_assistant_transcript: Callable[[str, str], Coroutine[Any, Any, None]] | None = None
 
     _ws: ClientConnection | None = field(default=None, init=False, repr=False)
     _connected: bool = field(default=False, init=False, repr=False)
@@ -172,7 +181,15 @@ class RealtimeSession:
         self.latency_tracker.record_event("openai_websocket_connected")
 
     async def _configure_session(self, settings: Any = None) -> None:
-        """Send session.update to configure model, voice, audio, tools, and turn detection."""
+        """Send session.update to configure model, voice, audio, tools, and turn detection.
+
+        Caller input transcription is always enabled via
+        ``CALLER_TRANSCRIPTION_MODEL`` so OpenAI emits
+        ``conversation.item.input_audio_transcription.completed`` events. The
+        same config also satisfies the future transcription-gated
+        commit-filtering work; transcription failures never affect the voice
+        loop.
+        """
         if settings is None:
             settings = get_settings()
         session_config: dict[str, Any] = {
@@ -181,6 +198,7 @@ class RealtimeSession:
             "audio": {
                 "input": {
                     "format": {"type": "audio/pcmu"},
+                    "transcription": {"model": CALLER_TRANSCRIPTION_MODEL},
                     "turn_detection": {
                         "type": "server_vad",
                         "create_response": False,
@@ -571,15 +589,102 @@ class RealtimeSession:
             if self.on_error:
                 await self.on_error(RuntimeError(f"OpenAI error [{error_code}]: {error_msg}"))
 
-        elif event_type in (
-            "response.output_audio_transcript.delta",
-            "response.output_audio_transcript.done",
-        ):
-            # Lifecycle/acknowledgment events — log at debug level
+        elif event_type == "conversation.item.input_audio_transcription.completed":
+            await self._handle_caller_transcript_completed(event)
+
+        elif event_type == "conversation.item.input_audio_transcription.failed":
+            # Transcription is best-effort: a failure must never break
+            # turn-taking, greeting, or closing. Log loudly (text + ids only)
+            # and continue the voice loop unchanged.
+            error = event.get("error")
+            if not isinstance(error, dict):
+                error = {}
+            logger.warning(
+                "caller_transcript_failed",
+                call_sid=self.call_sid,
+                item_id=event.get("item_id") or "",
+                error_code=error.get("code") or "unknown",
+                error_message=error.get("message") or "Unknown transcription error",
+            )
+
+        elif event_type == "response.output_audio_transcript.delta":
+            # High-frequency streaming delta — debug level, ids only.
             logger.debug("OpenAI event", event_type=event_type, call_sid=self.call_sid)
+
+        elif event_type == "response.output_audio_transcript.done":
+            await self._handle_assistant_transcript_done(event)
 
         else:
             logger.debug("Unhandled OpenAI event", event_type=event_type, call_sid=self.call_sid)
+
+    async def _handle_caller_transcript_completed(self, event: dict[str, Any]) -> None:
+        """Expose a completed caller transcription without touching the voice loop.
+
+        Empty transcripts (silence/noise commits) are logged and dropped so
+        downstream persistence never stores blank turns. Callback failures are
+        logged and swallowed so transcription can never break a live call.
+        Only text + ids are logged; no audio payloads.
+        """
+        item_id = str(event.get("item_id") or "")
+        transcript = str(event.get("transcript") or "").strip()
+        if not transcript:
+            logger.info(
+                "caller_transcript_empty",
+                call_sid=self.call_sid,
+                item_id=item_id,
+            )
+            return
+        logger.info(
+            "caller_transcript_completed",
+            call_sid=self.call_sid,
+            item_id=item_id,
+            transcript_text=transcript,
+        )
+        if self.on_caller_transcript is not None:
+            try:
+                await self.on_caller_transcript(item_id, transcript)
+            except Exception:
+                logger.exception(
+                    "caller_transcript_callback_failed",
+                    call_sid=self.call_sid,
+                    item_id=item_id,
+                )
+
+    async def _handle_assistant_transcript_done(self, event: dict[str, Any]) -> None:
+        """Expose a completed assistant transcript with its response_id.
+
+        The ``response_id`` attribution lets downstream persistence tie the
+        text to the exact response (greeting / closing / interrupted), so a
+        later writer can avoid mis-tagging. Empty transcripts are dropped;
+        callback failures are logged and swallowed. Only text + ids logged.
+        """
+        response_id = str(event.get("response_id") or "")
+        item_id = str(event.get("item_id") or "")
+        transcript = str(event.get("transcript") or "").strip()
+        if not transcript:
+            logger.info(
+                "assistant_transcript_empty",
+                call_sid=self.call_sid,
+                response_id=response_id,
+                item_id=item_id,
+            )
+            return
+        logger.info(
+            "assistant_transcript_completed",
+            call_sid=self.call_sid,
+            response_id=response_id,
+            item_id=item_id,
+            transcript_text=transcript,
+        )
+        if self.on_assistant_transcript is not None:
+            try:
+                await self.on_assistant_transcript(response_id, transcript)
+            except Exception:
+                logger.exception(
+                    "assistant_transcript_callback_failed",
+                    call_sid=self.call_sid,
+                    response_id=response_id,
+                )
 
     async def _interrupt_assistant_speech(self) -> None:
         """Stop assistant speech now that the caller has started talking.
