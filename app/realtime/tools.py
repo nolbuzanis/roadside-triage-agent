@@ -90,7 +90,9 @@ CONFIRM_ASSISTANCE_REQUEST_TOOL: dict[str, Any] = {
         "arguments: the backend reads the saved request for this call. Call it "
         "only after the caller clearly confirms the full summary — never before, "
         "and never to save or correct details (use update_assistance_request for "
-        "that). On success the system delivers the fixed closing line."
+        "that). A declined, ambiguous, hedged, or unanswered summary is not a "
+        "confirmation: do not call this tool; ask again instead. On success the "
+        "system delivers the fixed closing line."
     ),
     "parameters": {
         "type": "object",

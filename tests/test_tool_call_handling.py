@@ -87,6 +87,12 @@ class TestConfirmAssistanceRequestToolSchema:
         assert "verbally confirmed" in description
         assert "never before" in description
 
+    def test_description_rejects_declined_or_unanswered_summary(self) -> None:
+        description = CONFIRM_ASSISTANCE_REQUEST_TOOL["description"].lower()
+        assert "declined, ambiguous, hedged, or unanswered summary" in description
+        assert "do not call this tool" in description
+        assert "ask again instead" in description
+
     def test_registered_alongside_update_and_emergency_tools(self) -> None:
         names = [tool["name"] for tool in REALTIME_TOOLS]
         assert names == [
