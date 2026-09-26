@@ -10,7 +10,13 @@ import {
 } from '../lib/demoStorage'
 import { mergeLoadedRequests, upsertRequest } from '../lib/requestList'
 import type { RealtimeStatus } from '../lib/realtimeStatus'
-import type { AssistanceRequest } from '../types'
+import {
+  mergeLoadedTranscriptTurns,
+  normalizeTranscriptRow,
+  upsertTranscriptTurn,
+  type TranscriptRow,
+} from '../lib/transcripts'
+import type { AssistanceRequest, TranscriptTurn } from '../types'
 import DemoStartForm from './DemoStartForm'
 import DemoActiveView from './DemoActiveView'
 
@@ -20,6 +26,7 @@ export default function DemoScreen() {
   const [phase, setPhase] = useState<DemoPhase>('start')
   const [demo, setDemo] = useState<StoredDemoSession | null>(null)
   const [requests, setRequests] = useState<AssistanceRequest[]>([])
+  const [transcripts, setTranscripts] = useState<TranscriptTurn[]>([])
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [realtimeStatus, setRealtimeStatus] =
@@ -57,6 +64,7 @@ export default function DemoScreen() {
         clearStoredDemoSession()
         setDemo(null)
         setRequests([])
+        setTranscripts([])
         setPhase('expired')
         return
       }
@@ -76,6 +84,31 @@ export default function DemoScreen() {
   useEffect(() => {
     currentDemoIdRef.current = demo ? demo.id : null
   }, [demo])
+
+  const loadTranscripts = useCallback(async (demoId: string) => {
+    const { data, error } = await supabase
+      .from('call_transcripts')
+      .select('id, demo_session_id, speaker, text, seq, created_at')
+      .eq('demo_session_id', demoId)
+      .order('seq', { ascending: true })
+    if (error) {
+      setError(error.message)
+      return
+    }
+    const normalized: TranscriptTurn[] = []
+    for (const row of (data ?? []) as TranscriptRow[]) {
+      if (row.demo_session_id !== demoId) {
+        continue
+      }
+      const turn = normalizeTranscriptRow(row)
+      if (turn) {
+        normalized.push(turn)
+      }
+    }
+    setTranscripts((current) =>
+      mergeLoadedTranscriptTurns(current, normalized),
+    )
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -140,13 +173,14 @@ export default function DemoScreen() {
         (request) => request.demo_session_id === refreshed.id,
       )
       setRequests((current) => mergeLoadedRequests(current, linked))
+      await loadTranscripts(refreshed.id)
     }
 
     void restore()
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [loadTranscripts])
 
   const activeDemoId = phase === 'active' && demo ? demo.id : null
   const linkedRequestSeenRef = useRef(false)
@@ -197,6 +231,47 @@ export default function DemoScreen() {
     }
   }, [activeDemoId, recheckExpiry])
 
+  useEffect(() => {
+    if (!activeDemoId) {
+      return
+    }
+    let active = true
+    // Backfill runs on SUBSCRIBED (initial subscribe and every reconnect);
+    // restore() already backfills the refresh path, and
+    // mergeLoadedTranscriptTurns keeps both race-free.
+    const handleTranscriptEvent = (incoming: TranscriptRow) => {
+      if (incoming.demo_session_id !== activeDemoId) {
+        return
+      }
+      const turn = normalizeTranscriptRow(incoming)
+      if (!turn) {
+        return
+      }
+      setTranscripts((current) => upsertTranscriptTurn(current, turn))
+    }
+    const channel = supabase
+      .channel(`demo-transcript-${activeDemoId}`)
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'call_transcripts' },
+        (payload) => handleTranscriptEvent(payload.new as TranscriptRow),
+      )
+      .subscribe((status) => {
+        if (!active) {
+          return
+        }
+        if (status === REALTIME_SUBSCRIBE_STATES.SUBSCRIBED) {
+          // Reconnect recovery: re-run the linked query so INSERTs
+          // committed during the outage appear instead of a stale view.
+          void loadTranscripts(activeDemoId)
+        }
+      })
+    return () => {
+      active = false
+      supabase.removeChannel(channel)
+    }
+  }, [activeDemoId, loadTranscripts])
+
   const expiresAtMs = demo ? Date.parse(demo.expires_at) : null
 
   useEffect(() => {
@@ -228,6 +303,7 @@ export default function DemoScreen() {
       }
       writeStoredDemoSession(stored)
       setRequests([])
+      setTranscripts([])
       setDemo(stored)
       setNowMs(Date.now())
       setRealtimeStatus('connecting')
@@ -244,6 +320,7 @@ export default function DemoScreen() {
     clearStoredDemoSession()
     setDemo(null)
     setRequests([])
+    setTranscripts([])
     setError(null)
     setPhase('start')
   }
@@ -263,6 +340,7 @@ export default function DemoScreen() {
       <DemoActiveView
         demo={demo}
         request={requests[0] ?? null}
+        transcripts={transcripts}
         nowMs={nowMs}
         realtimeStatus={realtimeStatus}
         error={error}

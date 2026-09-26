@@ -16,3 +16,13 @@ export interface AssistanceRequest {
   updated_at: string
   demo_session_id: string | null
 }
+
+export type TranscriptSpeaker = 'You' | 'AI Agent'
+
+export interface TranscriptTurn {
+  id: string
+  speaker: TranscriptSpeaker
+  text: string
+  seq: number
+  created_at: string
+}

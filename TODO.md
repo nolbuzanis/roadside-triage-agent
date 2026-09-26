@@ -2035,4 +2035,4 @@ Replace the static sample in `frontend/src/components/DemoLivePanel.tsx:14-39,19
 
 ### Status
 
-- [ ] Not started
+- [x] Completed in `feat/render-live-transcript-demo-ui` PR
