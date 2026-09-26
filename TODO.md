@@ -63,7 +63,7 @@ Twilio owns PSTN calling and dispatcher SMS.
 
 # Demo Ready
 
-The highest-priority items gating the demo (other demo-visible follow-ups remain in Post-MVP → P1). Open items are listed in the order they should be worked; the completed production-wiring item is retained here for the record.
+The highest-priority items gating the demo (other demo-visible follow-ups remain in Post-MVP → P1). All items here are complete and retained for the record; the remaining open launch-blocking items moved to `# Suggested Before Demo`.
 
 ## P1 — Cancel a create-in-flight response when the caller interrupts
 
@@ -114,6 +114,32 @@ The `notification_status == "pending"` guard is check-then-act, so a duplicate `
 
 - [x] Completed in `feat/atomic-notification-claim-retry` PR
 
+## P1 — Wire the demo-session start flow into the deployed frontend
+
+Inject `VITE_API_BASE_URL` (the backend base URL) into the `deploy-frontend.yml` build, and configure the backend's `FRONTEND_ORIGINS` with the Firebase Hosting origin so the browser can call `POST /api/v1/demo-sessions` cross-origin.
+
+- Workflow wiring landed in `feat/wire-prod-demo-origin-variables` (config checks + value passing in both deploy workflows)
+- Repository variables `VITE_API_BASE_URL` and `FRONTEND_ORIGINS` set, backend and frontend redeployed
+- Production preflight and `startDemoSession` checks verified live
+
+### Acceptance Criteria
+
+- The production frontend build receives `VITE_API_BASE_URL` and the config check fails without it
+- A cross-origin preflight and POST from the Hosting origin succeed against the deployed backend; an unlisted origin is denied
+- `startDemoSession` against production no longer raises the missing-`VITE_API_BASE_URL` error
+
+### Dependencies
+
+- P1 — Deploy the dispatcher dashboard to Firebase Hosting
+
+### Status
+
+- [x] Completed — workflow wiring in `feat/wire-prod-demo-origin-variables`; production variables set, backend and frontend redeployed, and the preflight / `startDemoSession` checks verified in prod
+
+# Suggested Before Demo
+
+Items recommended to finish before launching the public demo, listed in priority order. Moved here from `# Demo Ready` (open items) and Post-MVP → P1 so the launch-blocking set is tracked in one place; scope and acceptance criteria are unchanged from the originals.
+
 ## P1 — Open the greeting gate when no greeting response will ever complete
 
 With `create_response: False`, `_greeting_response_done` only flips on a first `response.done`, so `greeting=""` (or a silently failed greeting `response.create`) leaves the session permanently deaf to caller turns.
@@ -137,28 +163,6 @@ With `create_response: False`, `_greeting_response_done` only flips on a first `
 
 - [ ] Not started
 
-## P1 — Wire the demo-session start flow into the deployed frontend
-
-Inject `VITE_API_BASE_URL` (the backend base URL) into the `deploy-frontend.yml` build, and configure the backend's `FRONTEND_ORIGINS` with the Firebase Hosting origin so the browser can call `POST /api/v1/demo-sessions` cross-origin.
-
-- Workflow wiring landed in `feat/wire-prod-demo-origin-variables` (config checks + value passing in both deploy workflows)
-- Repository variables `VITE_API_BASE_URL` and `FRONTEND_ORIGINS` set, backend and frontend redeployed
-- Production preflight and `startDemoSession` checks verified live
-
-### Acceptance Criteria
-
-- The production frontend build receives `VITE_API_BASE_URL` and the config check fails without it
-- A cross-origin preflight and POST from the Hosting origin succeed against the deployed backend; an unlisted origin is denied
-- `startDemoSession` against production no longer raises the missing-`VITE_API_BASE_URL` error
-
-### Dependencies
-
-- P1 — Deploy the dispatcher dashboard to Firebase Hosting
-
-### Status
-
-- [x] Completed — workflow wiring in `feat/wire-prod-demo-origin-variables`; production variables set, backend and frontend redeployed, and the preflight / `startDemoSession` checks verified in prod
-
 ## P1 — Reuse or cancel the superseded early OpenAI connection on duplicate voice webhooks
 
 A second webhook currently overwrites `_pending_connections[call_sid]`, orphaning the first `connection_task` (and the realtime session/WebSocket it creates), which is never awaited, cancelled, or closed.
@@ -173,6 +177,123 @@ A second webhook currently overwrites `_pending_connections[call_sid]`, orphanin
 - Exactly one entry remains in `_pending_connections` for the call
 - A unit test issues two webhook posts for the same `CallSid` and asserts the first task is cancelled/closed (or reused)
 - Existing early-connection and webhook suites still pass
+
+### Dependencies
+
+- none
+
+### Status
+
+- [ ] Not started
+
+## P1 — Surface a field-complete intake that is never confirmed
+
+Since the dispatcher SMS is now gated on `confirm_assistance_request`, a caller who supplies location/vehicle/issue and then hangs up (or never answers the summary) ends as `abandoned` with `notification_status` still `pending`, so a fully-collected request can reach no dispatcher.
+
+- An `abandoned` row with all three fields present either sends the dispatcher notification on abandonment or raises an explicit log/dashboard alert
+- The chosen behavior is documented in the README
+- Observability exists for the never-confirmed case (distinct log event or metric)
+
+### Acceptance Criteria
+
+- Unit tests drive abandonment of a fully populated open row and assert the chosen notification/alert behavior
+- The existing completion-gated SMS tests still pass
+
+### Dependencies
+
+- none
+
+### Status
+
+- [ ] Not started
+
+## P1 — Suppress `response.create` for spurious post-greeting input (transcription-based filtering)
+
+Enable input audio transcription and gate `caller_turn_complete` responses on the committed turn's transcript so empty/filler-only commits (call-setup noise or greeting echo) do not trigger an assistant response.
+
+### Acceptance Criteria
+
+- A commit with no speech does not create a response
+- A commit with real speech creates exactly one
+- Unit tests feed `conversation.item.input_audio_transcription.completed` with empty vs real transcripts and assert `response.create` counts
+
+### Dependencies
+
+- none
+
+### Status
+
+- [ ] Not started
+
+## P1 — Re-sync the `response.create` attribution deque on a server-side create failure
+
+`_response_create_reasons` pops a reason only at `response.created`, so a create rejected with an `error` event (which never yields a `response.created`) leaves its stale reason queued and shifts attribution for every later response — worst case an ordinary `caller_turn_complete` response is tagged `post_intake_closing` and becomes `closing_response_id`, letting `_handle_closing_response_done` drive the hangup off the wrong response.
+
+### Acceptance Criteria
+
+- When a create fails server-side, its queued reason is dropped (or the deque is otherwise re-synced) so the next `response.created` attributes to the correct reason
+- `closing_response_id` is only ever set by the closing create
+- A normal greeting/tool/closing call is unaffected
+- Unit tests drive create → `error` → a later non-closing `response.created` and assert `closing_response_id` stays unset
+- The existing closing-attribution and interruption suites still pass
+
+### Dependencies
+
+- none
+
+### Status
+
+- [ ] Not started
+
+## P1 — Re-ask the final confirmation after dead air
+
+The prompt tells the model to ask the confirmation question once more when the caller does not answer, but `session.py` only creates a response on `input_audio_buffer.committed`, so pure silence after the summary produces no turn and the re-ask is unreachable (the call just sits until the caller speaks or hangs up).
+
+### Acceptance Criteria
+
+- A summary that receives no caller reply within a bounded interval triggers a single scripted re-ask turn (at most one per call)
+- Ordinary mid-intake pauses still produce no unsolicited responses
+- Silence never completes the intake
+- Unit tests drive summary completion → no-answer interval → `response.create` for the re-ask, and assert no re-ask when the caller answers
+- Confirmation, closing, and interruption suites pass
+
+### Dependencies
+
+- none
+
+### Status
+
+- [ ] Not started
+
+## P1 — Backstop confirmation classification with a transcript-level guard
+
+The affirmative/rejection/ambiguous lists live only in the system prompt, so a model that confirms on a hedge would still complete the intake and fire the dispatcher SMS.
+
+### Acceptance Criteria
+
+- `confirm_assistance_request` never reaches the backend unless the last committed caller turn is an unambiguous affirmative (per the input-audio transcription enabled by P1 — Enable caller + assistant transcript events in the realtime session)
+- The refusal path leaves the intake open with a re-ask turn
+- Unit tests feed hedged, empty, and affirmative last transcripts and assert the confirm handler's reachability
+- The existing confirmation, emergency, and closing suites pass
+
+### Dependencies
+
+- P1 — Enable caller + assistant transcript events in the realtime session (completed)
+
+### Status
+
+- [ ] Not started
+
+## P1 — Scan the built frontend bundle for backend-secret markers before every Firebase Hosting deploy
+
+After `npm run build` in `.github/workflows/deploy-frontend.yml`, fail the workflow if any file under `frontend/dist/` contains `service_role`, `sb_secret_`, `TWILIO_`, or `OPENAI_` material, so the "no backend secrets in the bundle" criterion is mechanically enforced on each deploy rather than only by the one-time manual smoke inspection.
+
+### Acceptance Criteria
+
+- The deploy workflow includes a post-build grep step that exits non-zero on a match
+- A deliberately planted marker in `dist/` fails the step
+- Workflow step exists and its matching logic is exercised against a sample marker file
+- A clean build passes
 
 ### Dependencies
 
@@ -1306,11 +1427,8 @@ The MVP is complete when all of the following work:
 
 ## P1
 
-- Surface a field-complete intake that is never confirmed: since the dispatcher SMS is now gated on `confirm_assistance_request`, a caller who supplies location/vehicle/issue and then hangs up (or never answers the summary) ends as `abandoned` with `notification_status` still `pending`, so a fully-collected request can reach no dispatcher. Acceptance: an `abandoned` row with all three fields present either sends the dispatcher notification on abandonment or raises an explicit log/dashboard alert, the chosen behavior is documented in the README, and observability exists for the never-confirmed case (distinct log event or metric). Verification: unit tests drive abandonment of a fully populated open row and assert the chosen notification/alert behavior; the existing completion-gated SMS tests still pass.
 - [x] Harden the prompt for a declined or unanswered confirmation: the confirmation rules require a clear "yes" but never say what the model does when the caller declines, says stop, or does not answer, leaving the turn undefined. Acceptance: `app/realtime/system_prompt.md` states explicitly that a declined/ambiguous/dead-air confirmation must not call `confirm_assistance_request` and defines the fallback turn, and the definition is consistent with the confirmation and emergency rules. Verification: `tests/test_instructions.py` asserts the guidance is present, and the full suite passes.
   - Status: completed in `feat/harden-intake-confirmation` PR — `system_prompt.md` gained a "Reading the Caller's Answer" section (clear affirmative → confirm once; clear rejection → ask what to change; correction → save only changed fields → full re-summary → re-ask; ambiguous → explicit yes/no; dead air → re-ask; emergency still outranks), `CONFIRM_ASSISTANCE_REQUEST_TOOL` repeats the rule, `tests/test_instructions.py` asserts the guidance, and `tests/test_intake_confirmation.py::TestConfirmationAnswerScenarios` covers clear yes, clear no, ambiguous, unanswered, and correction → reconfirmation; reviewer APPROVE after a fix round, `python -m pytest tests/ -v` (656), `ruff`, and `mypy` pass.
-- Re-ask the final confirmation after dead air: the prompt tells the model to ask the confirmation question once more when the caller does not answer, but `session.py` only creates a response on `input_audio_buffer.committed`, so pure silence after the summary produces no turn and the re-ask is unreachable (the call just sits until the caller speaks or hangs up). Acceptance: a summary that receives no caller reply within a bounded interval triggers a single scripted re-ask turn (at most one per call), ordinary mid-intake pauses still produce no unsolicited responses, and silence never completes the intake. Verification: unit tests drive summary completion → no-answer interval → `response.create` for the re-ask, and assert no re-ask when the caller answers; confirmation, closing, and interruption suites pass.
-- Backstop confirmation classification with a transcript-level guard: the affirmative/rejection/ambiguous lists live only in the system prompt, so a model that confirms on a hedge would still complete the intake and fire the dispatcher SMS. Acceptance: `confirm_assistance_request` never reaches the backend unless the last committed caller turn is an unambiguous affirmative (per the input-audio transcription the transcription-gating item above enables), and the refusal path leaves the intake open with a re-ask turn. Verification: unit tests feed hedged, empty, and affirmative last transcripts and assert the confirm handler's reachability; the existing confirmation, emergency, and closing suites pass.
 - [x] Fail loudly when the lifecycle write fails during confirmation: `complete_intake` swallows DB exceptions, so the confirm handler logs `assistance_request_confirmed`, fires the dispatcher SMS, and starts the closing even when `intake_status` never left `in_progress`. Acceptance: a failed lifecycle update is distinguishable from success (distinct error-level event and/or a non-success confirm result, per the chosen design) instead of being logged as confirmation success. Verification: a unit test forces `complete_intake` to raise and asserts the surfaced failure; existing confirm, closing, and teardown tests still pass.
   - Status: completed in `fix/complete-intake-persistence-failure` PR — `complete_intake` returns `False` when the guarded write fails and `True` when it lands (including the idempotent 0-row no-op), `handle_confirm_assistance_request` returns a `status="error"` result with an error-level `assistance_request_completion_not_persisted` event before any notification claim, SMS, or closing, `system_prompt.md` tells the model to report the failure and wait rather than claim success, and `tests/test_intake_confirmation.py::TestCompletionPersistenceFailure` plus the `TestCompleteIntake` return-value and failure-then-retry tests cover both the failure and the retry path; reviewer APPROVE (no blocking findings), `python -m pytest tests/ -v` (680), `ruff`, and `mypy` pass.
 - Distinguish an idempotent completion no-op from a row that changed under the writer: `complete_intake` returns success for any 0-row guarded update, so a row flipped to `escalated` between the confirm handler's read-back and the completion write would still be treated as confirmed (claim, SMS, closing). This is unreachable in practice today — escalation and confirmation are serialized within one session — and returning failure for 0 rows would break idempotent retries, so it is deferred. Acceptance: a 0-row completion write reports a distinct no-op outcome that the confirm handler resolves by re-reading the row (still-open/abandoned → retry the write, escalated → escalated result, already-completed → confirmed), and duplicate confirmations still send exactly one SMS. Verification: unit tests drive each observed status against a 0-row write and assert the resolved result; the existing duplicate-confirmation, emergency, and closing suites pass.
@@ -1326,14 +1444,11 @@ The MVP is complete when all of the following work:
 - Add frontend build/lint CI on pull requests: `ci.yml` is Python-only today, so a broken frontend build is first caught after merge by the deploy workflow. Acceptance: a `frontend` job (in `ci.yml` or a dedicated workflow) runs `npm ci`, `npm run lint`, and `npm run build` on `pull_request` to `main` when `frontend/**` changes, failing the PR check on type/lint regressions, while Python-only changes are unaffected. Verification: a PR touching `frontend/` shows the job passing; a deliberately introduced `tsc` error fails it; the existing Python jobs still pass unchanged.
 - Add a Docker image build check to CI so packaging regressions for non-Python data files (e.g. `app/realtime/system_prompt.md`, loaded at import time but never imported by Python) are caught on the PR instead of at deploy: a job in `ci.yml` runs `docker build` on `pull_request` to `main` and then asserts the prompt file exists in the built image (e.g. `docker run --rm <image> test -f /app/app/realtime/system_prompt.md`). Acceptance: the job passes on current main; a Dockerfile break fails the build step, and a `.dockerignore` change that excludes the prompt file fails the image assertion, while the existing Python test/lint/typecheck jobs are unchanged. Verification: a PR shows the build job passing; deliberately removing the `!app/**/*.md` negation while adding `**/*.md` to `.dockerignore` makes it fail; existing CI jobs pass unchanged.
 - Pin `firebaseToolsVersion` in `.github/workflows/deploy-frontend.yml` to a specific `firebase-tools` version (the action currently defaults to `latest`; the repo already pins the Supabase CLI). Acceptance: the deploy workflow passes an explicit `firebaseToolsVersion`, so deploys no longer depend on a moving `latest`. Verification: workflow config shows the pinned version and a subsequent workflow run deploys successfully.
-- Scan the built frontend bundle for backend-secret markers before every Firebase Hosting deploy: after `npm run build` in `.github/workflows/deploy-frontend.yml`, fail the workflow if any file under `frontend/dist/` contains `service_role`, `sb_secret_`, `TWILIO_`, or `OPENAI_` material, so the "no backend secrets in the bundle" criterion is mechanically enforced on each deploy rather than only by the one-time manual smoke inspection. Acceptance: the deploy workflow includes a post-build grep step that exits non-zero on a match; a deliberately planted marker in `dist/` fails the step. Verification: workflow step exists and its matching logic is exercised against a sample marker file; a clean build passes.
 - Migrate FastAPI startup validation from deprecated `@app.on_event("startup")` to `lifespan` context manager
 - Add unit test for `Settings` validation that asserts `ValidationError` when env vars are missing
 - Require non-empty values for the remaining required secrets (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `OPENAI_API_KEY`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`, `DISPATCHER_ALERT_PHONE`, `EMERGENCY_TRANSFER_PHONE`) with the same `Field(min_length=1)` guard already applied to `DEMO_PHONE_HMAC_SECRET`. Acceptance: an empty-string value for any required secret fails startup validation with a field-specific error, while a missing variable still fails as it does today. Verification: unit tests assert `ValidationError` on empty values for each required secret; `python -m pytest tests/ -v` passes.
 - Add unit tests for `AssistanceRequestArgs` Pydantic validation and `UPDATE_ASSISTANCE_REQUEST_TOOL` schema shape
 - Add unit tests for `CallState` and `CallStateManager` (create/get/remove/isolation) and integration tests verifying tool handlers update state correctly
-- Suppress `response.create` for spurious post-greeting input (transcription-based filtering): enable input audio transcription and gate `caller_turn_complete` responses on the committed turn's transcript so empty/filler-only commits (call-setup noise or greeting echo) do not trigger an assistant response. Acceptance: a commit with no speech does not create a response; a commit with real speech creates exactly one. Verification: unit tests feed `conversation.item.input_audio_transcription.completed` with empty vs real transcripts and assert `response.create` counts
-- Re-sync the `response.create` attribution deque on a server-side create failure: `_response_create_reasons` pops a reason only at `response.created`, so a create rejected with an `error` event (which never yields a `response.created`) leaves its stale reason queued and shifts attribution for every later response — worst case an ordinary `caller_turn_complete` response is tagged `post_intake_closing` and becomes `closing_response_id`, letting `_handle_closing_response_done` drive the hangup off the wrong response. Acceptance: when a create fails server-side, its queued reason is dropped (or the deque is otherwise re-synced) so the next `response.created` attributes to the correct reason and `closing_response_id` is only ever set by the closing create; a normal greeting/tool/closing call is unaffected. Verification: unit tests drive create → `error` → a later non-closing `response.created` and assert `closing_response_id` stays unset, plus the existing closing-attribution and interruption suites still pass
 - Live end-to-end regression check: place a real call and verify the agent speaks exactly one fixed greeting and then stays silent until the caller speaks (no immediate "OK, let's get some information..."). Acceptance: for N test calls, no unsolicited second response before caller speech. Verification: manual telephony test against prod/staging using the new `response_create_sent` + `input_audio_buffer.*` structured logs
 - Add a handler-level test for `twilio_media_stream` that drives the `start` event and asserts `process_events` is started exactly once on the early-success, early-failure-fallback, and no-early-connection paths. Acceptance: no path starts two concurrent `process_events` readers and no task is orphaned when early setup fails after task creation. Verification: unit test with a mocked `RealtimeSession` counting `asyncio.create_task(session.process_events)` calls per path
 - Pass OpenAI `session_id` to `create_ticket()` for troubleshooting correlation
