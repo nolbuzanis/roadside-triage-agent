@@ -86,7 +86,7 @@ The highest-priority items gating the demo (other demo-visible follow-ups remain
 
 ### Status
 
-- [ ] Not started
+- [x] Completed in `feat/cancel-in-flight-response-on-speech` PR
 
 ## P1 — Claim the dispatcher-SMS notification atomically and retry failed sends
 
@@ -1293,6 +1293,7 @@ The MVP is complete when all of the following work:
 - Add unit tests for `AssistanceRequestArgs` Pydantic validation and `UPDATE_ASSISTANCE_REQUEST_TOOL` schema shape
 - Add unit tests for `CallState` and `CallStateManager` (create/get/remove/isolation) and integration tests verifying tool handlers update state correctly
 - Suppress `response.create` for spurious post-greeting input (transcription-based filtering): enable input audio transcription and gate `caller_turn_complete` responses on the committed turn's transcript so empty/filler-only commits (call-setup noise or greeting echo) do not trigger an assistant response. Acceptance: a commit with no speech does not create a response; a commit with real speech creates exactly one. Verification: unit tests feed `conversation.item.input_audio_transcription.completed` with empty vs real transcripts and assert `response.create` counts
+- Re-sync the `response.create` attribution deque on a server-side create failure: `_response_create_reasons` pops a reason only at `response.created`, so a create rejected with an `error` event (which never yields a `response.created`) leaves its stale reason queued and shifts attribution for every later response — worst case an ordinary `caller_turn_complete` response is tagged `post_intake_closing` and becomes `closing_response_id`, letting `_handle_closing_response_done` drive the hangup off the wrong response. Acceptance: when a create fails server-side, its queued reason is dropped (or the deque is otherwise re-synced) so the next `response.created` attributes to the correct reason and `closing_response_id` is only ever set by the closing create; a normal greeting/tool/closing call is unaffected. Verification: unit tests drive create → `error` → a later non-closing `response.created` and assert `closing_response_id` stays unset, plus the existing closing-attribution and interruption suites still pass
 - Live end-to-end regression check: place a real call and verify the agent speaks exactly one fixed greeting and then stays silent until the caller speaks (no immediate "OK, let's get some information..."). Acceptance: for N test calls, no unsolicited second response before caller speech. Verification: manual telephony test against prod/staging using the new `response_create_sent` + `input_audio_buffer.*` structured logs
 - Add a handler-level test for `twilio_media_stream` that drives the `start` event and asserts `process_events` is started exactly once on the early-success, early-failure-fallback, and no-early-connection paths. Acceptance: no path starts two concurrent `process_events` readers and no task is orphaned when early setup fails after task creation. Verification: unit test with a mocked `RealtimeSession` counting `asyncio.create_task(session.process_events)` calls per path
 - Pass OpenAI `session_id` to `create_ticket()` for troubleshooting correlation
