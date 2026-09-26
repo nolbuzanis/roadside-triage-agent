@@ -1011,7 +1011,7 @@ body:has(.demo-screen) {
   margin: 0;
   padding: 0;
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .stepper-step {
@@ -1225,7 +1225,7 @@ body:has(.demo-screen) {
 
   .live-stepper {
     overflow-x: auto;
-    grid-template-columns: repeat(5, minmax(88px, 1fr));
+    grid-template-columns: repeat(4, minmax(88px, 1fr));
     padding-bottom: 4px;
   }
 
