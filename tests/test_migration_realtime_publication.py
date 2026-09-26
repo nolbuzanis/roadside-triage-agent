@@ -137,7 +137,13 @@ class TestPublicationMembership:
     def test_migration_is_idempotent(self, migration_db: MigrationDb) -> None:
         migration_db.conn.execute(migration_db.target_sql)
         row = migration_db.conn.execute(
-            "select count(*) as n from pg_publication_tables where pubname = %s",
+            """
+            select count(*) as n
+            from pg_publication_tables
+            where pubname = %s
+              and schemaname = 'public'
+              and tablename = 'assistance_requests'
+            """,
             (PUBLICATION_NAME,),
         ).fetchone()
         assert row is not None
