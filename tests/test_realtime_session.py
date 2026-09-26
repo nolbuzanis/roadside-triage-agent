@@ -281,7 +281,7 @@ class TestToolCallEvents:
     """Tests for _handle_function_call() and response.done dispatch."""
 
     async def test_tool_call_invokes_callback(self) -> None:
-        on_tool_call = AsyncMock(return_value='{"status": "created"}')
+        on_tool_call = AsyncMock(return_value='{"status": "ready_for_confirmation"}')
         session = _make_session(on_tool_call=on_tool_call)
         ws = _make_ws()
         await _connect_session(session, ws)
@@ -299,7 +299,7 @@ class TestToolCallEvents:
         )
 
     async def test_tool_call_sends_result_and_response_create(self) -> None:
-        on_tool_call = AsyncMock(return_value='{"status": "created"}')
+        on_tool_call = AsyncMock(return_value='{"status": "ready_for_confirmation"}')
         session = _make_session(on_tool_call=on_tool_call)
         ws = _make_ws()
         await _connect_session(session, ws)
@@ -319,7 +319,7 @@ class TestToolCallEvents:
         item_create = next(e for e in sent_events if e["type"] == "conversation.item.create")
         assert item_create["item"]["type"] == "function_call_output"
         assert item_create["item"]["call_id"] == "call_abc"
-        assert item_create["item"]["output"] == '{"status": "created"}'
+        assert item_create["item"]["output"] == '{"status": "ready_for_confirmation"}'
 
     async def test_tool_call_no_handler_returns_error(self) -> None:
         session = _make_session(on_tool_call=None)
@@ -363,7 +363,7 @@ class TestToolCallEvents:
         assert "DB down" in output["error"]
 
     async def test_response_done_dispatches_function_calls(self) -> None:
-        on_tool_call = AsyncMock(return_value='{"status": "created"}')
+        on_tool_call = AsyncMock(return_value='{"status": "ready_for_confirmation"}')
         session = _make_session(on_tool_call=on_tool_call)
         ws = _make_ws()
         await _connect_session(session, ws)

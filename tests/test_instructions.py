@@ -54,6 +54,11 @@ def test_instructions_reference_ticket_tool() -> None:
     assert "update_assistance_request" in ROADSIDE_ASSISTANT_INSTRUCTIONS
 
 
+def test_instructions_reference_confirmation_tool() -> None:
+    """Must reference the confirm_assistance_request completion tool."""
+    assert "confirm_assistance_request" in ROADSIDE_ASSISTANT_INSTRUCTIONS
+
+
 def test_instructions_direct_progressive_saving() -> None:
     """Must instruct saving each field as it is collected, not only at the end."""
     lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
@@ -61,11 +66,40 @@ def test_instructions_direct_progressive_saving() -> None:
     assert "call the tool again" in lower or "call again" in lower
 
 
-def test_instructions_require_all_three_fields_before_close() -> None:
-    """Still collect all three fields before the closing flow triggers."""
+def test_instructions_separate_saving_from_completion() -> None:
+    """Saving all three fields must not be treated as completion."""
     lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
-    assert "all three pieces of information" in lower
-    assert '"created"' in ROADSIDE_ASSISTANT_INSTRUCTIONS
+    assert "saving all three fields does not mean the intake is complete" in lower
+    assert "only complete after the caller verbally confirms" in lower
+
+
+def test_instructions_require_summary_before_completion() -> None:
+    """Must summarize location, vehicle, and issue and ask for confirmation."""
+    lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
+    assert "summarize all three" in lower
+    assert "is that all correct?" in lower
+    assert "all three details" in lower
+
+
+def test_instructions_require_caller_confirmation_before_completing() -> None:
+    """The completion tool may only run after the caller explicitly confirms."""
+    lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
+    assert "only after the caller explicitly confirms" in lower
+    assert "do not call confirm_assistance_request before the caller confirms" in lower
+
+
+def test_instructions_require_reconfirmation_after_correction() -> None:
+    """A corrected field re-opens the summary, not the intake."""
+    lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
+    assert "corrects any detail" in lower
+    assert "ask for confirmation again" in lower
+
+
+def test_instructions_do_not_claim_saving_closes_the_call() -> None:
+    """The prompt must not promise an automatic closing on the third save."""
+    instructions = ROADSIDE_ASSISTANT_INSTRUCTIONS
+    assert '"created"' not in instructions
+    assert "returns status" not in instructions
 
 
 def test_instructions_prohibit_inventing_information() -> None:

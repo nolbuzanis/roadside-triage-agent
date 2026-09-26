@@ -29,16 +29,18 @@ Inbound PSTN Call
  normal intake        emergency branch
    |                       |
    v                       v
-create_ticket()       transfer call
-   |
-   v
+save intake fields     transfer call
+summarize + confirm        |
+   |                       v
+   v                  Twilio Call Transfer
 Supabase
+(completed request)
    |
    v
-Twilio SMS
+ Twilio SMS
    |
    v
-Dispatcher
+ Dispatcher
 ```
 
 The backend owns Twilio call/webhook handling, the realtime audio WebSocket bridge, conversation/session state, assistance-request persistence, emergency transfer control, and dispatcher notification integration.
@@ -90,16 +92,16 @@ The highest-priority items gating the demo (other demo-visible follow-ups remain
 
 ## P1 — Claim the dispatcher-SMS notification atomically and retry failed sends
 
-The `notification_status == "pending"` guard is check-then-act, so a duplicate completing tool call arriving while the SMS task is still in flight (or after a swallowed `update_notification_status` failure) can double-send, and a `failed` status is permanently suppressed with no recovery.
+The `notification_status == "pending"` guard is check-then-act, so a duplicate `confirm_assistance_request` call arriving while the SMS task is still in flight (or after a swallowed `update_notification_status` failure) can double-send, and a `failed` status is permanently suppressed with no recovery.
 
 - Claim the row with a conditional update before sending: only a row still in its pre-send state wins the claim
-- Exactly one claim winner fires `notify_dispatcher`; a losing concurrent duplicate still returns `status = "created"` without sending
+- Exactly one claim winner fires `notify_dispatcher`; a losing concurrent duplicate still returns `status = "confirmed"` without sending
 - Add a defined retry path that re-attempts `failed` sends, while a `sent` row is never re-sent
 
 ### Acceptance Criteria
 
-- Two concurrent completing handler calls produce exactly one SMS
-- A claim-lost duplicate returns `status = "created"` without sending
+- Two concurrent confirmation handler calls produce exactly one SMS
+- A claim-lost duplicate returns `status = "confirmed"` without sending
 - A `failed` notification can be retried; a `sent` row is never re-sent
 - Unit tests drive the concurrent claim, claim-lost, and failed-then-retry paths
 - Existing completion-gating and retry tests still pass
@@ -251,10 +253,11 @@ Target lifecycle:
 valid inbound call
 → create one assistance_request immediately
 → progressively persist location / vehicle / issue
+→ summarize the three fields and complete only after the caller confirms them
 → complete normally, abandon on disconnect, or escalate on emergency
 ```
 
-Items below are listed in dependency order (A → B → C → D → E). The domain rename was deliberately staged last, after the behavioral changes were stable, to minimize production risk.
+Items below are listed in dependency order (A → B → C → D → E → F). The domain rename was deliberately staged after the behavioral changes were stable, to minimize production risk.
 
 ## P0 — Allow nullable intake columns (migration)
 
@@ -387,6 +390,33 @@ Stage the domain rename as a separate atomic change after the lifecycle behavior
 ### Status
 
 - [x] Completed in `feat/rename-breakdown-ticket-assistance-request` PR
+
+## P0 — Confirm the summarized intake before completion
+
+Saving all three fields currently completes the intake: `update_assistance_request` returns `status = "created"`, fires the dispatcher SMS, and starts the fixed closing line the moment location, vehicle, and issue exist. The caller never hears the collected details read back, so a mis-collected field reaches a dispatcher with no chance to correct it.
+
+- Split saving from completion: `update_assistance_request` only persists fields and returns `ready_for_confirmation` once all three are present — no lifecycle write, no SMS, no closing
+- Add a no-argument `confirm_assistance_request` tool the model calls only after the caller explicitly confirms a verbal summary of all three fields
+- The confirm handler reads the row back, requires all three fields, refuses escalated rows, completes idempotently, and fires the dispatcher SMS exactly once (gated on `notification_status == "pending"`)
+- A correction re-saves the affected field, then the full summary is repeated and asked again until the caller clearly confirms
+- Emergency transfer outranks confirmation: the session never invokes the confirm handler for a transfer-owned call and never starts the closing flow on top of one
+- System prompt, tool descriptions, README, and this TODO describe the confirmation step
+
+### Acceptance Criteria
+
+- Saving all three fields returns `ready_for_confirmation` and never completes the intake, sends an SMS, or starts the closing/hangup flow
+- Only `confirm_assistance_request` completes the intake, and it fires exactly one dispatcher SMS per call (a duplicate confirmation re-saves nothing and does not re-send)
+- The fixed closing message and hangup start only on a `confirmed` result; duplicate confirmations and confirmations after an emergency transfer start no closing and never reach the completion backend
+- Incomplete and escalated rows are refused by the confirm handler with no lifecycle write and no SMS
+- `python -m pytest tests/ -v`, `python -m ruff check .`, and `python -m mypy .` pass
+
+### Dependencies
+
+- P0 — Finalize intake status on completion, disconnect, and emergency
+
+### Status
+
+- [x] Completed in `feat/confirm-intake-before-completion` PR
 
 ---
 
@@ -1276,11 +1306,14 @@ The MVP is complete when all of the following work:
 
 ## P1
 
+- Surface a field-complete intake that is never confirmed: since the dispatcher SMS is now gated on `confirm_assistance_request`, a caller who supplies location/vehicle/issue and then hangs up (or never answers the summary) ends as `abandoned` with `notification_status` still `pending`, so a fully-collected request can reach no dispatcher. Acceptance: an `abandoned` row with all three fields present either sends the dispatcher notification on abandonment or raises an explicit log/dashboard alert, the chosen behavior is documented in the README, and observability exists for the never-confirmed case (distinct log event or metric). Verification: unit tests drive abandonment of a fully populated open row and assert the chosen notification/alert behavior; the existing completion-gated SMS tests still pass.
+- Harden the prompt for a declined or unanswered confirmation: the confirmation rules require a clear "yes" but never say what the model does when the caller declines, says stop, or does not answer, leaving the turn undefined. Acceptance: `app/realtime/system_prompt.md` states explicitly that a declined/ambiguous/dead-air confirmation must not call `confirm_assistance_request` and defines the fallback turn, and the definition is consistent with the confirmation and emergency rules. Verification: `tests/test_instructions.py` asserts the guidance is present, and the full suite passes.
+- Fail loudly when the lifecycle write fails during confirmation: `complete_intake` swallows DB exceptions, so the confirm handler logs `assistance_request_confirmed`, fires the dispatcher SMS, and starts the closing even when `intake_status` never left `in_progress`. Acceptance: a failed lifecycle update is distinguishable from success (distinct error-level event and/or a non-success confirm result, per the chosen design) instead of being logged as confirmation success. Verification: a unit test forces `complete_intake` to raise and asserts the surfaced failure; existing confirm, closing, and teardown tests still pass.
 - Gate the post-closing hangup on the caller's follow-up turn: after `closing_response_completed`, a caller question still creates a `caller_turn_complete` response, and the re-armed grace task can fire while the assistant's reply is mid-generation/mid-playback, cutting it off. Acceptance: when the caller speaks after the closing response completes, the hangup waits until that follow-up assistant response reaches a terminal state (or the call ends naturally); no disconnect occurs while a post-closing assistant response is in progress. Verification: unit tests drive closing completion → speech_started/stopped → committed → follow-up `response.created`/`response.done` and assert `on_closing_finished` is not called until the follow-up `response.done` arrives, plus a test asserting the grace task does not fire while a response is outstanding.
 - Verify the spoken closing delivery the same way the greeting is verified: compare the closing response's delivered transcript against `CLOSING_MESSAGE` on completion. Acceptance: matching deliveries log `closing_delivery_verified` and mismatches log `closing_delivery_mismatch` at error level, both with delivered/expected text and `call_sid`; no audio payloads logged. Verification: unit tests feed `response.done` with matching and mismatching transcripts and assert the two log events.
 - Extract a shared Twilio client factory (e.g. `get_twilio_client()`) used by `app/services/emergency.py` and `app/services/hangup.py` so call-control operations do not each construct `TwilioClient(settings...)` independently. Acceptance: a single construction site builds the client from settings; transfer and hangup behavior unchanged. Verification: existing emergency and hangup unit tests pass (patch points updated to the factory); grep shows one `TwilioClient(` construction in `app/`.
-- Live end-to-end regression check for the closing flow: place a real call, complete intake, and confirm the agent speaks exactly the fixed closing line and Twilio hangs up after the audio finishes with no extra questions. Acceptance: for N test calls, the spoken closing matches `CLOSING_MESSAGE` and the call terminates after `closing_response_completed` + grace. Verification: manual telephony test correlating the `intake_completed` → `closing_response_started` → `closing_response_completed` → `call_hangup_started` → `call_hangup_completed` structured log sequence.
-- Post-deploy smoke check for the `breakdown_tickets` → `assistance_requests` rename: apply the rename migration in the deployed environment, then place one real call that completes intake. Acceptance: exactly one row lands in `assistance_requests`, the `assistance_requests_pkey` and `assistance_requests_call_id_key` constraints exist, the `assistance_requests` RLS policy is attached and enforced, dispatcher SMS arrives with the "New assistance request" copy, and no query or write touches a `breakdown_tickets` table. Verification: live Twilio call plus SQL inspection of table name, constraints, row contents, and policy attachment in the deployed database.
+- Live end-to-end regression check for the closing flow: place a real call, confirm the summarized intake, and confirm the agent speaks exactly the fixed closing line and Twilio hangs up after the audio finishes with no extra questions. Acceptance: for N test calls, the spoken closing matches `CLOSING_MESSAGE` and the call terminates after `closing_response_completed` + grace. Verification: manual telephony test correlating the `assistance_request_confirmed` → `closing_response_started` → `closing_response_completed` → `call_hangup_started` → `call_hangup_completed` structured log sequence.
+- Post-deploy smoke check for the `breakdown_tickets` → `assistance_requests` rename: apply the rename migration in the deployed environment, then place one real call that confirms the summarized intake. Acceptance: exactly one row lands in `assistance_requests`, the `assistance_requests_pkey` and `assistance_requests_call_id_key` constraints exist, the `assistance_requests` RLS policy is attached and enforced, dispatcher SMS arrives with the "New assistance request" copy, and no query or write touches a `breakdown_tickets` table. Verification: live Twilio call plus SQL inspection of table name, constraints, row contents, and policy attachment in the deployed database.
 - Post-deploy smoke check for single-dispatcher authentication: after pushing the dispatcher read-access migration to the hosted Supabase project, create the one dispatcher Auth user per the README setup, confirm public sign-ups are disabled in the hosted dashboard (local `config.toml` only affects local development), and verify the account can sign in and `SELECT` from `assistance_requests` using only the public Supabase URL plus the anon/publishable key. Acceptance: anon/unauthenticated queries return no rows, the dispatcher account authenticates and reads requests, and no service-role key is used client-side. Verification: hosted Supabase dashboard steps plus a PostgREST/curl check with the anon key (zero rows) and with the dispatcher's session token (rows returned).
 - Post-deploy smoke check for demo request RLS: after pushing the demo access-RLS migration to the hosted Supabase project, verify with a real anonymous Supabase Auth session (browser or PostgREST with an anonymous access token) that read access is isolated to the caller's own valid demo session. Acceptance: an anonymous session's `SELECT` on `assistance_requests` returns exactly its own linked row and zero rows for a foreign request id; `demo_sessions` reads return only its own unexpired row; insert/update attempts on either table are rejected or match no rows; the dispatcher account still reads every row; and a demo subscriber receives only its own rows' realtime INSERT/UPDATE events (not another session's). Verification: hosted PostgREST/curl checks with an anonymous token plus a browser realtime subscription, recorded on this item.
 - Post-deploy smoke check for the Firebase Hosting dashboard deployment: after the one-time Firebase project/Hosting site setup and repository configuration (`FIREBASE_SERVICE_ACCOUNT` secret; `FIREBASE_PROJECT_ID`, `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` variables per README), trigger the `Deploy Dispatcher Dashboard` workflow and validate the production site. Acceptance: the workflow passes its configuration check, lint, build, live-channel deploy, and post-deploy HTML verification; `https://<project-id>.web.app` serves the public demo without a 404, `https://<project-id>.web.app/admin` serves the auth screen, the dispatcher account signs in, loads Active/Past sections, receives a live INSERT/UPDATE without a manual refresh, and refresh restores the same database-backed state; the served bundle contains no `service_role`, `sb_secret_`, Twilio, or OpenAI material; the Cloud Run deploy workflow still runs unchanged on the same push; the concrete production URL is recorded in the root README. Verification: workflow run link plus recorded manual browser checks against the Hosting URL on this item.

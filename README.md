@@ -7,7 +7,7 @@ An autonomous AI voice agent system built for towing companies to handle inbound
 - **Instant Intake**: Zero hold times for stranded callers, ensuring immediate and empathetic response.
 - **Voice-to-Database Pipeline**: Converts natural spoken conversations into structured, validated Supabase records using OpenAI Realtime tool-calling.
 - **Emergency Escalation**: Automatically detects hazard situations (fire, injury, trapped occupants, etc.) and transfers the call to a live human.
-- **Dispatcher Alerts**: Sends instant, structured SMS notifications to dispatchers via Twilio the second an assistance request is logged.
+- **Dispatcher Alerts**: Sends instant, structured SMS notifications to dispatchers via Twilio as soon as the caller confirms the summarized intake details.
 - **Structured Logging**: JSON-structured logs with call/session correlation IDs for traceability across services.
 
 ---
@@ -91,7 +91,6 @@ supabase db push
 This applies the migrations in `supabase/migrations/`:
 - `assistance_requests` table with all required columns
 - Row Level Security policies
-- Assistance-request insert webhook for dispatcher notifications
 - `assistance_requests` membership in the `supabase_realtime` publication (Supabase Realtime events for the dashboard)
 - `demo_sessions` table for short-lived public demo sessions (keyed phone HMAC, never plaintext) plus the optional `assistance_requests.demo_session_id` link
 
@@ -232,7 +231,7 @@ app/
   realtime/
     __init__.py
     session.py                     # OpenAI Realtime WebSocket session manager
-    tools.py                       # Tool schemas (update_assistance_request, transfer_to_emergency)
+    tools.py                       # Tool schemas (update_assistance_request, confirm_assistance_request, transfer_to_emergency)
     instructions.py                # Loads the system prompt and opening greeting
     system_prompt.md               # System prompt text fed to the OpenAI agent (markdown)
     latency.py                     # Structured latency instrumentation
@@ -287,17 +286,32 @@ Inbound PSTN Call
  normal intake        emergency branch
    |                       |
    v                       v
-create_ticket()       transfer call
-   |                       |
-   v                       v
-Supabase              Twilio Call Transfer
-   |
-   v
-Supabase INSERT Webhook
+save intake fields     transfer call
+summarize + confirm        |
+   |                       v
+   v                  Twilio Call Transfer
+Supabase
+(completed request)
    |
    v
 Dispatcher SMS (Twilio)
 ```
+
+### Intake Lifecycle
+
+```text
+valid inbound call
+→ assistance_request created (intake_status = in_progress)
+→ location, vehicle, issue saved progressively as the caller gives them
+→ all three fields present → request is ready for confirmation (still in_progress, no SMS yet)
+→ assistant verbally summarizes all three fields and asks "Is that all correct?"
+→ caller confirms (or corrects a field and confirms the re-summary)
+→ intake_status = completed → dispatcher SMS (exactly once) → fixed closing message → hang up
+```
+
+Saving all three fields never completes the intake on its own: only the caller's
+explicit confirmation (`confirm_assistance_request`) marks the request completed,
+sends the dispatcher notification, and starts the closing flow.
 
 ### Key Components
 
@@ -349,10 +363,12 @@ Once your local setup is running and Twilio is configured:
 
 1. Call your Twilio phone number
 2. The AI assistant greets you and asks for your location
-3. Provide location, vehicle details, and issue
-4. The assistant saves the assistance request and confirms
-5. Check Supabase for the new `assistance_requests` row
-6. Check your dispatcher phone for the SMS alert
+3. Provide location, vehicle details, and issue — each detail is saved as soon as you give it
+4. The assistant summarizes all three details back and asks, "Is that all correct?"
+5. Say yes to complete the intake (or correct a detail — the assistant re-summarizes and asks again)
+6. The assistant speaks the fixed closing message and the call hangs up after it finishes playing
+7. Check Supabase for the `assistance_requests` row (`intake_status` stays `in_progress` until step 5, then becomes `completed`)
+8. Check your dispatcher phone for the SMS alert — it is sent only after step 5
 
 ### Emergency Call Flow
 

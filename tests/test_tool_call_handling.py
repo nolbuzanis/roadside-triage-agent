@@ -1,4 +1,4 @@
-"""Tests for tool-call handling: handle_update_assistance_request and handle_tool_call."""
+"""Tests for tool-call handling: update (persistence) and confirm (completion) handlers."""
 
 from __future__ import annotations
 
@@ -10,8 +10,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
-from app.api.twilio import _background_tasks, handle_update_assistance_request
+from app.api.twilio import (
+    _background_tasks,
+    handle_confirm_assistance_request,
+    handle_update_assistance_request,
+)
 from app.realtime.tools import (
+    CONFIRM_ASSISTANCE_REQUEST_TOOL,
+    REALTIME_TOOLS,
     UPDATE_ASSISTANCE_REQUEST_TOOL,
     AssistanceRequestArgs,
     AssistanceRequestToolResult,
@@ -45,13 +51,49 @@ class TestUpdateAssistanceRequestToolSchema:
         assert "as soon as" in description
         assert "call again" in description
 
-    def test_description_requires_all_three_before_close(self) -> None:
+    def test_description_requires_confirmation_before_close(self) -> None:
         description = UPDATE_ASSISTANCE_REQUEST_TOOL["description"].lower()
-        assert "all three" in description
-        assert "'created'" in UPDATE_ASSISTANCE_REQUEST_TOOL["description"]
+        assert "all three fields" in description
+        assert "ready_for_confirmation" in UPDATE_ASSISTANCE_REQUEST_TOOL["description"]
+        assert "confirm_assistance_request" in UPDATE_ASSISTANCE_REQUEST_TOOL["description"]
+
+    def test_description_does_not_claim_saving_completes_the_call(self) -> None:
+        description = UPDATE_ASSISTANCE_REQUEST_TOOL["description"]
+        assert "'created'" not in description
+        assert "the call can close" not in description
 
     def test_tool_name_unchanged(self) -> None:
         assert UPDATE_ASSISTANCE_REQUEST_TOOL["name"] == "update_assistance_request"
+
+
+# ---------------------------------------------------------------------------
+# CONFIRM_ASSISTANCE_REQUEST_TOOL schema tests
+# ---------------------------------------------------------------------------
+
+
+class TestConfirmAssistanceRequestToolSchema:
+    """Tests for the model-facing confirmation tool (explicit completion)."""
+
+    def test_tool_name(self) -> None:
+        assert CONFIRM_ASSISTANCE_REQUEST_TOOL["name"] == "confirm_assistance_request"
+
+    def test_tool_requires_no_arguments(self) -> None:
+        params = CONFIRM_ASSISTANCE_REQUEST_TOOL["parameters"]
+        assert params["required"] == []
+        assert params["properties"] == {}
+
+    def test_description_requires_prior_caller_confirmation(self) -> None:
+        description = CONFIRM_ASSISTANCE_REQUEST_TOOL["description"].lower()
+        assert "verbally confirmed" in description
+        assert "never before" in description
+
+    def test_registered_alongside_update_and_emergency_tools(self) -> None:
+        names = [tool["name"] for tool in REALTIME_TOOLS]
+        assert names == [
+            "update_assistance_request",
+            "confirm_assistance_request",
+            "transfer_to_emergency",
+        ]
 
 # ---------------------------------------------------------------------------
 # AssistanceRequestArgs model tests
@@ -155,7 +197,7 @@ class TestHandleUpdateAssistanceRequest:
     }
 
     @pytest.mark.asyncio
-    async def test_valid_args_creates_ticket(self) -> None:
+    async def test_valid_args_saves_request_ready_for_confirmation(self) -> None:
         with patch(
             "app.api.twilio.create_ticket", return_value=dict(self._COMPLETE_TICKET)
         ) as mock_create:
@@ -166,10 +208,10 @@ class TestHandleUpdateAssistanceRequest:
                     arguments='{"location": "Main St", "vehicle": "Honda Civic", "issue": "Won\'t start"}',
                 )
 
-        assert result.status == "created"
+        assert result.status == "ready_for_confirmation"
         assert result.assistance_request_id == "ticket-uuid-123"
         assert result.message is not None
-        assert "close the call" in result.message
+        assert "confirmation" in result.message.lower()
         assert result.error is None
         mock_create.assert_called_once_with(
             call_id="CA_test",
@@ -178,14 +220,8 @@ class TestHandleUpdateAssistanceRequest:
             vehicle="Honda Civic",
             issue="Won't start",
         )
-        # The SMS is fired as a fire-and-forget task; let it run.
-        import asyncio as _asyncio
-
-        await _asyncio.sleep(0)
-        pending = [t for t in _background_tasks if not t.done()]
-        if pending:
-            await _asyncio.gather(*pending, return_exceptions=True)
-        mock_notify.assert_called_once()
+        # Saving all three fields never notifies the dispatcher.
+        mock_notify.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_invalid_json_arguments_returns_error(self) -> None:
@@ -233,7 +269,7 @@ class TestHandleUpdateAssistanceRequest:
         mock_notify.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_partial_save_does_not_log_intake_completed(
+    async def test_partial_save_does_not_log_completion_events(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         partial_ticket = {
@@ -259,11 +295,36 @@ class TestHandleUpdateAssistanceRequest:
             for r in caplog.records
             if r.message.startswith("{")
         ]
-        assert "intake_completed" not in events
+        assert "assistance_request_confirmed" not in events
+        assert "assistance_request_ready_for_confirmation" not in events
         assert "assistance_request_updated" in events
 
     @pytest.mark.asyncio
-    async def test_retried_completion_does_not_resend_sms(self) -> None:
+    async def test_full_save_logs_ready_for_confirmation_not_completion(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with patch(
+            "app.api.twilio.create_ticket", return_value=dict(self._COMPLETE_TICKET)
+        ):
+            with patch("app.api.twilio.notify_dispatcher"):
+                with caplog.at_level("INFO"):
+                    await handle_update_assistance_request(
+                        call_sid="CA_test",
+                        caller_phone="+15551234567",
+                        arguments='{"location": "Main St", "vehicle": "Honda Civic", "issue": "Won\'t start"}',
+                    )
+
+        events = [
+            json.loads(r.message)["event"]
+            for r in caplog.records
+            if r.message.startswith("{")
+        ]
+        assert "assistance_request_ready_for_confirmation" in events
+        assert "assistance_request_confirmed" not in events
+
+    @pytest.mark.asyncio
+    async def test_full_save_never_notifies_dispatcher(self) -> None:
+        """Even a fully populated row stays pending until the caller confirms."""
         notified_ticket = {
             "id": "ticket-uuid-4",
             "call_id": "CA_retry",
@@ -280,7 +341,7 @@ class TestHandleUpdateAssistanceRequest:
                     arguments='{"location": "A", "vehicle": "B", "issue": "C"}',
                 )
 
-        assert result.status == "created"
+        assert result.status == "ready_for_confirmation"
         mock_notify.assert_not_called()
 
     @pytest.mark.asyncio
@@ -326,7 +387,7 @@ class TestHandleUpdateAssistanceRequest:
                     arguments='{"location": "A", "vehicle": "B", "issue": "C"}',
                 )
 
-        assert result.status == "created"
+        assert result.status == "ready_for_confirmation"
         call_kwargs = mock_create.call_args[1]
         assert call_kwargs["call_id"] == "unknown"
         assert call_kwargs["caller_phone"] == "unknown"
@@ -353,10 +414,10 @@ class TestHandleUpdateAssistanceRequest:
         mock_to_thread.assert_called()
 
     @pytest.mark.asyncio
-    async def test_completion_finalizes_intake_status(
+    async def test_full_save_does_not_finalize_intake_status(
         self, _mock_complete_intake: MagicMock
     ) -> None:
-        """A completing tool call finalizes the row status via the guarded updater."""
+        """Saving all three fields must not flip the row out of the open status."""
         with patch(
             "app.api.twilio.create_ticket", return_value=dict(self._COMPLETE_TICKET)
         ):
@@ -367,8 +428,8 @@ class TestHandleUpdateAssistanceRequest:
                     arguments='{"location": "Main St", "vehicle": "Honda Civic", "issue": "Won\'t start"}',
                 )
 
-        assert result.status == "created"
-        _mock_complete_intake.assert_called_once_with(call_id="CA_test")
+        assert result.status == "ready_for_confirmation"
+        _mock_complete_intake.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_partial_save_does_not_finalize_intake_status(
@@ -394,51 +455,157 @@ class TestHandleUpdateAssistanceRequest:
         assert result.status == "updated"
         _mock_complete_intake.assert_not_called()
 
+
+# ---------------------------------------------------------------------------
+# handle_confirm_assistance_request tests
+# ---------------------------------------------------------------------------
+
+
+class TestHandleConfirmAssistanceRequest:
+    """Tests for the explicit completion tool (caller-confirmed intake)."""
+
+    _COMPLETE_ROW: ClassVar[dict] = {
+        "id": "ticket-uuid-c1",
+        "call_id": "CA_confirm",
+        "location": "Main St",
+        "vehicle": "Honda Civic",
+        "issue": "Won't start",
+        "intake_status": "in_progress",
+        "notification_status": "pending",
+    }
+
+    @staticmethod
+    async def _drain_background_tasks() -> None:
+        import asyncio as _asyncio
+
+        await _asyncio.sleep(0)
+        pending = [t for t in _background_tasks if not t.done()]
+        if pending:
+            await _asyncio.gather(*pending, return_exceptions=True)
+
     @pytest.mark.asyncio
-    async def test_retried_completion_still_finalizes_intake_status(
+    async def test_confirmation_completes_intake_and_notifies_once(
         self, _mock_complete_intake: MagicMock
     ) -> None:
-        """A retried completing call re-runs the guarded finalizer (idempotent at the DB)."""
-        notified_ticket = {
-            "id": "ticket-uuid-10",
-            "call_id": "CA_retry_status",
-            "location": "A",
-            "vehicle": "B",
-            "issue": "C",
-            "notification_status": "sent",
-        }
-        with patch("app.api.twilio.create_ticket", return_value=notified_ticket):
+        with patch(
+            "app.api.twilio.get_assistance_request", return_value=dict(self._COMPLETE_ROW)
+        ):
             with patch("app.api.twilio.notify_dispatcher") as mock_notify:
-                result = await handle_update_assistance_request(
-                    call_sid="CA_retry_status",
+                result = await handle_confirm_assistance_request(
+                    call_sid="CA_confirm",
                     caller_phone="+15551234567",
-                    arguments='{"location": "A", "vehicle": "B", "issue": "C"}',
+                )
+                await self._drain_background_tasks()
+
+        assert result.status == "confirmed"
+        assert result.assistance_request_id == "ticket-uuid-c1"
+        assert result.error is None
+        _mock_complete_intake.assert_called_once_with(call_id="CA_confirm")
+        mock_notify.assert_called_once_with(
+            call_id="CA_confirm",
+            caller_phone="+15551234567",
+            location="Main St",
+            vehicle="Honda Civic",
+            issue="Won't start",
+        )
+
+    @pytest.mark.asyncio
+    async def test_confirmation_requires_all_three_fields(
+        self, _mock_complete_intake: MagicMock
+    ) -> None:
+        partial_row = {**self._COMPLETE_ROW, "issue": None}
+        with patch("app.api.twilio.get_assistance_request", return_value=partial_row):
+            with patch("app.api.twilio.notify_dispatcher") as mock_notify:
+                result = await handle_confirm_assistance_request(
+                    call_sid="CA_confirm",
+                    caller_phone="+15551234567",
                 )
 
-        assert result.status == "created"
+        assert result.status == "incomplete"
+        _mock_complete_intake.assert_not_called()
         mock_notify.assert_not_called()
-        _mock_complete_intake.assert_called_once_with(call_id="CA_retry_status")
 
     @pytest.mark.asyncio
-    async def test_finalizes_with_unknown_call_id_fallback(
+    async def test_confirmation_without_a_row_is_incomplete(
         self, _mock_complete_intake: MagicMock
     ) -> None:
-        """Missing call_sid finalizes the same 'unknown' key the ticket was created under."""
-        mock_ticket = {
-            "id": "t1",
-            "call_id": "unknown",
-            "location": "A",
-            "vehicle": "B",
-            "issue": "C",
-            "notification_status": "pending",
+        with patch("app.api.twilio.get_assistance_request", return_value=None):
+            with patch("app.api.twilio.notify_dispatcher") as mock_notify:
+                result = await handle_confirm_assistance_request(
+                    call_sid="CA_missing",
+                    caller_phone="+15551234567",
+                )
+
+        assert result.status == "incomplete"
+        _mock_complete_intake.assert_not_called()
+        mock_notify.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_escalated_request_is_never_completed(
+        self, _mock_complete_intake: MagicMock
+    ) -> None:
+        escalated_row = {
+            **self._COMPLETE_ROW,
+            "intake_status": "escalated",
+            "status": "escalated",
         }
-        with patch("app.api.twilio.create_ticket", return_value=mock_ticket):
+        with patch("app.api.twilio.get_assistance_request", return_value=escalated_row):
+            with patch("app.api.twilio.notify_dispatcher") as mock_notify:
+                result = await handle_confirm_assistance_request(
+                    call_sid="CA_confirm",
+                    caller_phone="+15551234567",
+                )
+
+        assert result.status == "escalated"
+        _mock_complete_intake.assert_not_called()
+        mock_notify.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_duplicate_confirmation_does_not_resend_sms(
+        self, _mock_complete_intake: MagicMock
+    ) -> None:
+        already_notified = {**self._COMPLETE_ROW, "notification_status": "sent"}
+        with patch(
+            "app.api.twilio.get_assistance_request", return_value=already_notified
+        ):
+            with patch("app.api.twilio.notify_dispatcher") as mock_notify:
+                result = await handle_confirm_assistance_request(
+                    call_sid="CA_confirm",
+                    caller_phone="+15551234567",
+                )
+                await self._drain_background_tasks()
+
+        # Idempotent success: the guarded finalizer re-runs, the SMS does not.
+        assert result.status == "confirmed"
+        mock_notify.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_confirmation_fetch_failure_returns_safe_error(self) -> None:
+        with patch(
+            "app.api.twilio.get_assistance_request",
+            side_effect=RuntimeError("sensitive internal detail"),
+        ):
+            result = await handle_confirm_assistance_request(
+                call_sid="CA_confirm",
+                caller_phone="+15551234567",
+            )
+
+        assert result.status == "error"
+        assert "sensitive internal detail" not in result.model_dump_json()
+
+    @pytest.mark.asyncio
+    async def test_missing_call_sid_falls_back_to_unknown(
+        self, _mock_complete_intake: MagicMock
+    ) -> None:
+        mock_row = {**self._COMPLETE_ROW, "call_id": "unknown"}
+        with patch("app.api.twilio.get_assistance_request", return_value=mock_row) as mock_get:
             with patch("app.api.twilio.notify_dispatcher"):
-                result = await handle_update_assistance_request(
+                result = await handle_confirm_assistance_request(
                     call_sid="",
                     caller_phone="",
-                    arguments='{"location": "A", "vehicle": "B", "issue": "C"}',
                 )
+                await self._drain_background_tasks()
 
-        assert result.status == "created"
+        assert result.status == "confirmed"
+        mock_get.assert_called_once_with(call_id="unknown")
         _mock_complete_intake.assert_called_once_with(call_id="unknown")

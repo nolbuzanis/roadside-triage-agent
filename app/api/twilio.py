@@ -26,6 +26,7 @@ from app.services.tickets import (
     abandon_if_open,
     complete_intake,
     create_ticket,
+    get_assistance_request,
     is_intake_complete,
     link_demo_session,
     start_assistance_request,
@@ -94,24 +95,99 @@ async def handle_update_assistance_request(
             message="Intake details saved.",
         )
 
+    # All three fields are persisted, but saving is not completion: the intake
+    # stays open until the caller verbally confirms the summary (see
+    # handle_confirm_assistance_request). No lifecycle write, no SMS, and no
+    # closing flow happen here.
     logger.info(
-        "intake_completed",
+        "assistance_request_ready_for_confirmation",
         call_sid=call_sid,
         assistance_request_id=request.get("id"),
     )
+    return AssistanceRequestToolResult(
+        status="ready_for_confirmation",
+        assistance_request_id=request.get("id"),
+        message="All intake details saved. Summarize them to the caller and wait for confirmation.",
+    )
 
-    # Finalize the intake lifecycle status alongside the completion path.
-    # Guarded update: open rows become completed, abandoned rows self-heal
-    # (backfill-in-flight calls), and escalated/completed are never touched.
-    await asyncio.to_thread(complete_intake, call_id=call_sid or "unknown")
 
-    # Completion-gated SMS: fire only while notification_status is still pending
-    # so a retried completing call never re-sends.
+async def handle_confirm_assistance_request(
+    *,
+    call_sid: str | None,
+    caller_phone: str | None,
+) -> AssistanceRequestToolResult:
+    """Complete an intake the caller has verbally confirmed.
+
+    The model supplies no intake data: the current assistance-request row is
+    read back for this call, all three required fields are verified, the
+    intake lifecycle is finalized idempotently, and the dispatcher
+    notification fires exactly once (gated on notification_status). An
+    incomplete or escalated request is never completed.
+    """
+    call_id = call_sid or "unknown"
+    logger.info(
+        "assistance_request_confirmation_requested",
+        call_sid=call_sid,
+    )
+
+    try:
+        request = await asyncio.to_thread(get_assistance_request, call_id=call_id)
+    except Exception:
+        logger.exception(
+            "Failed to load assistance request for confirmation", call_sid=call_sid
+        )
+        return AssistanceRequestToolResult(
+            status="error", error="Unable to confirm the assistance request"
+        )
+
+    if request is None:
+        logger.info(
+            "assistance_request_confirmation_incomplete",
+            call_sid=call_sid,
+            assistance_request_id=None,
+        )
+        return AssistanceRequestToolResult(
+            status="incomplete",
+            message="No assistance request found for this call.",
+        )
+
+    if not is_intake_complete(request):
+        logger.info(
+            "assistance_request_confirmation_incomplete",
+            call_sid=call_sid,
+            assistance_request_id=request.get("id"),
+        )
+        return AssistanceRequestToolResult(
+            status="incomplete",
+            assistance_request_id=request.get("id"),
+            message="Location, vehicle, and issue are all required before confirmation.",
+        )
+
+    if request.get("intake_status") == "escalated" or request.get("status") == "escalated":
+        # An emergency escalation owns the call; confirmation must never
+        # override it or start the normal closing flow.
+        logger.info(
+            "assistance_request_confirmation_escalated",
+            call_sid=call_sid,
+            assistance_request_id=request.get("id"),
+        )
+        return AssistanceRequestToolResult(
+            status="escalated",
+            assistance_request_id=request.get("id"),
+            message="An emergency transfer owns this call; the intake was not completed.",
+        )
+
+    # Guarded update: open rows become completed, abandoned rows self-heal,
+    # and escalated/completed are never touched (idempotent on retries).
+    await asyncio.to_thread(complete_intake, call_id=call_id)
+
+    # Confirmation-gated SMS: fire only while notification_status is still
+    # pending so a duplicate/retried confirmation never re-sends.
     if request.get("notification_status") == "pending":
         task = asyncio.create_task(
             asyncio.to_thread(
                 notify_dispatcher,
-                call_id=call_sid or "unknown",
+                call_id=call_id,
                 caller_phone=caller_phone or "unknown",
                 location=str(request.get("location") or ""),
                 vehicle=str(request.get("vehicle") or ""),
@@ -122,10 +198,15 @@ async def handle_update_assistance_request(
         _background_tasks.add(task)
         task.add_done_callback(_background_tasks.discard)
 
-    return AssistanceRequestToolResult(
-        status="created",
+    logger.info(
+        "assistance_request_confirmed",
+        call_sid=call_sid,
         assistance_request_id=request.get("id"),
-        message="Assistance request saved successfully. You may now close the call.",
+    )
+    return AssistanceRequestToolResult(
+        status="confirmed",
+        assistance_request_id=request.get("id"),
+        message="Assistance request confirmed by the caller.",
     )
 
 
@@ -634,6 +715,13 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                 arguments=arguments,
             )
             return request_result.model_dump_json()
+
+        if func_name == "confirm_assistance_request":
+            confirmation_result = await handle_confirm_assistance_request(
+                call_sid=call_sid,
+                caller_phone=caller_phone,
+            )
+            return confirmation_result.model_dump_json()
 
         if func_name == "transfer_to_emergency":
             transfer_result = await handle_transfer_to_emergency(
