@@ -233,7 +233,8 @@ app/
     __init__.py
     session.py                     # OpenAI Realtime WebSocket session manager
     tools.py                       # Tool schemas (update_assistance_request, transfer_to_emergency)
-    instructions.py                # System prompt and opening greeting
+    instructions.py                # Loads the system prompt and opening greeting
+    system_prompt.md               # System prompt text fed to the OpenAI agent (markdown)
     latency.py                     # Structured latency instrumentation
   core/
     __init__.py
