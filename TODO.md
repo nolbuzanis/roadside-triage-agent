@@ -59,6 +59,129 @@ Twilio owns PSTN calling and dispatcher SMS.
 
 ---
 
+# Demo Ready
+
+The highest-priority items gating the demo (other demo-visible follow-ups remain in Post-MVP → P1). Open items are listed in the order they should be worked; the completed production-wiring item is retained here for the record.
+
+## P1 — Cancel a create-in-flight response when the caller interrupts
+
+`input_audio_buffer.speech_started` arriving after `response.create` is sent but before `response.created` is observed sends no `response.cancel` (the app is the sole cancellation authority with `interrupt_response: False`), so a response created in that brief window can keep speaking over the caller.
+
+- Track the outstanding `response.create` so a `speech_started` arriving before `response.created` can cancel the pending/just-created response
+- Drop the cancelled response's audio deltas instead of forwarding them to Twilio
+- Send no `response.cancel` when no create is pending, and none when a create fails server-side
+- Keep normal turn-taking, greeting, and closing flows unchanged
+
+### Acceptance Criteria
+
+- Caller speech in the create-in-flight window cancels the pending/just-created response and its audio deltas are not forwarded
+- No spurious `response.cancel` when no create is pending or when a create fails server-side
+- Normal turn-taking, greeting, and closing flows are unchanged
+- A unit test drives the exact interleaving (`response.create` sent → `speech_started` → `response.created`) and asserts the cancel targets the pending response
+- Existing interruption, greeting, and closing suites pass
+
+### Dependencies
+
+- P0 — Make caller interruption stop assistant speech immediately
+
+### Status
+
+- [ ] Not started
+
+## P1 — Claim the dispatcher-SMS notification atomically and retry failed sends
+
+The `notification_status == "pending"` guard is check-then-act, so a duplicate completing tool call arriving while the SMS task is still in flight (or after a swallowed `update_notification_status` failure) can double-send, and a `failed` status is permanently suppressed with no recovery.
+
+- Claim the row with a conditional update before sending: only a row still in its pre-send state wins the claim
+- Exactly one claim winner fires `notify_dispatcher`; a losing concurrent duplicate still returns `status = "created"` without sending
+- Add a defined retry path that re-attempts `failed` sends, while a `sent` row is never re-sent
+
+### Acceptance Criteria
+
+- Two concurrent completing handler calls produce exactly one SMS
+- A claim-lost duplicate returns `status = "created"` without sending
+- A `failed` notification can be retried; a `sent` row is never re-sent
+- Unit tests drive the concurrent claim, claim-lost, and failed-then-retry paths
+- Existing completion-gating and retry tests still pass
+
+### Dependencies
+
+- P0 — Make persistence partial-safe with completion-gated notification
+
+### Status
+
+- [ ] Not started
+
+## P1 — Open the greeting gate when no greeting response will ever complete
+
+With `create_response: False`, `_greeting_response_done` only flips on a first `response.done`, so `greeting=""` (or a silently failed greeting `response.create`) leaves the session permanently deaf to caller turns.
+
+- With no greeting configured, allow the first caller commit to create a response
+- If the configured greeting response never arrives within a bounded time, fall back so later caller turns still get responses
+- Keep the normal greeting path unchanged when the greeting response completes
+
+### Acceptance Criteria
+
+- With `greeting=""`, the first caller commit creates a response
+- A greeting response that never arrives within a bounded time does not leave the session permanently deaf
+- The configured-greeting happy path is unchanged
+- Unit tests cover the empty-greeting first turn and the greeting-timeout/fallback path
+
+### Dependencies
+
+- none
+
+### Status
+
+- [ ] Not started
+
+## P1 — Wire the demo-session start flow into the deployed frontend
+
+Inject `VITE_API_BASE_URL` (the backend base URL) into the `deploy-frontend.yml` build, and configure the backend's `FRONTEND_ORIGINS` with the Firebase Hosting origin so the browser can call `POST /api/v1/demo-sessions` cross-origin.
+
+- Workflow wiring landed in `feat/wire-prod-demo-origin-variables` (config checks + value passing in both deploy workflows)
+- Repository variables `VITE_API_BASE_URL` and `FRONTEND_ORIGINS` set, backend and frontend redeployed
+- Production preflight and `startDemoSession` checks verified live
+
+### Acceptance Criteria
+
+- The production frontend build receives `VITE_API_BASE_URL` and the config check fails without it
+- A cross-origin preflight and POST from the Hosting origin succeed against the deployed backend; an unlisted origin is denied
+- `startDemoSession` against production no longer raises the missing-`VITE_API_BASE_URL` error
+
+### Dependencies
+
+- P1 — Deploy the dispatcher dashboard to Firebase Hosting
+
+### Status
+
+- [x] Completed — workflow wiring in `feat/wire-prod-demo-origin-variables`; production variables set, backend and frontend redeployed, and the preflight / `startDemoSession` checks verified in prod
+
+## P1 — Reuse or cancel the superseded early OpenAI connection on duplicate voice webhooks
+
+A second webhook currently overwrites `_pending_connections[call_sid]`, orphaning the first `connection_task` (and the realtime session/WebSocket it creates), which is never awaited, cancelled, or closed.
+
+- A retried/duplicate voice webhook for a call with a pending or live early connection must not leak the superseded task or session
+- The media stream must still consume exactly one live connection
+
+### Acceptance Criteria
+
+- A duplicate webhook does not leak the superseded connection task or its realtime session/WebSocket
+- The media stream still consumes exactly one live connection
+- Exactly one entry remains in `_pending_connections` for the call
+- A unit test issues two webhook posts for the same `CallSid` and asserts the first task is cancelled/closed (or reused)
+- Existing early-connection and webhook suites still pass
+
+### Dependencies
+
+- none
+
+### Status
+
+- [ ] Not started
+
+---
+
 # Bugs
 
 ## P0 — Make caller interruption stop assistant speech immediately
@@ -1172,11 +1295,8 @@ The MVP is complete when all of the following work:
 - Suppress `response.create` for spurious post-greeting input (transcription-based filtering): enable input audio transcription and gate `caller_turn_complete` responses on the committed turn's transcript so empty/filler-only commits (call-setup noise or greeting echo) do not trigger an assistant response. Acceptance: a commit with no speech does not create a response; a commit with real speech creates exactly one. Verification: unit tests feed `conversation.item.input_audio_transcription.completed` with empty vs real transcripts and assert `response.create` counts
 - Live end-to-end regression check: place a real call and verify the agent speaks exactly one fixed greeting and then stays silent until the caller speaks (no immediate "OK, let's get some information..."). Acceptance: for N test calls, no unsolicited second response before caller speech. Verification: manual telephony test against prod/staging using the new `response_create_sent` + `input_audio_buffer.*` structured logs
 - Add a handler-level test for `twilio_media_stream` that drives the `start` event and asserts `process_events` is started exactly once on the early-success, early-failure-fallback, and no-early-connection paths. Acceptance: no path starts two concurrent `process_events` readers and no task is orphaned when early setup fails after task creation. Verification: unit test with a mocked `RealtimeSession` counting `asyncio.create_task(session.process_events)` calls per path
-- Open the greeting gate when no greeting response will ever complete: with `create_response: False`, `_greeting_response_done` only flips on a first `response.done`, so `greeting=""` (or a silently failed greeting `response.create`) leaves the session permanently deaf to caller turns. Acceptance: with no greeting configured the first caller commit creates a response; if the greeting response never arrives within a bounded time, later caller turns still get responses. Verification: unit tests for the empty-greeting first turn and a greeting-timeout/fallback path
 - Pass OpenAI `session_id` to `create_ticket()` for troubleshooting correlation
-- Claim the dispatcher-SMS notification atomically before sending, and add a retry path for failed sends: the current `notification_status == "pending"` guard is check-then-act, so a duplicate completing tool call arriving while the SMS task is still in flight (or after a swallowed `update_notification_status` failure) can double-send, and a `failed` status is permanently suppressed with no recovery. Acceptance: the completing handler claims the row with a conditional update (only a row still in its pre-send state wins the claim); exactly one claim winner fires `notify_dispatcher`; a losing concurrent duplicate still returns `status = "created"` without sending; a defined retry can re-attempt `failed` sends while a `sent` row is never re-sent. Verification: unit tests drive two concurrent completing handler calls against a mocked claim and assert exactly one SMS, plus claim-lost and failed-then-retry path tests; the existing completion-gating and retry tests still pass.
 - Harden tests for partial-safe persistence: assert the completion-path SMS payload is read from the merged ticket row rather than the raw tool arguments, and cover the duplicate-insert race where the post-23505 re-select unexpectedly returns no row. Acceptance: a handler test with partial-but-completing args asserts `notify_dispatcher` receives the merged row's location/vehicle/issue; a persistence test forces an insert unique violation followed by an empty re-select and asserts the original API error propagates. Verification: `python -m pytest tests/test_tool_call_handling.py tests/test_ticket_persistence.py -v` passes with the new tests alongside the existing suites.
-- Make duplicate voice webhooks for the same `CallSid` reuse or safely cancel-and-replace the pending early OpenAI connection: a second webhook currently overwrites `_pending_connections[call_sid]`, orphaning the first `connection_task` (and the realtime session/WebSocket it creates), which is never awaited, cancelled, or closed. Acceptance: a retried/duplicate voice webhook for a call with a pending or live early connection does not leak the superseded task or session; the media stream still consumes exactly one live connection. Verification: unit test issues two webhook posts for the same `CallSid` and asserts the first connection task is cancelled/closed (or reused) while exactly one entry remains in `_pending_connections`; existing early-connection and webhook suites still pass.
 - Recover from a timed-out early assistance-request insert so no row is stuck open: `start_assistance_request` is bounded by the voice-webhook timeout, but the underlying insert thread can still commit `in_progress` after the terminal status callback (or teardown) has already run its no-op finalization, leaving an open row with no further Twilio events coming. Acceptance: a row whose insert commits after its call reached a terminal status still ends non-open — either the resolved insert re-checks a recorded terminal-status receipt for that `call_sid`, or the status-callback path retries briefly when the row does not exist yet. Verification: unit tests drive a stalled insert resolving after `abandon_if_open` ran and assert the row is finalized; the early-connection, webhook, and status-callback suites still pass.
 - Lock the status no-overwrite guards against Supabase client regressions: `complete_intake` and `abandon_if_open` rely on `.update().eq().in_()` serialization, but today that is only asserted through mocked call chains, so a client-library change to filter encoding would go unnoticed. Acceptance: a test exercises the real postgrest query construction used by both finalizers (generated request path/filters asserted, or executed against an available Supabase/PostgREST instance) and proves `completed`/`escalated` rows are excluded while open rows match. Verification: `python -m pytest tests/ -v` passes with the new test; it skips cleanly when no live database is available, matching the migration-test convention.
 - Dispatcher assistance-request dashboard
@@ -1193,9 +1313,7 @@ The MVP is complete when all of the following work:
 - Call/transcript audit tooling
 - Authentication for dispatcher-facing interfaces
 - Cost and usage monitoring per call
-- Cancel a create-in-flight response when the caller interrupts: `input_audio_buffer.speech_started` arriving after `response.create` is sent but before `response.created` is observed sends no `response.cancel` (the app is the sole cancellation authority with `interrupt_response: False`), so a response created in that brief window can keep speaking over the caller until it finishes. Acceptance: caller speech in the create-in-flight window still cancels the pending/just-created response and drops its audio deltas, with no spurious `response.cancel` when no create is pending or when a create fails server-side; normal turn-taking, greeting, and closing flows unchanged. Verification: a unit test drives the exact interleaving (`response.create` sent → `speech_started` → `response.created`) and asserts a cancel targets the pending response and its deltas are not forwarded; the existing interruption, greeting, and closing suites still pass.
 - Live telephony regression check for caller barge-in audibility: unit tests prove `response.cancel` + Twilio `clear` + delta suppression at the message layer, but not audible silence through Twilio's real media buffer. Acceptance: for N test calls, talking over the assistant mid-sentence silences it immediately, the caller can finish a correction without being talked over, and exactly one assistant reply follows the completed turn. Verification: manual call correlating `caller_interruption_detected` → `twilio_playback_cleared` → a single `response_create_sent` in the structured logs, recorded on this item.
-- Wire the demo-session start flow into the deployed frontend before the public demo UI ships: inject `VITE_API_BASE_URL` (the backend base URL) into the `deploy-frontend.yml` build, and configure the backend's `FRONTEND_ORIGINS` with the Firebase Hosting origin so the browser can call `POST /api/v1/demo-sessions` cross-origin. Acceptance: the production frontend build receives `VITE_API_BASE_URL` (config check fails without it), a cross-origin preflight and POST from the Hosting origin succeed against the deployed backend, and an unlisted origin is denied. Verification: workflow config shows the build-time variable; curl sends an OPTIONS preflight with the Hosting `Origin` and receives the allow headers while a random origin does not; `startDemoSession` against production no longer raises the missing-`VITE_API_BASE_URL` error. Status: workflow wiring implemented in `feat/wire-prod-demo-origin-variables` (config checks + value passing in both deploy workflows); remaining: set the `VITE_API_BASE_URL` and `FRONTEND_ORIGINS` repository variables, redeploy backend and frontend, then record the curl preflight and `startDemoSession` checks above.
 - Add automated coverage for the deploy workflows' configuration checks: parse `.github/workflows/deploy-production.yml` and `deploy-frontend.yml` with PyYAML, extract each `Verify required configuration` `run:` script exactly as GitHub de-indents it, and execute it against valid and invalid fixture values (multi-origin `FRONTEND_ORIGINS` lists with spaces and ports; missing scheme, path, trailing slash, credentials, `@`/`?`/`#`, blank and comma-only values; scheme-less, host-less, and empty `VITE_API_BASE_URL`; the existing `sb_secret_` and `service_role` key rejections). Acceptance: the suite passes on current main and fails when a check regresses (e.g. a comma-only origin list accepted, or `VITE_API_BASE_URL` dropped from the build-step env); PyYAML is available to the test run (declare it in `requirements-dev.txt` if it is only a transitive dependency). Verification: `python -m pytest tests/test_workflow_config_checks.py -v` passes, a deliberately weakened check makes it fail, and the existing suites still pass.
 - Enforce at-most-one claimed demo session per Twilio call with a partial unique index on `demo_sessions.call_id`, and treat a duplicate-claim race as claim-lost: `call_id` has no unique constraint today (only the both-null/both-non-null check), so two truly concurrent duplicate voice webhooks for the same `CallSid` can each win a different session's guarded claim when the phone has 2+ active sessions, orphaning one claimed session. Acceptance: a partial unique index (`where call_id is not null`) applies cleanly over existing data; concurrent claim attempts for one `call_id` yield exactly one claimed session with the loser handled as claim-lost (no unhandled error); sequential duplicate webhooks remain idempotent; assistance-request linking behavior is unchanged. Verification: migration test asserts the partial unique index exists and a second row with the same non-null `call_id` is rejected; unit test forces SQLSTATE 23505 from the claim path and asserts the service returns claim-lost/None without raising; `python -m pytest tests/test_demo_session_matching.py tests/test_demo_sessions.py tests/test_migration_create_demo_sessions.py -v` passes.
 - Recover a claimed demo session left unlinked when the assistance-request row is missing at claim time: if `start_assistance_request` failed or timed out (including a late-committing insert), `link_demo_session` matches zero rows — logged as a warning only — and the session stays unlinked unless a later duplicate webhook happens to re-run matching. Acceptance: a session claimed for a call eventually links to that call's assistance request once the row exists (e.g. a guarded link retry from media-stream start or the Twilio status-callback path); an already-set `demo_session_id` is never overwritten; non-demo calls are unaffected. Verification: unit test drives claim → missing-row link → row appears → retry and asserts exactly one link lands; the matching, webhook, status-callback, and closing-flow suites still pass.
@@ -1557,7 +1675,7 @@ Allow a visitor to start a demo without creating a permanent account.
 
 ### Status
 
-- [x] Completed in `feat/secure-demo-session-start-flow` PR (automated verification passed: endpoint/auth/phone/response-safety tests, full backend suite, ruff, mypy, frontend oxlint + strict `tsc` build, bundle secret scan — live browser smoke deferred to the public demo UI TODO and the deployed-flow wiring TODO in Post-MVP → P1)
+- [x] Completed in `feat/secure-demo-session-start-flow` PR (automated verification passed: endpoint/auth/phone/response-safety tests, full backend suite, ruff, mypy, frontend oxlint + strict `tsc` build, bundle secret scan — live browser smoke deferred to the public demo UI TODO and the deployed-flow wiring TODO in `# Demo Ready`)
 
 ---
 
