@@ -179,6 +179,191 @@ class TestActiveResponseCancellation:
 
 
 # ---------------------------------------------------------------------------
+# Cancellation of a response whose response.create is still in flight
+# ---------------------------------------------------------------------------
+
+
+class TestCreateInFlightCancellation:
+    async def test_speech_started_cancels_create_in_flight_response(self) -> None:
+        session = _make_session(greeting="Hello there!")
+        ws = await _connect_session(session)
+        assert len(_response_creates(ws)) == 1
+
+        await session._handle_event({"type": "input_audio_buffer.speech_started"})
+        assert _response_cancels(ws) == []
+
+        await _start_response(session, "resp_greeting_in_flight")
+
+        cancels = _response_cancels(ws)
+        assert len(cancels) == 1
+        assert cancels[0]["response_id"] == "resp_greeting_in_flight"
+
+    async def test_in_flight_cancel_is_logged_with_pending_response_id(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        session = _make_session(greeting="Hello there!", call_sid="CA_in_flight_log")
+        await _connect_session(session)
+
+        with caplog.at_level("INFO"):
+            await session._handle_event({"type": "input_audio_buffer.speech_started"})
+            await _start_response(session, "resp_in_flight_log")
+
+        entries = _events_named(caplog, "caller_interruption_detected")
+        assert len(entries) == 1
+        assert entries[0]["call_sid"] == "CA_in_flight_log"
+        assert entries[0]["response_id"] == "resp_in_flight_log"
+        assert entries[0]["response_cancel_sent"] is True
+        assert entries[0]["create_in_flight"] is True
+
+    async def test_in_flight_cancelled_response_drops_audio_deltas(self) -> None:
+        on_audio_delta = AsyncMock()
+        session = _make_session(greeting="Hello there!", on_audio_delta=on_audio_delta)
+        await _connect_session(session)
+
+        await session._handle_event({"type": "input_audio_buffer.speech_started"})
+        await _start_response(session, "resp_greeting_drop")
+        await session._handle_event({
+            "type": "response.output_audio.delta",
+            "delta": "audio_stale",
+        })
+
+        on_audio_delta.assert_not_awaited()
+        assert session._interrupted_response_id == "resp_greeting_drop"
+
+        await _finish_response(session, "resp_greeting_drop", "cancelled")
+        await session._handle_event({
+            "type": "response.output_audio.delta",
+            "delta": "audio_next",
+        })
+        on_audio_delta.assert_awaited_once_with("audio_next")
+
+    async def test_repeated_speech_before_created_sends_single_cancel(self) -> None:
+        on_clear_playback = AsyncMock()
+        session = _make_session(greeting="Hello there!", on_clear_playback=on_clear_playback)
+        ws = await _connect_session(session)
+
+        await session._handle_event({"type": "input_audio_buffer.speech_started"})
+        await session._handle_event({"type": "input_audio_buffer.speech_started"})
+        await _start_response(session, "resp_in_flight_once")
+        await session._handle_event({"type": "input_audio_buffer.speech_started"})
+
+        cancels = _response_cancels(ws)
+        assert len(cancels) == 1
+        assert cancels[0]["response_id"] == "resp_in_flight_once"
+        assert on_clear_playback.call_count == 3
+
+    async def test_no_cancel_when_no_create_is_pending(self) -> None:
+        session = _make_session()
+        ws = await _connect_session(session)
+        await _open_greeting_gate(session)
+
+        await session._handle_event({"type": "input_audio_buffer.speech_started"})
+        await _start_response(session, "resp_untracked")
+
+        assert _response_cancels(ws) == []
+
+    async def test_server_side_create_failure_sends_no_cancel(self) -> None:
+        session = _make_session(greeting="Hello there!")
+        ws = await _connect_session(session)
+
+        await session._handle_event({
+            "type": "error",
+            "error": {"code": "invalid_response_create", "message": "create failed"},
+        })
+        await session._handle_event({"type": "input_audio_buffer.speech_started"})
+
+        assert _response_cancels(ws) == []
+
+    async def test_create_failure_after_speech_started_sends_no_cancel(self) -> None:
+        session = _make_session(greeting="Hello there!")
+        ws = await _connect_session(session)
+
+        await session._handle_event({"type": "input_audio_buffer.speech_started"})
+        await session._handle_event({
+            "type": "error",
+            "error": {"code": "invalid_response_create", "message": "create failed"},
+        })
+        await _start_response(session, "resp_after_failure")
+
+        assert _response_cancels(ws) == []
+
+    async def test_failed_create_send_does_not_arm_pending_cancel(self) -> None:
+        session = _make_session()
+        ws = await _connect_session(session)
+        await _open_greeting_gate(session)
+
+        ws.send.side_effect = RuntimeError("send failed")
+        await session._handle_event({
+            "type": "input_audio_buffer.committed",
+            "item_id": "item_send_failure",
+        })
+        ws.send.side_effect = None
+
+        await session._handle_event({"type": "input_audio_buffer.speech_started"})
+        await _start_response(session, "resp_unsent")
+
+        assert _response_cancels(ws) == []
+
+    async def test_foreign_done_does_not_disarm_in_flight_cancel(self) -> None:
+        session = _make_session()
+        ws = await _connect_session(session)
+        await _open_greeting_gate(session)
+
+        await session._handle_event({
+            "type": "input_audio_buffer.committed",
+            "item_id": "item_first_turn",
+        })
+        await _start_response(session, "resp_first")
+        await session._handle_event({"type": "input_audio_buffer.speech_started"})
+        assert len(_response_cancels(ws)) == 1
+
+        await session._handle_event({
+            "type": "input_audio_buffer.committed",
+            "item_id": "item_second_turn",
+        })
+        await _finish_response(session, "resp_first", "cancelled")
+
+        await session._handle_event({"type": "input_audio_buffer.speech_started"})
+        await _start_response(session, "resp_second")
+
+        cancels = _response_cancels(ws)
+        assert len(cancels) == 2
+        assert cancels[1]["response_id"] == "resp_second"
+
+    async def test_in_flight_cancel_targets_closing_response_keeping_state(self) -> None:
+        session = _make_session()
+        ws = await _connect_session(session)
+
+        session.on_tool_call = AsyncMock(
+            return_value='{"status": "created", "assistance_request_id": "tkt_1"}'
+        )
+        await session._handle_function_call({
+            "call_id": "call_close_in_flight",
+            "type": "function_call",
+            "name": "update_assistance_request",
+            "arguments": '{"location":"A","vehicle":"B","issue":"C"}',
+        })
+        assert len(_response_creates(ws)) == 1
+
+        await session._handle_event({"type": "input_audio_buffer.speech_started"})
+        assert _response_cancels(ws) == []
+
+        await _start_response(session, "resp_closing_in_flight")
+
+        cancels = _response_cancels(ws)
+        assert len(cancels) == 1
+        assert cancels[0]["response_id"] == "resp_closing_in_flight"
+        assert session.closing_response_id == "resp_closing_in_flight"
+        assert session.closing_response_started is True
+        assert session.closing_response_completed is False
+        assert session.hangup_started is False
+
+        await _finish_response(session, "resp_closing_in_flight", "cancelled")
+        assert session.closing_response_completed is False
+        assert session.hangup_started is False
+
+
+# ---------------------------------------------------------------------------
 # Twilio playback clearing
 # ---------------------------------------------------------------------------
 
