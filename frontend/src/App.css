@@ -1104,6 +1104,8 @@ body:has(.demo-screen) {
   display: flex;
   flex-direction: column;
   gap: 18px;
+  max-height: 420px;
+  overflow-y: auto;
 }
 
 .transcript-head {

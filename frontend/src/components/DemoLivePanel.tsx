@@ -1,5 +1,10 @@
-import type { AssistanceRequest, IntakeStatus } from '../types'
+import { useEffect, useRef } from 'react'
+import type { AssistanceRequest, IntakeStatus, TranscriptTurn } from '../types'
 import { fieldValue } from '../lib/requestFields'
+import {
+  STATUS_INDICATOR,
+  type RealtimeStatus,
+} from '../lib/realtimeStatus'
 import { SPEAKING_BARS, WAVEFORM_BARS } from '../lib/waveform'
 import { CarIcon, CheckIcon, PinIcon, WrenchIcon } from './icons'
 
@@ -11,32 +16,17 @@ const STEPS = [
   'Request complete',
 ]
 
-const TRANSCRIPT = [
-  {
-    speaker: 'AI Agent',
-    time: '00:28',
-    text: 'Thanks. Just to confirm, is that at Great Northern Way and Clark Drive in Vancouver?',
-    agent: true,
-  },
-  {
-    speaker: 'You',
-    time: '00:36',
-    text: "Yes, that's correct.",
-    agent: false,
-  },
-  {
-    speaker: 'AI Agent',
-    time: '00:39',
-    text: 'Got it. And is it a flat tire on your RAV4?',
-    agent: true,
-  },
-  {
-    speaker: 'You',
-    time: '00:42',
-    text: 'Yes, the front right tire.',
-    agent: false,
-  },
-]
+function formatElapsed(createdAt: string, originMs: number | null): string {
+  const turnMs = Date.parse(createdAt)
+  const baseMs =
+    originMs !== null && Number.isFinite(originMs) ? originMs : turnMs
+  const elapsedSeconds = Number.isFinite(turnMs)
+    ? Math.max(0, Math.floor((turnMs - baseMs) / 1000))
+    : 0
+  const minutes = Math.floor(elapsedSeconds / 60)
+  const seconds = elapsedSeconds % 60
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+}
 
 interface StepperState {
   activeIndex: number
@@ -90,12 +80,32 @@ const CARDS = [
 
 export default function DemoLivePanel({
   request,
+  transcripts,
+  realtimeStatus,
 }: {
   request: AssistanceRequest | null
+  transcripts: TranscriptTurn[]
+  realtimeStatus: RealtimeStatus
 }) {
   const connected = request !== null
   const intakeStatus: IntakeStatus = request ? request.intake_status : 'in_progress'
   const { activeIndex, completedCount } = stepperState(request)
+  const indicator = STATUS_INDICATOR[realtimeStatus]
+  const callStartMs = request ? Date.parse(request.created_at) : null
+  const originMs =
+    callStartMs !== null && Number.isFinite(callStartMs)
+      ? callStartMs
+      : transcripts.length > 0
+        ? Date.parse(transcripts[0].created_at)
+        : null
+  const listRef = useRef<HTMLOListElement | null>(null)
+
+  useEffect(() => {
+    const list = listRef.current
+    if (list) {
+      list.scrollTop = list.scrollHeight
+    }
+  }, [transcripts.length])
 
   return (
     <section className="preview-panel">
@@ -191,26 +201,45 @@ export default function DemoLivePanel({
           </ol>
         </div>
 
-        <aside className="live-transcript" aria-label="Sample transcript">
-          <p className="preview-eyebrow">SAMPLE TRANSCRIPT</p>
-          <p className="transcript-note">
-            Example conversation — your live call isn&apos;t transcribed here.
+        <aside className="live-transcript" aria-label="Live transcript">
+          <p className="preview-eyebrow">LIVE TRANSCRIPT</p>
+          <p className="transcript-note" role="status">
+            <span className={indicator.className}>{indicator.label}</span>
+            {transcripts.length === 0
+              ? connected
+                ? ' — Listening, turns appear here as you talk.'
+                : ' — Call the demo number, your conversation appears here.'
+              : ` — ${transcripts.length} turn${transcripts.length === 1 ? '' : 's'}`}
           </p>
-          <ol className="transcript-list" role="list">
-            {TRANSCRIPT.map((entry) => (
-              <li
-                key={entry.time}
-                className={entry.agent ? 'transcript-entry' : 'transcript-entry you'}
-              >
-                <div className="transcript-head">
-                  <span className="transcript-dot" aria-hidden="true" />
-                  <span className="transcript-speaker">{entry.speaker}</span>
-                  <span className="transcript-time">{entry.time}</span>
-                </div>
-                <p className="transcript-text">{entry.text}</p>
-              </li>
-            ))}
-          </ol>
+          {transcripts.length === 0 ? (
+            <p className="transcript-note">
+              {connected
+                ? 'Waiting for speech — nothing heard yet.'
+                : 'No conversation yet.'}
+            </p>
+          ) : (
+            <ol className="transcript-list" role="list" ref={listRef}>
+              {transcripts.map((entry) => (
+                <li
+                  key={entry.id}
+                  className={
+                    entry.speaker === 'AI Agent'
+                      ? 'transcript-entry'
+                      : 'transcript-entry you'
+                  }
+                >
+                  <div className="transcript-head">
+                    <span className="transcript-dot" aria-hidden="true" />
+                    <span className="transcript-speaker">{entry.speaker}</span>
+                    <span className="transcript-time">
+                      {formatElapsed(entry.created_at, originMs)}
+                    </span>
+                  </div>
+                  <p className="transcript-text">{entry.text}</p>
+                </li>
+              ))}
+            </ol>
+          )}
         </aside>
       </div>
     </section>

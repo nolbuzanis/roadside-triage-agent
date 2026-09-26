@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { AssistanceRequest } from '../types'
+import type { AssistanceRequest, TranscriptTurn } from '../types'
 import type { StoredDemoSession } from '../lib/demoStorage'
 import {
   STATUS_INDICATOR,
@@ -12,6 +12,7 @@ import { CheckIcon, CopyIcon, PhoneIcon } from './icons'
 interface DemoActiveViewProps {
   demo: StoredDemoSession
   request: AssistanceRequest | null
+  transcripts: TranscriptTurn[]
   nowMs: number
   realtimeStatus: RealtimeStatus
   error: string | null
@@ -40,6 +41,7 @@ function formatDemoPhone(phone: string): string {
 export default function DemoActiveView({
   demo,
   request,
+  transcripts,
   nowMs,
   realtimeStatus,
   error,
@@ -165,7 +167,11 @@ export default function DemoActiveView({
         </aside>
       </section>
 
-      <DemoLivePanel request={request} />
+      <DemoLivePanel
+        request={request}
+        transcripts={transcripts}
+        realtimeStatus={realtimeStatus}
+      />
 
       <footer className="landing-footer">
         <span>Built by Nolan Buzanis</span>
