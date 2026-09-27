@@ -398,6 +398,29 @@ What is already ruled out by inspection (so the fix must look elsewhere): demo-s
 
 - [x] Completed in `fix/demo-call-card-terminal-state` PR
 
+## P0 — Speak the emergency-transfer message before redirecting the call
+
+`handle_transfer_to_emergency` (`app/api/twilio.py`) calls `transfer_call` (Twilio `calls.update` with `<Dial>`) immediately inside the tool handler, before returning the `status="transferred"` result. `session.py` only creates the follow-up spoken turn (`response.create` for the `tool_result`) after that redirect has already been issued, so the "Emergency transfer in progress. Stay on the line." message races the redirect and may be cut off or never heard. The proper flow is respond-then-redirect: speak the transfer message to completion first, then redirect the call.
+
+- Defer the Twilio redirect until the transfer message has finished playing (e.g. on the transfer response's completion/playback acknowledgment, mirroring the closing-audio `mark` hangup flow)
+- Keep `transfer_state = "transferred"` hangup suppression and the background `_record_escalation` write intact
+- Keep the failure path (transfer cannot complete → tell the caller to call 911 directly) unchanged
+
+### Acceptance Criteria
+
+- An escalated caller hears the full transfer message before the Twilio redirect starts
+- The redirect still fires exactly once per escalation, even if the message response fails or the mark is missing (bounded fallback)
+- Caller hangup/interruption during the transfer message does not leave a stuck call or a duplicate redirect
+- Unit tests drive transfer tool call → transfer-message completion → redirect ordering, plus the fallback and no-duplicate paths; existing emergency, closing, and teardown suites still pass
+
+### Dependencies
+
+- P0 — Hang up only after the closing audio finishes playback (same speak-then-act pattern)
+
+### Status
+
+- [ ] Not started
+
 ---
 
 # Progressive `assistance_request` Lifecycle — P0 Sequence
