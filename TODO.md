@@ -396,7 +396,7 @@ What is already ruled out by inspection (so the fix must look elsewhere): demo-s
 
 ### Status
 
-- [ ] Not started
+- [x] Completed in `fix/demo-call-card-terminal-state` PR
 
 ---
 

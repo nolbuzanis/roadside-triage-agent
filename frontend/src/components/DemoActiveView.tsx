@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { AssistanceRequest, TranscriptTurn } from '../types'
+import { demoCallPhase } from '../lib/callStatus'
 import type { StoredDemoSession } from '../lib/demoStorage'
 import {
   STATUS_INDICATOR,
@@ -55,10 +56,21 @@ export default function DemoActiveView({
   )
   const indicator = STATUS_INDICATOR[realtimeStatus]
   const maskedPhone = `••• ••• ${demo.phone_last4}`
-  const connected = request !== null
-  const elapsedSeconds = connected
-    ? (nowMs - Date.parse(request.created_at)) / 1000
-    : 0
+  const phase = demoCallPhase(request)
+  const connected = phase === 'active'
+  const ended = phase === 'ended'
+  const endedTitle =
+    request?.intake_status === 'escalated' ? 'Call transferred' : 'Call ended'
+  const endedLabel =
+    request?.intake_status === 'escalated'
+      ? 'Transferred to emergency support'
+      : request?.intake_status === 'completed'
+        ? 'Assistance request logged'
+        : 'Call ended before completion'
+  const elapsedSeconds =
+    connected && request
+      ? (nowMs - Date.parse(request.created_at)) / 1000
+      : 0
 
   useEffect(() => {
     return () => {
@@ -107,14 +119,20 @@ export default function DemoActiveView({
             </span>
           </div>
           <h2 className="call-card-title">
-            {connected ? "You're on the call" : 'Waiting for your call'}
+            {connected
+              ? "You're on the call"
+              : ended
+                ? endedTitle
+                : 'Waiting for your call'}
           </h2>
           <div className="call-status-row">
             <span className="call-status-label">
               <PhoneIcon size={16} />
               {connected
                 ? 'Connected to AI agent'
-                : 'Call the demo number to connect'}
+                : ended
+                  ? endedLabel
+                  : 'Call the demo number to connect'}
             </span>
             <span className="call-status-meta">
               {connected && (

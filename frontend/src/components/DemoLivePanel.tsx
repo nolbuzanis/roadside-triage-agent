@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import type { AssistanceRequest, IntakeStatus, TranscriptTurn } from '../types'
+import { demoCallPhase } from '../lib/callStatus'
 import { fieldValue } from '../lib/requestFields'
 import {
   STATUS_INDICATOR,
@@ -87,7 +88,9 @@ export default function DemoLivePanel({
   transcripts: TranscriptTurn[]
   realtimeStatus: RealtimeStatus
 }) {
-  const connected = request !== null
+  const phase = demoCallPhase(request)
+  const connected = phase === 'active'
+  const ended = phase === 'ended'
   const intakeStatus: IntakeStatus = request ? request.intake_status : 'in_progress'
   const { activeIndex, completedCount } = stepperState(request)
   const indicator = STATUS_INDICATOR[realtimeStatus]
@@ -125,7 +128,11 @@ export default function DemoLivePanel({
                 className={connected ? 'pill-dot' : 'pill-dot pill-dot-accent'}
                 aria-hidden="true"
               />
-              {connected ? 'On the call' : 'Waiting for call'}
+              {connected
+                ? 'On the call'
+                : ended
+                  ? 'Call ended'
+                  : 'Waiting for call'}
             </span>
             <span className="waveform" aria-hidden="true">
               {WAVEFORM_BARS.map((height, index) => (
