@@ -161,7 +161,7 @@ With `create_response: False`, `_greeting_response_done` only flips on a first `
 
 ### Status
 
-- [ ] Not started
+- [x] Completed in `feat/greeting-gate-fallback` PR
 
 ## P1 — Reuse or cancel the superseded early OpenAI connection on duplicate voice webhooks
 

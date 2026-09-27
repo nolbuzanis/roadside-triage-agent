@@ -948,3 +948,135 @@ class TestGreetingTurnControl:
         await session.trigger_greeting()
 
         assert _response_create_count(ws) == before
+
+    async def test_empty_greeting_first_commit_creates_response(self) -> None:
+        session = _make_session(greeting="")
+        ws = _make_ws()
+        await _connect_session(session, ws)
+
+        # No greeting response is ever sent, but the gate must already be open.
+        assert _response_create_count(ws) == 0
+        assert session._greeting_response_done is True
+
+        await session._handle_event({
+            "type": "input_audio_buffer.committed",
+            "item_id": "item_first_turn",
+        })
+
+        assert _response_create_count(ws) == 1
+        assert session._user_turn_during_greeting is False
+
+    async def test_greeting_send_failure_opens_gate(self) -> None:
+        session = _make_session(greeting="Hello there!")
+        # No WebSocket connection: _send fails, so the greeting create never
+        # goes out and no response.done will ever arrive for it.
+        await session.trigger_greeting()
+
+        assert session._greeting_response_done is True
+
+        ws = _make_ws()
+        session._ws = ws
+        session._connected = True
+        before = _response_create_count(ws)
+
+        await session._handle_event({
+            "type": "input_audio_buffer.committed",
+            "item_id": "item_after_failed_greeting",
+        })
+
+        assert _response_create_count(ws) == before + 1
+
+    async def test_greeting_timeout_fallback_answers_pending_turn(self) -> None:
+        session = _make_session(greeting="Hello there!")
+        ws = _make_ws()
+        await _connect_session(session, ws)
+        try:
+            before = _response_create_count(ws)
+            assert before == 1
+
+            # Caller turn arrives while the greeting is still in flight.
+            await session._handle_event({
+                "type": "input_audio_buffer.committed",
+                "item_id": "item_barge_in",
+            })
+            assert _response_create_count(ws) == before
+            assert session._user_turn_during_greeting is True
+
+            # The greeting response never completes; the bounded fallback opens
+            # the gate and flushes the deferred caller turn.
+            opened = await session._open_greeting_gate(reason="greeting_timeout")
+
+            assert opened is True
+            assert session._greeting_response_done is True
+            assert session._user_turn_during_greeting is False
+            assert _response_create_count(ws) == before + 1
+
+            # A late greeting response.done must not create a duplicate turn.
+            latched = _response_create_count(ws)
+            await session._handle_event({
+                "type": "response.done",
+                "response": {"id": "resp_greeting_late", "output": []},
+            })
+
+            assert _response_create_count(ws) == latched
+
+            # Later caller turns flow normally after the fallback.
+            await session._handle_event({
+                "type": "input_audio_buffer.committed",
+                "item_id": "item_next_turn",
+            })
+
+            assert _response_create_count(ws) == latched + 1
+        finally:
+            await session.close()
+
+    async def test_greeting_fallback_wait_opens_gate_on_timeout(self) -> None:
+        session = _make_session(greeting="Hello there!")
+        ws = _make_ws()
+        await _connect_session(session, ws)
+        try:
+            assert session._greeting_response_done is False
+
+            with patch(
+                "app.realtime.session.asyncio.sleep",
+                new_callable=AsyncMock,
+                return_value=None,
+            ):
+                await session._greeting_fallback_wait()
+
+            assert session._greeting_response_done is True
+
+            before = _response_create_count(ws)
+            await session._handle_event({
+                "type": "input_audio_buffer.committed",
+                "item_id": "item_after_timeout",
+            })
+
+            assert _response_create_count(ws) == before + 1
+        finally:
+            await session.close()
+
+    async def test_normal_greeting_done_cancels_fallback(self) -> None:
+        session = _make_session(greeting="Hello there!")
+        ws = _make_ws()
+        await _connect_session(session, ws)
+        try:
+            assert session._greeting_fallback_task is not None
+
+            await session._handle_event({
+                "type": "response.done",
+                "response": {"id": "resp_greeting", "output": []},
+            })
+
+            assert session._greeting_response_done is True
+            assert session._greeting_fallback_task is None
+
+            before = _response_create_count(ws)
+            await session._handle_event({
+                "type": "input_audio_buffer.committed",
+                "item_id": "item_user",
+            })
+
+            assert _response_create_count(ws) == before + 1
+        finally:
+            await session.close()
