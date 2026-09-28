@@ -44,6 +44,15 @@ CLOSING_HANGUP_GRACE_SECONDS = 0.75
 # forever. Must exceed the longest expected closing-message playback duration.
 CLOSING_MARK_TIMEOUT_SECONDS = 20.0
 
+# Bounded fallback for the emergency-transfer message: the Twilio redirect is
+# deferred until the transfer message finishes playing (mirroring the closing
+# mark flow). If the transfer response never reaches response.done, the
+# redirect still fires after this timeout so the call is never stuck.
+TRANSFER_RESPONSE_TIMEOUT_SECONDS = 30.0
+
+# Bounded fallback for a missing Twilio transfer playback mark.
+TRANSFER_MARK_TIMEOUT_SECONDS = 20.0
+
 # Bounded fallback for a greeting response that never completes: if the
 # configured greeting's response.done never arrives (e.g. a silently failed
 # response.create or a lost server event), the greeting gate opens after this
@@ -77,6 +86,8 @@ class RealtimeSession:
     on_closing_finished: Callable[[str], Coroutine[Any, Any, None]] | None = None
     on_clear_playback: Callable[[], Coroutine[Any, Any, None]] | None = None
     on_closing_mark_requested: Callable[[str], Coroutine[Any, Any, None]] | None = None
+    on_transfer_mark_requested: Callable[[str], Coroutine[Any, Any, None]] | None = None
+    on_transfer_finished: Callable[[str], Coroutine[Any, Any, bool | None]] | None = None
     on_caller_transcript: Callable[[str, str], Coroutine[Any, Any, None]] | None = None
     on_assistant_transcript: Callable[[str, str], Coroutine[Any, Any, None]] | None = None
 
@@ -110,6 +121,21 @@ class RealtimeSession:
     _closing_mark_event: asyncio.Event | None = field(default=None, init=False, repr=False)
     _closing_mark_name: str | None = field(default=None, init=False, repr=False)
     _closing_mark_seq: int = field(default=0, init=False, repr=False)
+
+    # Per-call emergency-transfer speak-then-redirect state. The Twilio
+    # redirect is deferred until the transfer message (the tool_result turn
+    # for a successful transfer_to_emergency call) finishes playing, mirroring
+    # the closing-audio mark flow. The redirect fires exactly once, with a
+    # bounded fallback when the message response or mark never arrives.
+    transfer_response_id: str | None = field(default=None, init=False, repr=False)
+    transfer_response_completed: bool = field(default=False, init=False, repr=False)
+    transfer_redirect_started: bool = field(default=False, init=False, repr=False)
+    _transfer_interrupted: bool = field(default=False, init=False, repr=False)
+    _transfer_mark_event: asyncio.Event | None = field(default=None, init=False, repr=False)
+    _transfer_mark_name: str | None = field(default=None, init=False, repr=False)
+    _transfer_mark_seq: int = field(default=0, init=False, repr=False)
+    _transfer_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
+    _transfer_completed_event: asyncio.Event | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize the latency tracker for this call."""
@@ -541,6 +567,7 @@ class RealtimeSession:
                 call_sid=self.call_sid,
             )
             self._maybe_arm_hangup()
+            self._maybe_arm_transfer_redirect()
 
         elif event_type == "input_audio_buffer.committed":
             self._caller_speaking = False
@@ -596,6 +623,8 @@ class RealtimeSession:
             reason = self._response_create_reasons.popleft() if self._response_create_reasons else None
             if reason == "post_intake_closing":
                 self.closing_response_id = response_id
+            if reason == "transfer_message":
+                self.transfer_response_id = response_id
             if cancel_requested:
                 if response_id:
                     await self._cancel_response(response_id, create_in_flight=True)
@@ -651,6 +680,7 @@ class RealtimeSession:
                     )
 
             await self._handle_closing_response_done(response)
+            await self._handle_transfer_response_done(response)
 
             output = response.get("output", [])
             for item in output:
@@ -947,6 +977,24 @@ class RealtimeSession:
             # Not confirmed (incomplete/escalated/error): keep the generic
             # tool_result path so the model can respond to the caller.
 
+        elif func_name == "transfer_to_emergency":
+            transfer_data = self._parse_assistance_request_result(result)
+            if transfer_data is not None and transfer_data.get("status") == "transferred":
+                # Speak-then-redirect: the transfer message (this tool_result
+                # turn) must finish playing before the Twilio redirect starts.
+                # Arm the bounded redirect task first so a failed message
+                # response can never leave the call stuck, then create the
+                # message turn with transfer attribution.
+                self._arm_transfer_redirect(tool_call_id=call_id)
+                await self._send_response_create(
+                    reason="transfer_message",
+                    response_source="app.realtime.session._handle_function_call",
+                )
+                return
+            # Transfer failure (invalid args, handler error): keep the generic
+            # tool_result path so the model tells the caller to dial 911
+            # directly. No redirect is armed.
+
         await self._send_response_create(
             reason="tool_result",
             response_source="app.realtime.session._handle_function_call",
@@ -1177,6 +1225,200 @@ class RealtimeSession:
         if self._closing_mark_event is not None:
             self._closing_mark_event.set()
 
+    async def _handle_transfer_response_done(self, response: dict[str, Any]) -> None:
+        """Advance the speak-then-redirect flow when the transfer message ends.
+
+        The transfer message is the response.create with reason=transfer_message
+        sent for a successful transfer_to_emergency tool call. On completion the
+        redirect task is notified; on interruption the flow waits for the
+        follow-up turn so the redirect never cuts off the caller's correction.
+        """
+        if not self._transfer_requested or self.transfer_response_completed:
+            return
+        response_id = response.get("id")
+        status = response.get("status")
+        if self.transfer_response_id is None:
+            return
+        if response_id == self.transfer_response_id:
+            if status == "completed":
+                self.transfer_response_completed = True
+                logger.info(
+                    "transfer_response_completed",
+                    call_sid=self.call_sid,
+                    response_id=response_id,
+                    status=status,
+                    interrupted=self._transfer_interrupted,
+                )
+                if self._transfer_completed_event is not None:
+                    self._transfer_completed_event.set()
+                self._maybe_arm_transfer_redirect()
+            else:
+                self._transfer_interrupted = True
+                logger.info(
+                    "transfer_response_interrupted",
+                    call_sid=self.call_sid,
+                    response_id=response_id,
+                    status=status or "unknown",
+                )
+            return
+        if self._transfer_interrupted and status == "completed":
+            self.transfer_response_completed = True
+            logger.info(
+                "transfer_response_completed",
+                call_sid=self.call_sid,
+                response_id=response_id,
+                status=status,
+                interrupted=True,
+            )
+            if self._transfer_completed_event is not None:
+                self._transfer_completed_event.set()
+            self._maybe_arm_transfer_redirect()
+
+    def _arm_transfer_redirect(self, *, tool_call_id: str = "") -> None:
+        """Arm the bounded speak-then-redirect task. Runs at most once per call."""
+        if self._transfer_task is not None and not self._transfer_task.done():
+            return
+        if self.transfer_redirect_started:
+            return
+        self._transfer_completed_event = asyncio.Event()
+        self._transfer_task = asyncio.create_task(self._transfer_redirect_after_playback())
+        logger.info(
+            "transfer_redirect_armed",
+            call_sid=self.call_sid,
+            tool_call_id=tool_call_id,
+        )
+
+    def _maybe_arm_transfer_redirect(self) -> None:
+        """Re-check transfer redirect safety after caller speech stops.
+
+        The redirect task itself waits for message completion and playback
+        confirmation; this hook covers the barge-in deferral where the caller
+        is speaking when the message completes. At most one task exists.
+        """
+        if self.transfer_redirect_started or not self._transfer_requested:
+            return
+        if self._transfer_task is not None and not self._transfer_task.done():
+            return
+        if not self.transfer_response_completed:
+            return
+        if self._caller_speaking:
+            logger.info("transfer_redirect_deferred_caller_speaking", call_sid=self.call_sid)
+            return
+        self._transfer_completed_event = asyncio.Event()
+        self._transfer_completed_event.set()
+        self._transfer_task = asyncio.create_task(self._transfer_redirect_after_playback())
+
+    async def _transfer_redirect_after_playback(self) -> None:
+        """Wait for the transfer message playback, then fire the redirect once.
+
+        On a failed redirect (callback returns False or raises), speaks the
+        911 fallback so the caller is never left waiting on a transfer that
+        will never come.
+        """
+        try:
+            event = self._transfer_completed_event
+            if event is not None and not self.transfer_response_completed:
+                try:
+                    await asyncio.wait_for(event.wait(), timeout=TRANSFER_RESPONSE_TIMEOUT_SECONDS)
+                except TimeoutError:
+                    logger.warning(
+                        "transfer_response_timeout",
+                        call_sid=self.call_sid,
+                        timeout_seconds=TRANSFER_RESPONSE_TIMEOUT_SECONDS,
+                    )
+            await self._await_transfer_playback_mark()
+            if self.transfer_redirect_started:
+                return
+            if not self._transfer_requested:
+                return
+            if self._caller_speaking:
+                logger.info("transfer_redirect_deferred_caller_speaking", call_sid=self.call_sid)
+                return
+            self.transfer_redirect_started = True
+            logger.info("transfer_redirect_started", call_sid=self.call_sid)
+            transfer_ok: bool | None = True
+            if self.on_transfer_finished is None:
+                logger.warning("transfer_finished_callback_missing", call_sid=self.call_sid)
+                transfer_ok = False
+            else:
+                try:
+                    result = await self.on_transfer_finished(self.call_sid)
+                    transfer_ok = False if result is False else True
+                except Exception:
+                    logger.exception("Transfer redirect callback failed", call_sid=self.call_sid)
+                    transfer_ok = False
+            if transfer_ok is False:
+                await self._send_transfer_failure_fallback()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Transfer redirect callback failed", call_sid=self.call_sid)
+
+    async def _send_transfer_failure_fallback(self) -> None:
+        """Tell the caller to dial 911 directly after a failed deferred redirect."""
+        directive = (
+            "The emergency transfer failed. Speak exactly this line and nothing else:\n\n"
+            '"Unable to complete transfer. Please call 911 directly."\n\n'
+            "Do not add any words and do not ask a question."
+        )
+        await self._send_response_create(
+            reason="transfer_fallback",
+            response_source="app.realtime.session._send_transfer_failure_fallback",
+            instructions=directive,
+        )
+        logger.info("transfer_fallback_response_sent", call_sid=self.call_sid)
+
+    async def _await_transfer_playback_mark(self) -> None:
+        """Request a Twilio playback mark behind the transfer audio and wait.
+
+        Mirrors the closing mark flow: the mark is requested only after the
+        transfer response reaches response.done, so it sits behind the complete
+        transfer message. A missing mark falls back after
+        TRANSFER_MARK_TIMEOUT_SECONDS so the redirect can never be stuck.
+        """
+        self._transfer_mark_seq += 1
+        mark_name = f"transfer-{self.call_sid}-{self._transfer_mark_seq}"
+        self._transfer_mark_name = mark_name
+        event = asyncio.Event()
+        self._transfer_mark_event = event
+        if self.on_transfer_mark_requested is None:
+            logger.warning(
+                "transfer_playback_mark_callback_missing",
+                call_sid=self.call_sid,
+                mark_name=mark_name,
+            )
+        else:
+            try:
+                await self.on_transfer_mark_requested(mark_name)
+            except Exception:
+                logger.exception(
+                    "transfer_playback_mark_callback_errored",
+                    call_sid=self.call_sid,
+                    mark_name=mark_name,
+                )
+        try:
+            await asyncio.wait_for(event.wait(), timeout=TRANSFER_MARK_TIMEOUT_SECONDS)
+        except TimeoutError:
+            logger.warning(
+                "transfer_playback_mark_timeout",
+                call_sid=self.call_sid,
+                mark_name=mark_name,
+                timeout_seconds=TRANSFER_MARK_TIMEOUT_SECONDS,
+            )
+            return
+        logger.info(
+            "transfer_playback_mark_acknowledged",
+            call_sid=self.call_sid,
+            mark_name=mark_name,
+        )
+
+    def acknowledge_transfer_mark(self, mark_name: str) -> None:
+        """Resolve the pending transfer playback mark when Twilio echoes it back."""
+        if not mark_name or mark_name != self._transfer_mark_name:
+            return
+        if self._transfer_mark_event is not None:
+            self._transfer_mark_event.set()
+
     async def close(self) -> None:
         """Cleanly close the OpenAI Realtime session and WebSocket."""
         logger.info("Closing OpenAI Realtime session", call_sid=self.call_sid)
@@ -1188,6 +1430,13 @@ class RealtimeSession:
         self._hangup_grace_task = None
         self._closing_mark_event = None
         self._closing_mark_name = None
+        # Cancel any pending transfer redirect so no redirect fires after teardown.
+        if self._transfer_task is not None and not self._transfer_task.done():
+            self._transfer_task.cancel()
+        self._transfer_task = None
+        self._transfer_mark_event = None
+        self._transfer_mark_name = None
+        self._transfer_completed_event = None
         self._cancel_greeting_fallback()
 
         # Record call ended and log latency metrics

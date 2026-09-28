@@ -391,7 +391,15 @@ async def handle_transfer_to_emergency(
     call_sid: str | None,
     arguments: str,
 ) -> EmergencyTransferResult:
-    """Parse, validate, and execute an emergency call transfer."""
+    """Validate an emergency transfer and arm speak-then-redirect.
+
+    The Twilio redirect is intentionally NOT issued here. The caller must
+    first hear the transfer message (the tool_result turn created by the
+    realtime session for this successful result); the session fires
+    ``handle_transfer_finished`` only after that message finishes playing
+    (or a bounded fallback elapses). This keeps the message from racing the
+    ``<Dial>`` redirect and being cut off.
+    """
     try:
         EmergencyTransferArgs.model_validate_json(arguments)
     except ValidationError:
@@ -407,39 +415,20 @@ async def handle_transfer_to_emergency(
         destination=destination,
     )
 
-    try:
-        success = await asyncio.to_thread(
-            transfer_call,
-            call_sid=call_sid or "unknown",
-            destination_phone=destination,
+    if call_sid:
+        state = call_manager.get(call_sid)
+        if state:
+            state.transfer_state = "transferred"
+        task = asyncio.create_task(
+            _record_escalation(call_sid=call_sid, arguments=arguments),
+            name=f"escalation-record-{call_sid}",
         )
-    except Exception:
-        logger.exception("Emergency transfer exception", call_sid=call_sid)
-        return EmergencyTransferResult(
-            status="error",
-            error="Unable to complete transfer. Please call 911 directly.",
-        )
-
-    if success:
-        if call_sid:
-            state = call_manager.get(call_sid)
-            if state:
-                state.transfer_state = "transferred"
-            task = asyncio.create_task(
-                _record_escalation(call_sid=call_sid, arguments=arguments),
-                name=f"escalation-record-{call_sid}",
-            )
-            _background_tasks.add(task)
-            task.add_done_callback(_background_tasks.discard)
-        return EmergencyTransferResult(
-            status="transferred",
-            message="Emergency transfer in progress. Stay on the line.",
-        )
-    else:
-        return EmergencyTransferResult(
-            status="error",
-            error="Unable to complete transfer. Please call 911 directly.",
-        )
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+    return EmergencyTransferResult(
+        status="transferred",
+        message="Emergency transfer in progress. Stay on the line.",
+    )
 
 
 router = APIRouter()
@@ -506,23 +495,70 @@ async def handle_closing_finished(call_sid: str) -> None:
         logger.warning("call_hangup_failed", call_sid=call_sid)
 
 
+async def handle_transfer_finished(call_sid: str) -> bool:
+    """Redirect the Twilio call after the transfer message finished playing.
+
+    Invoked by the RealtimeSession once the transfer message response has
+    completed and Twilio has acknowledged the transfer playback mark (or the
+    bounded mark/response timeouts elapsed). Fires exactly once per call via
+    the call-state guard; skips when the call already disconnected. Returns
+    True when the redirect was accepted or no redirect was needed (skipped),
+    False when the redirect was attempted but failed so the session can speak
+    the 911 fallback.
+    """
+    if not call_sid:
+        logger.warning("transfer_redirect_skipped_missing_call_sid")
+        return True
+    state = call_manager.get(call_sid)
+    if state is None:
+        logger.info("transfer_redirect_skipped_call_ended", call_sid=call_sid)
+        return True
+    if state.transfer_redirect_started:
+        logger.info("transfer_redirect_skipped_duplicate", call_sid=call_sid)
+        return True
+    state.transfer_redirect_started = True
+    settings = get_settings()
+    destination = settings.EMERGENCY_TRANSFER_PHONE
+    logger.info(
+        "transfer_redirect_started",
+        call_sid=call_sid,
+        destination=destination,
+    )
+    try:
+        success = await asyncio.to_thread(
+            transfer_call,
+            call_sid=call_sid,
+            destination_phone=destination,
+        )
+    except Exception:
+        logger.exception("transfer_redirect_exception", call_sid=call_sid)
+        return False
+    if success:
+        logger.info("transfer_redirect_completed", call_sid=call_sid)
+        return True
+    else:
+        logger.warning("transfer_redirect_failed", call_sid=call_sid)
+        return False
+
+
 async def _send_media_stream_mark(
     websocket: WebSocket,
     *,
     stream_sid: str | None,
     mark_name: str,
     call_sid: str | None,
+    log_prefix: str = "closing",
 ) -> None:
     """Send a Twilio Media Streams mark and log the attempt.
 
-    Sent after the final closing audio frames so Twilio's echoed mark event
-    confirms the caller received the complete closing message before hangup.
-    Failures are logged loudly; the session's bounded mark timeout remains the
-    fallback so a lost mark can never leave the call open forever.
+    Sent after the final audio frames so Twilio's echoed mark event confirms
+    the caller received the complete message (closing or transfer) before the
+    terminal action. Failures are logged loudly; the session's bounded mark
+    timeout remains the fallback so a lost mark can never stall the call.
     """
     if not stream_sid:
         logger.warning(
-            "closing_playback_mark_skipped_no_stream",
+            f"{log_prefix}_playback_mark_skipped_no_stream",
             call_sid=call_sid,
             mark_name=mark_name,
         )
@@ -534,13 +570,13 @@ async def _send_media_stream_mark(
             "mark": {"name": mark_name},
         })
         logger.info(
-            "closing_playback_mark_sent",
+            f"{log_prefix}_playback_mark_sent",
             call_sid=call_sid,
             mark_name=mark_name,
         )
     except Exception:
         logger.warning(
-            "closing_playback_mark_send_failed",
+            f"{log_prefix}_playback_mark_send_failed",
             call_sid=call_sid,
             mark_name=mark_name,
         )
@@ -911,6 +947,16 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
             call_sid=call_sid,
         )
 
+    async def send_transfer_mark(mark_name: str) -> None:
+        """Request a playback mark for the transfer message on this stream."""
+        await _send_media_stream_mark(
+            websocket,
+            stream_sid=stream_sid,
+            mark_name=mark_name,
+            call_sid=call_sid,
+            log_prefix="transfer",
+        )
+
     async def handle_session_error(error: Exception) -> None:
         """Log errors from the OpenAI Realtime session."""
         logger.error("Realtime session error", call_sid=call_sid, error=str(error))
@@ -999,6 +1045,8 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                         session.on_error = handle_session_error
                         session.on_closing_finished = handle_closing_finished
                         session.on_closing_mark_requested = send_closing_mark
+                        session.on_transfer_mark_requested = send_transfer_mark
+                        session.on_transfer_finished = handle_transfer_finished
                         session.on_caller_transcript = handle_caller_transcript
                         session.on_assistant_transcript = handle_assistant_transcript
                         # Start draining OpenAI events BEFORE the greeting so
@@ -1057,6 +1105,8 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                         on_error=handle_session_error,
                         on_closing_finished=handle_closing_finished,
                         on_closing_mark_requested=send_closing_mark,
+                        on_transfer_mark_requested=send_transfer_mark,
+                        on_transfer_finished=handle_transfer_finished,
                         on_caller_transcript=handle_caller_transcript,
                         on_assistant_transcript=handle_assistant_transcript,
                     )
@@ -1105,6 +1155,7 @@ async def twilio_media_stream(websocket: WebSocket) -> None:
                 mark_name = data.get("mark", {}).get("name") or ""
                 if session is not None and mark_name:
                     session.acknowledge_closing_mark(mark_name)
+                    session.acknowledge_transfer_mark(mark_name)
 
             elif event in ("stop", "closed"):
                 logger.info("Media Stream stopping", call_sid=call_sid)

@@ -8,7 +8,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
-from app.api.twilio import _record_escalation, handle_transfer_to_emergency
+from app.api.twilio import (
+    _record_escalation,
+    handle_transfer_finished,
+    handle_transfer_to_emergency,
+)
 from app.realtime.tools import (
     TRANSFER_TO_EMERGENCY_TOOL,
     EmergencyTransferArgs,
@@ -108,11 +112,16 @@ class TestTransferToEmergencyTool:
 
 
 class TestHandleTransferToEmergency:
-    """Tests for the async emergency transfer handler."""
+    """Tests for the async emergency transfer handler (speak-then-redirect).
+
+    The handler arms the transfer (transfer_state + escalation + transferred
+    message) but never redirects synchronously; the redirect fires later via
+    handle_transfer_finished after the transfer message finishes playing.
+    """
 
     @pytest.mark.asyncio
-    async def test_valid_args_transfers_call(self) -> None:
-        with patch("app.api.twilio.transfer_call", return_value=True) as mock_transfer:
+    async def test_valid_args_arms_transfer_without_redirect(self) -> None:
+        with patch("app.api.twilio.transfer_call") as mock_transfer:
             with patch("app.api.twilio.get_settings") as mock_settings:
                 mock_settings.return_value.EMERGENCY_TRANSFER_PHONE = "+19115551234"
                 result = await handle_transfer_to_emergency(
@@ -124,10 +133,7 @@ class TestHandleTransferToEmergency:
         assert result.message is not None
         assert "transfer" in result.message.lower()
         assert result.error is None
-        mock_transfer.assert_called_once_with(
-            call_sid="CA_test",
-            destination_phone="+19115551234",
-        )
+        mock_transfer.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_invalid_json_arguments_returns_error(self) -> None:
@@ -150,39 +156,8 @@ class TestHandleTransferToEmergency:
         assert result.error == "Invalid arguments"
 
     @pytest.mark.asyncio
-    async def test_transfer_failure_returns_safe_error(self) -> None:
-        with patch("app.api.twilio.transfer_call", return_value=False):
-            with patch("app.api.twilio.get_settings") as mock_settings:
-                mock_settings.return_value.EMERGENCY_TRANSFER_PHONE = "+19115551234"
-                result = await handle_transfer_to_emergency(
-                    call_sid="CA_test",
-                    arguments='{"reason": "Trapped in vehicle"}',
-                )
-
-        assert result.status == "error"
-        assert result.error is not None
-        assert "911" in result.error
-
-    @pytest.mark.asyncio
-    async def test_transfer_exception_returns_safe_error(self) -> None:
-        with patch(
-            "app.api.twilio.transfer_call",
-            side_effect=RuntimeError("Twilio connection failed"),
-        ):
-            with patch("app.api.twilio.get_settings") as mock_settings:
-                mock_settings.return_value.EMERGENCY_TRANSFER_PHONE = "+19115551234"
-                result = await handle_transfer_to_emergency(
-                    call_sid="CA_test",
-                    arguments='{"reason": "Accident"}',
-                )
-
-        assert result.status == "error"
-        assert result.error is not None
-        assert "911" in result.error
-
-    @pytest.mark.asyncio
-    async def test_call_sid_falls_back_to_unknown(self) -> None:
-        with patch("app.api.twilio.transfer_call", return_value=True) as mock_transfer:
+    async def test_empty_call_sid_still_returns_transferred(self) -> None:
+        with patch("app.api.twilio.transfer_call") as mock_transfer:
             with patch("app.api.twilio.get_settings") as mock_settings:
                 mock_settings.return_value.EMERGENCY_TRANSFER_PHONE = "+19115551234"
                 result = await handle_transfer_to_emergency(
@@ -191,13 +166,12 @@ class TestHandleTransferToEmergency:
                 )
 
         assert result.status == "transferred"
-        call_kwargs = mock_transfer.call_args[1]
-        assert call_kwargs["call_sid"] == "unknown"
+        mock_transfer.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_handler_uses_to_thread_for_blocking_io(self) -> None:
-        """Verify that transfer_call is called via asyncio.to_thread (non-blocking)."""
-        with patch("app.api.twilio.transfer_call", return_value=True):
+    async def test_handler_does_not_block_on_transfer_io(self) -> None:
+        """Verify the handler itself performs no blocking transfer I/O."""
+        with patch("app.api.twilio.transfer_call") as mock_transfer:
             with patch("app.api.twilio.get_settings") as mock_settings:
                 mock_settings.return_value.EMERGENCY_TRANSFER_PHONE = "+19115551234"
                 with patch(
@@ -209,23 +183,89 @@ class TestHandleTransferToEmergency:
                         arguments='{"reason": "Emergency"}',
                     )
 
-        mock_to_thread.assert_called_once()
+        mock_transfer.assert_not_called()
+        mock_to_thread.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_failure_does_not_expose_exception_details(self) -> None:
-        with patch(
-            "app.api.twilio.transfer_call",
-            side_effect=RuntimeError("sensitive internal detail"),
-        ):
-            with patch("app.api.twilio.get_settings") as mock_settings:
-                mock_settings.return_value.EMERGENCY_TRANSFER_PHONE = "+19115551234"
-                result = await handle_transfer_to_emergency(
-                    call_sid="CA_test",
-                    arguments='{"reason": "Danger"}',
-                )
+    async def test_transferred_result_exposes_no_exception_details(self) -> None:
+        with patch("app.api.twilio.get_settings") as mock_settings:
+            mock_settings.return_value.EMERGENCY_TRANSFER_PHONE = "+19115551234"
+            result = await handle_transfer_to_emergency(
+                call_sid="CA_test",
+                arguments='{"reason": "Danger"}',
+            )
 
         serialized = result.model_dump_json()
         assert "sensitive internal detail" not in serialized
+        assert result.status == "transferred"
+
+
+class TestHandleTransferFinished:
+    """Tests for the deferred redirect fired after transfer-message playback."""
+
+    @pytest.mark.asyncio
+    async def test_redirect_fires_exactly_once(self) -> None:
+        from app.services.calls import call_manager
+
+        state = call_manager.create(twilio_call_id="CA_redirect", caller_phone="+1")
+        state.transfer_state = "transferred"
+        try:
+            with patch("app.api.twilio.transfer_call", return_value=True) as mock_transfer:
+                with patch("app.api.twilio.get_settings") as mock_settings:
+                    mock_settings.return_value.EMERGENCY_TRANSFER_PHONE = "+19115551234"
+                    first = await handle_transfer_finished("CA_redirect")
+                    second = await handle_transfer_finished("CA_redirect")
+            assert mock_transfer.call_count == 1
+            assert first is True
+            assert second is True
+            mock_transfer.assert_called_with(
+                call_sid="CA_redirect",
+                destination_phone="+19115551234",
+            )
+        finally:
+            call_manager.remove("CA_redirect")
+
+    @pytest.mark.asyncio
+    async def test_redirect_skipped_when_call_ended(self) -> None:
+        with patch("app.api.twilio.transfer_call") as mock_transfer:
+            result = await handle_transfer_finished("CA_missing_no_state")
+        mock_transfer.assert_not_called()
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_redirect_failure_returns_false_for_911_fallback(self) -> None:
+        from app.services.calls import call_manager
+
+        state = call_manager.create(twilio_call_id="CA_fail", caller_phone="+1")
+        state.transfer_state = "transferred"
+        try:
+            with patch("app.api.twilio.transfer_call", return_value=False) as mock_transfer:
+                with patch("app.api.twilio.get_settings") as mock_settings:
+                    mock_settings.return_value.EMERGENCY_TRANSFER_PHONE = "+19115551234"
+                    result = await handle_transfer_finished("CA_fail")
+            mock_transfer.assert_called_once()
+            assert result is False
+        finally:
+            call_manager.remove("CA_fail")
+
+    @pytest.mark.asyncio
+    async def test_redirect_uses_to_thread_for_blocking_io(self) -> None:
+        from app.services.calls import call_manager
+
+        state = call_manager.create(twilio_call_id="CA_thread", caller_phone="+1")
+        state.transfer_state = "transferred"
+        try:
+            with patch("app.api.twilio.transfer_call", return_value=True):
+                with patch("app.api.twilio.get_settings") as mock_settings:
+                    mock_settings.return_value.EMERGENCY_TRANSFER_PHONE = "+19115551234"
+                    with patch(
+                        "app.api.twilio.asyncio.to_thread",
+                        wraps=__import__("asyncio").to_thread,
+                    ) as mock_to_thread:
+                        await handle_transfer_finished("CA_thread")
+            mock_to_thread.assert_called_once()
+        finally:
+            call_manager.remove("CA_thread")
 
 
 # ---------------------------------------------------------------------------
@@ -458,16 +498,15 @@ class TestHandleTransferEscalationIntegration:
         mock_record.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_no_escalation_on_transfer_failure(self) -> None:
-        """Verify no escalation task is created when transfer fails."""
-        with patch("app.api.twilio.transfer_call", return_value=False):
-            with patch("app.api.twilio.get_settings") as mock_settings:
-                mock_settings.return_value.EMERGENCY_TRANSFER_PHONE = "+19115551234"
-                with patch("app.api.twilio._record_escalation") as mock_record:
-                    result = await handle_transfer_to_emergency(
-                        call_sid="CA_test",
-                        arguments='{"reason": "Trapped"}',
-                    )
+    async def test_no_escalation_on_invalid_arguments(self) -> None:
+        """Verify no escalation task is created when validation fails."""
+        with patch("app.api.twilio.get_settings") as mock_settings:
+            mock_settings.return_value.EMERGENCY_TRANSFER_PHONE = "+19115551234"
+            with patch("app.api.twilio._record_escalation") as mock_record:
+                result = await handle_transfer_to_emergency(
+                    call_sid="CA_test",
+                    arguments="{}",
+                )
 
         assert result.status == "error"
         mock_record.assert_not_called()

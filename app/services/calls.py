@@ -38,6 +38,7 @@ class CallState:
     stream_sid: str | None = None
     openai_session_id: str | None = None
     transfer_state: str = "none"
+    transfer_redirect_started: bool = False
     assistance_request_id: str | None = None
 
 
