@@ -123,6 +123,52 @@ _DEMO_SESSION_MATCH_TIMEOUT_SECONDS = 5.0
 _pending_connections: dict[str, EarlyConnection] = {}
 
 
+def _schedule_superseded_early_connection_cleanup(
+    entry: EarlyConnection, *, call_sid: str
+) -> None:
+    """Cancel a superseded early connection and close its session once known.
+
+    Runs off the webhook hot path: the pending task is cancelled immediately
+    (no-op when already done) and a background task awaits it to close the
+    realtime session it produced, if any. Never raises.
+    """
+    task = entry.connection_task
+    if not task.done():
+        task.cancel()
+
+    async def _cleanup() -> None:
+        sessions: list[object] = []
+        if entry.session is not None:
+            sessions.append(entry.session)
+        try:
+            result = await task
+        except (asyncio.CancelledError, Exception):
+            pass
+        else:
+            if result is not None and result not in sessions:
+                sessions.append(result)
+        for sess in sessions:
+            try:
+                await sess.close()  # type: ignore[attr-defined]
+            except Exception:
+                logger.warning(
+                    "superseded_early_connection_close_failed",
+                    call_sid=call_sid,
+                )
+
+    try:
+        cleanup_task = asyncio.create_task(
+            _cleanup(), name=f"early-openai-cleanup-{call_sid}"
+        )
+    except RuntimeError:
+        # No running loop (e.g. import-time use in tests): fall back to
+        # best-effort synchronous cancellation; the task result/session, if
+        # any, is closed when the loop next runs via the media-stream path.
+        return
+    _background_tasks.add(cleanup_task)
+    cleanup_task.add_done_callback(_background_tasks.discard)
+
+
 async def handle_update_assistance_request(
     *,
     call_sid: str | None,
@@ -640,13 +686,48 @@ async def twilio_voice_webhook(request: Request) -> PlainTextResponse:
 
     logger.info("Incoming call", call_sid=call_sid, caller_phone=caller_phone)
 
-    # Start OpenAI Realtime connection early to overlap with Twilio call setup.
-    # The connection task runs concurrently; the media stream handler will
-    # await it when the Twilio Media Stream arrives.
-    connection_task = asyncio.create_task(
-        _start_early_openai_connection(call_sid=call_sid, caller_phone=caller_phone),
-        name=f"early-openai-{call_sid}",
-    )
+    # A retried/duplicate voice webhook for the same CallSid must not orphan
+    # the first early connection: reusing the live task avoids a second
+    # OpenAI session entirely, while a failed first attempt is replaced.
+    # The media stream later consumes exactly the single stored entry.
+    reused_entry: EarlyConnection | None = None
+    pre_existing = _pending_connections.get(call_sid)
+    if pre_existing is not None:
+        pre_task = pre_existing.connection_task
+        if not pre_task.done():
+            reused_entry = pre_existing
+        elif pre_task.cancelled():
+            _schedule_superseded_early_connection_cleanup(
+                pre_existing, call_sid=call_sid
+            )
+            _pending_connections.pop(call_sid, None)
+        else:
+            try:
+                pre_failed = pre_task.exception() is not None
+            except asyncio.CancelledError:
+                pre_failed = True
+            if pre_failed:
+                _schedule_superseded_early_connection_cleanup(
+                    pre_existing, call_sid=call_sid
+                )
+                _pending_connections.pop(call_sid, None)
+            else:
+                reused_entry = pre_existing
+
+    connection_task: asyncio.Task[RealtimeSession] | None = None
+    if reused_entry is not None:
+        connection_task = reused_entry.connection_task
+        logger.info("Early OpenAI connection reused", call_sid=call_sid)
+    else:
+        # Start OpenAI Realtime connection early to overlap with Twilio call setup.
+        # The connection task runs concurrently; the media stream handler will
+        # await it when the Twilio Media Stream arrives.
+        connection_task = asyncio.create_task(
+            _start_early_openai_connection(
+                call_sid=call_sid, caller_phone=caller_phone
+            ),
+            name=f"early-openai-{call_sid}",
+        )
 
     # Idempotently create the open assistance-request row for this call.
     # Failure or timeout is logged loudly but must never block the call path.
@@ -691,12 +772,29 @@ async def twilio_voice_webhook(request: Request) -> PlainTextResponse:
     except Exception:
         logger.exception("demo_session_match_failed", call_sid=call_sid)
 
-    _pending_connections[call_sid] = EarlyConnection(
-        call_sid=call_sid,
-        caller_phone=caller_phone,
-        connection_task=connection_task,
-        assistance_request_id=assistance_request_id,
-    )
+    if reused_entry is not None:
+        if assistance_request_id is not None and reused_entry.assistance_request_id is None:
+            reused_entry.assistance_request_id = assistance_request_id
+    else:
+        assert connection_task is not None
+        # A concurrent duplicate may have stored its entry while this webhook
+        # awaited the assistance-request/demo steps; the last writer wins and
+        # the superseded task/session is cancelled/closed, never leaked.
+        superseded = _pending_connections.get(call_sid)
+        if superseded is not None and superseded.connection_task is not connection_task:
+            _schedule_superseded_early_connection_cleanup(
+                superseded, call_sid=call_sid
+            )
+            logger.info(
+                "Superseded early OpenAI connection cancelled",
+                call_sid=call_sid,
+            )
+        _pending_connections[call_sid] = EarlyConnection(
+            call_sid=call_sid,
+            caller_phone=caller_phone,
+            connection_task=connection_task,
+            assistance_request_id=assistance_request_id,
+        )
 
     ws_url = _build_media_stream_ws_url(request)
 
