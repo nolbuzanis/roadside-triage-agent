@@ -978,6 +978,42 @@ body:has(.demo-screen) {
   display: none;
 }
 
+.call-restart-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-top: 1px solid #ebe4d8;
+  padding-top: 14px;
+}
+
+.call-restart-note {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--demo-muted);
+}
+
+.call-restart-button {
+  align-self: flex-start;
+  padding: 10px 16px;
+  border: none;
+  border-radius: 10px;
+  background: var(--demo-dark);
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.call-restart-button:hover {
+  background: #000000;
+}
+
+.call-restart-button:focus-visible {
+  outline: 2px solid var(--demo-accent);
+  outline-offset: 2px;
+}
+
 .live-body {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 300px;

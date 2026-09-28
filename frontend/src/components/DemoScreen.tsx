@@ -344,6 +344,7 @@ export default function DemoScreen() {
         nowMs={nowMs}
         realtimeStatus={realtimeStatus}
         error={error}
+        onRestart={handleRestart}
       />
     )
   }
