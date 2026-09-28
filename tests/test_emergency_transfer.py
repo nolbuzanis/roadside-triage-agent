@@ -97,13 +97,20 @@ class TestTransferToEmergencyTool:
 
     def test_tool_requires_reason(self) -> None:
         params = TRANSFER_TO_EMERGENCY_TOOL["parameters"]
-        assert "reason" in params["required"]  # type: ignore[index]
+        assert "reason" in params["required"]
 
     def test_tool_parameters_schema(self) -> None:
         params = TRANSFER_TO_EMERGENCY_TOOL["parameters"]
-        assert params["type"] == "object"  # type: ignore[index]
-        assert "reason" in params["properties"]  # type: ignore[index]
-        assert params["properties"]["reason"]["type"] == "string"  # type: ignore[index]
+        assert params["type"] == "object"
+        assert "reason" in params["properties"]
+        assert params["properties"]["reason"]["type"] == "string"
+
+    def test_tool_description_requires_silent_call(self) -> None:
+        description = TRANSFER_TO_EMERGENCY_TOOL["description"].lower()
+        assert "silently" in description
+        assert "only the function call" in description
+        assert "on success" in description
+        assert "dial 911 directly" in description
 
 
 # ---------------------------------------------------------------------------
