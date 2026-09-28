@@ -313,6 +313,11 @@ class TestCreateInFlightCancellation:
             "type": "input_audio_buffer.committed",
             "item_id": "item_first_turn",
         })
+        await session._handle_event({
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "item_first_turn",
+            "transcript": "first detail",
+        })
         await _start_response(session, "resp_first")
         await session._handle_event({"type": "input_audio_buffer.speech_started"})
         assert len(_response_cancels(ws)) == 1
@@ -320,6 +325,11 @@ class TestCreateInFlightCancellation:
         await session._handle_event({
             "type": "input_audio_buffer.committed",
             "item_id": "item_second_turn",
+        })
+        await session._handle_event({
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "item_second_turn",
+            "transcript": "second detail",
         })
         await _finish_response(session, "resp_first", "cancelled")
 
@@ -524,6 +534,11 @@ class TestNoDuplicateResponses:
             "type": "input_audio_buffer.committed",
             "item_id": "item_turn",
         })
+        await session._handle_event({
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "item_turn",
+            "transcript": "correction detail",
+        })
 
         creates = _response_creates(ws)
         assert len(creates) == 1
@@ -543,6 +558,11 @@ class TestNoDuplicateResponses:
         await session._handle_event({
             "type": "input_audio_buffer.committed",
             "item_id": "item_interrupted_greeting",
+        })
+        await session._handle_event({
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "item_interrupted_greeting",
+            "transcript": "I need help now",
         })
         await _finish_response(session, "resp_greeting", "cancelled")
 
@@ -571,6 +591,11 @@ class TestNoDuplicateResponses:
             "type": "input_audio_buffer.committed",
             "item_id": "item_one",
         })
+        await session._handle_event({
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "item_one",
+            "transcript": "first correction",
+        })
         assert len(_response_creates(ws)) == 1
 
         await _start_response(session, "resp_second")
@@ -579,6 +604,11 @@ class TestNoDuplicateResponses:
         await session._handle_event({
             "type": "input_audio_buffer.committed",
             "item_id": "item_two",
+        })
+        await session._handle_event({
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "item_two",
+            "transcript": "second correction",
         })
 
         assert len(_response_creates(ws)) == 2
@@ -645,6 +675,11 @@ class TestStateMachineCompatibility:
         await session._handle_event({
             "type": "input_audio_buffer.committed",
             "item_id": "item_after_cancel",
+        })
+        await session._handle_event({
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "item_after_cancel",
+            "transcript": "I am still here",
         })
         assert len(_response_creates(ws)) == 2
 

@@ -584,6 +584,11 @@ class TestCallerInterruption:
             "type": "input_audio_buffer.committed",
             "item_id": "item_barge",
         })
+        await session._handle_event({
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "item_barge",
+            "transcript": "Wait, one more thing",
+        })
         creates = _response_creates(ws)
         assert len(creates) == 2  # closing + caller turn
         # The caller-turn response is a plain response.create, not a closing directive.

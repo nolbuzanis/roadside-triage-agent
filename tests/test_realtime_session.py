@@ -678,8 +678,14 @@ class TestGreetingTurnControl:
             "type": "input_audio_buffer.committed",
             "item_id": "item_user",
         })
+        await session._handle_event({
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "item_user",
+            "transcript": "I am at Main Street",
+        })
 
         assert _response_create_count(ws) == before + 1
+        await session.close()
 
     async def test_commit_during_greeting_answered_after_greeting_done(self) -> None:
         session = _make_session(greeting="Hello there!")
@@ -692,6 +698,11 @@ class TestGreetingTurnControl:
         })
         assert session._user_turn_during_greeting is True
         before = _response_create_count(ws)
+        await session._handle_event({
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "item_barge_in",
+            "transcript": "Hello, I need help",
+        })
 
         await session._handle_event({
             "type": "response.done",
@@ -700,6 +711,7 @@ class TestGreetingTurnControl:
 
         assert _response_create_count(ws) == before + 1
         assert session._user_turn_during_greeting is False
+        await session.close()
 
     async def test_second_response_done_after_greeting_creates_no_response(self) -> None:
         session = _make_session(greeting="Hello there!")
@@ -753,11 +765,18 @@ class TestGreetingTurnControl:
             "type": "input_audio_buffer.committed",
             "item_id": "item_b",
         })
+        await session_b._handle_event({
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "item_b",
+            "transcript": "I need help",
+        })
 
         assert _response_create_count(ws_a) == before_a
         assert _response_create_count(ws_b) == before_b + 1
         assert session_a._user_turn_during_greeting is True
         assert session_b._user_turn_during_greeting is False
+        await session_a.close()
+        await session_b.close()
 
     async def test_greeting_response_create_is_logged_with_attribution(
         self, caplog: pytest.LogCaptureFixture
@@ -962,9 +981,15 @@ class TestGreetingTurnControl:
             "type": "input_audio_buffer.committed",
             "item_id": "item_first_turn",
         })
+        await session._handle_event({
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "item_first_turn",
+            "transcript": "I am stranded",
+        })
 
         assert _response_create_count(ws) == 1
         assert session._user_turn_during_greeting is False
+        await session.close()
 
     async def test_greeting_send_failure_opens_gate(self) -> None:
         session = _make_session(greeting="Hello there!")
@@ -983,8 +1008,14 @@ class TestGreetingTurnControl:
             "type": "input_audio_buffer.committed",
             "item_id": "item_after_failed_greeting",
         })
+        await session._handle_event({
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "item_after_failed_greeting",
+            "transcript": "I need a tow",
+        })
 
         assert _response_create_count(ws) == before + 1
+        await session.close()
 
     async def test_greeting_timeout_fallback_answers_pending_turn(self) -> None:
         session = _make_session(greeting="Hello there!")
@@ -1001,6 +1032,11 @@ class TestGreetingTurnControl:
             })
             assert _response_create_count(ws) == before
             assert session._user_turn_during_greeting is True
+            await session._handle_event({
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item_barge_in",
+                "transcript": "I need help",
+            })
 
             # The greeting response never completes; the bounded fallback opens
             # the gate and flushes the deferred caller turn.
@@ -1024,6 +1060,11 @@ class TestGreetingTurnControl:
             await session._handle_event({
                 "type": "input_audio_buffer.committed",
                 "item_id": "item_next_turn",
+            })
+            await session._handle_event({
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item_next_turn",
+                "transcript": "My car broke down",
             })
 
             assert _response_create_count(ws) == latched + 1
@@ -1051,6 +1092,11 @@ class TestGreetingTurnControl:
                 "type": "input_audio_buffer.committed",
                 "item_id": "item_after_timeout",
             })
+            await session._handle_event({
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item_after_timeout",
+                "transcript": "Hello",
+            })
 
             assert _response_create_count(ws) == before + 1
         finally:
@@ -1075,6 +1121,11 @@ class TestGreetingTurnControl:
             await session._handle_event({
                 "type": "input_audio_buffer.committed",
                 "item_id": "item_user",
+            })
+            await session._handle_event({
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item_user",
+                "transcript": "I need help",
             })
 
             assert _response_create_count(ws) == before + 1
