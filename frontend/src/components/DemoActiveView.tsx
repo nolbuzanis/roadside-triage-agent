@@ -209,7 +209,25 @@ export default function DemoActiveView({
       />
 
       <footer className="landing-footer">
-        <span>Built by Nolan Buzanis</span>
+        <span>
+          Built by Nolan Buzanis — Senior software engineer focused on
+          realtime systems, AI, and product engineering.{' '}
+          <a
+            href="https://www.linkedin.com/in/nolanbuzanis/"
+            target="_blank"
+            rel="noreferrer"
+          >
+            LinkedIn
+          </a>
+          {' · '}
+          <a
+            href="https://github.com/nolbuzanis"
+            target="_blank"
+            rel="noreferrer"
+          >
+            GitHub
+          </a>
+        </span>
         <span>
           Demo only — not for real roadside assistance or emergencies.
         </span>
