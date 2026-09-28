@@ -44,6 +44,13 @@ CLOSING_HANGUP_GRACE_SECONDS = 0.75
 # forever. Must exceed the longest expected closing-message playback duration.
 CLOSING_MARK_TIMEOUT_SECONDS = 20.0
 
+# Bounded fallback for a greeting response that never completes: if the
+# configured greeting's response.done never arrives (e.g. a silently failed
+# response.create or a lost server event), the greeting gate opens after this
+# timeout so later caller turns still get responses instead of leaving the
+# session permanently deaf.
+GREETING_FALLBACK_TIMEOUT_SECONDS = 10.0
+
 
 @dataclass
 class RealtimeSession:
@@ -79,6 +86,7 @@ class RealtimeSession:
     _greeting_response_done: bool = field(default=False, init=False, repr=False)
     _user_turn_during_greeting: bool = field(default=False, init=False, repr=False)
     _greeting_triggered: bool = field(default=False, init=False, repr=False)
+    _greeting_fallback_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
 
     # Per-call closing-flow state:
     # intake_completed -> closing_response_started -> closing_response_completed
@@ -107,6 +115,11 @@ class RealtimeSession:
         """Initialize the latency tracker for this call."""
         if self.latency_tracker is None:
             self.latency_tracker = CallLatencyTracker(call_id=self.call_sid)
+        # With no greeting configured, no greeting response will ever complete,
+        # so open the gate immediately. Otherwise the first caller commit would
+        # be deferred forever and the session would stay permanently deaf.
+        if not self.greeting:
+            self._greeting_response_done = True
 
     async def connect(self) -> None:
         """Establish WebSocket connection to OpenAI Realtime API and configure session.
@@ -244,6 +257,10 @@ class RealtimeSession:
             return
         if not self.greeting:
             logger.warning("greeting_not_configured", call_sid=self.call_sid)
+            # No greeting response will ever complete, so keep the gate open
+            # (already opened in __post_init__) rather than leaving the session
+            # deaf to caller turns.
+            self._greeting_response_done = True
             return
         self._greeting_triggered = True
 
@@ -256,13 +273,20 @@ class RealtimeSession:
             "nothing after the opening line and wait silently for the caller "
             "to speak."
         )
-        await self._send_response_create(
+        sent = await self._send_response_create(
             reason="initial_greeting",
             response_source="app.realtime.session.trigger_greeting",
             instructions=directive,
         )
         assert self.latency_tracker is not None
         self.latency_tracker.record_event("response_create_sent")
+        if not sent:
+            # A silently failed greeting create yields no response.done, so
+            # open the gate now instead of leaving the session deaf until the
+            # bounded fallback fires.
+            await self._open_greeting_gate(reason="greeting_send_failed")
+            return
+        self._arm_greeting_fallback()
 
     async def _send_response_create(
         self,
@@ -270,7 +294,7 @@ class RealtimeSession:
         reason: str,
         response_source: str,
         instructions: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Send a client-triggered response.create and log it with attribution.
 
         ``instructions`` is an optional per-response instruction override.
@@ -278,6 +302,8 @@ class RealtimeSession:
         response only (per Realtime API override semantics), scoping what the
         model may say for this single turn; subsequent responses fall back to
         the session configuration.
+
+        Returns True when the event was actually sent.
         """
         event: dict[str, Any] = {"type": "response.create"}
         if instructions:
@@ -297,6 +323,63 @@ class RealtimeSession:
             # Mark the create as in flight so a caller speech start arriving
             # before response.created can still cancel the response it yields.
             self._response_create_pending = True
+        return sent
+
+    def _arm_greeting_fallback(self) -> None:
+        """Arm the bounded fallback that opens the greeting gate on timeout.
+
+        Only applies when a greeting was actually sent and the gate is still
+        closed. The pending task is cancelled when the greeting completes
+        normally or when the session closes.
+        """
+        if not self.greeting or self._greeting_response_done:
+            return
+        if self._greeting_fallback_task is not None and not self._greeting_fallback_task.done():
+            return
+        self._greeting_fallback_task = asyncio.create_task(self._greeting_fallback_wait())
+
+    async def _greeting_fallback_wait(self) -> None:
+        """Open the greeting gate if the greeting response never completes."""
+        try:
+            await asyncio.sleep(GREETING_FALLBACK_TIMEOUT_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("greeting_fallback_wait_failed", call_sid=self.call_sid)
+            return
+        if not self._greeting_response_done:
+            await self._open_greeting_gate(reason="greeting_timeout")
+
+    async def _open_greeting_gate(self, *, reason: str) -> bool:
+        """Open the greeting gate for a non-completion reason (fallback path).
+
+        Sets the gate open and flushes one deferred caller turn when one is
+        pending, mirroring the normal response.done opening. Returns True when
+        this call opened the gate, False when it was already open.
+        """
+        if self._greeting_response_done:
+            return False
+        self._greeting_response_done = True
+        self._cancel_greeting_fallback()
+        logger.info(
+            "greeting_gate_fallback",
+            call_sid=self.call_sid,
+            reason=reason,
+        )
+        if self._user_turn_during_greeting:
+            self._user_turn_during_greeting = False
+            await self._send_response_create(
+                reason="caller_turn_complete",
+                response_source="app.realtime.session._open_greeting_gate",
+            )
+        return True
+
+    def _cancel_greeting_fallback(self) -> None:
+        """Cancel the pending greeting-fallback task, if any."""
+        task = self._greeting_fallback_task
+        self._greeting_fallback_task = None
+        if task is not None and not task.done():
+            task.cancel()
 
     @staticmethod
     def _extract_assistant_text(response: dict[str, Any]) -> str:
@@ -558,6 +641,7 @@ class RealtimeSession:
             # the caller has actually spoken.
             if not self._greeting_response_done:
                 self._greeting_response_done = True
+                self._cancel_greeting_fallback()
                 self._verify_greeting_response(response)
                 if self._user_turn_during_greeting:
                     self._user_turn_during_greeting = False
@@ -1104,6 +1188,7 @@ class RealtimeSession:
         self._hangup_grace_task = None
         self._closing_mark_event = None
         self._closing_mark_name = None
+        self._cancel_greeting_fallback()
 
         # Record call ended and log latency metrics
         assert self.latency_tracker is not None
