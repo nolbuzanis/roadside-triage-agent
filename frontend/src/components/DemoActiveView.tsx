@@ -17,6 +17,7 @@ interface DemoActiveViewProps {
   nowMs: number
   realtimeStatus: RealtimeStatus
   error: string | null
+  onRestart: () => void
 }
 
 function formatCountdown(totalSeconds: number): string {
@@ -46,6 +47,7 @@ export default function DemoActiveView({
   nowMs,
   realtimeStatus,
   error,
+  onRestart,
 }: DemoActiveViewProps) {
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>(
     'idle',
@@ -181,6 +183,21 @@ export default function DemoActiveView({
             <p className="demo-error" role="alert">
               {error}
             </p>
+          )}
+          {ended && (
+            <div className="call-restart-block">
+              <p className="call-restart-note">
+                Want to try again? Reset this view, then start a new demo
+                before calling again.
+              </p>
+              <button
+                type="button"
+                className="call-restart-button"
+                onClick={onRestart}
+              >
+                Start another call
+              </button>
+            </div>
           )}
         </aside>
       </section>
