@@ -60,6 +60,12 @@ TRANSFER_MARK_TIMEOUT_SECONDS = 20.0
 # session permanently deaf.
 GREETING_FALLBACK_TIMEOUT_SECONDS = 10.0
 
+# Bounded fallback for a committed caller turn whose input transcription never
+# arrives: if neither completed nor failed arrives within this window, the turn
+# proceeds with a response (fail-open) so a transcription outage can never
+# leave the session deaf. Must exceed normal transcription latency.
+COMMIT_TRANSCRIPT_TIMEOUT_SECONDS = 5.0
+
 
 @dataclass
 class RealtimeSession:
@@ -136,6 +142,16 @@ class RealtimeSession:
     _transfer_mark_seq: int = field(default=0, init=False, repr=False)
     _transfer_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _transfer_completed_event: asyncio.Event | None = field(default=None, init=False, repr=False)
+
+    # Transcription-gated commit filtering: post-greeting caller_turn_complete
+    # responses wait for the committed turn's input transcription so
+    # empty/spurious commits (call-setup noise, greeting echo) never trigger
+    # an assistant response. Keyed by OpenAI conversation item_id shared by
+    # input_audio_buffer.committed and input_audio_transcription events.
+    _pending_committed_turns: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _committed_transcripts: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _commit_transcript_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
+    _greeting_pending_item_id: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize the latency tracker for this call."""
@@ -394,8 +410,10 @@ class RealtimeSession:
         )
         if self._user_turn_during_greeting:
             self._user_turn_during_greeting = False
-            await self._send_response_create(
-                reason="caller_turn_complete",
+            pending_item = self._greeting_pending_item_id
+            self._greeting_pending_item_id = None
+            await self._flush_greeting_deferred_turn(
+                item_id=pending_item or "",
                 response_source="app.realtime.session._open_greeting_gate",
             )
         return True
@@ -571,20 +589,21 @@ class RealtimeSession:
 
         elif event_type == "input_audio_buffer.committed":
             self._caller_speaking = False
+            item_id = str(event.get("item_id") or "")
             logger.info(
                 "input_audio_buffer.committed",
                 call_sid=self.call_sid,
-                item_id=event.get("item_id"),
+                item_id=item_id,
             )
             if self._greeting_response_done:
-                # Normal turn-taking: the caller has finished speaking, so
-                # produce exactly one assistant response for that turn.
-                await self._send_response_create(
-                    reason="caller_turn_complete",
-                    response_source="app.realtime.session._handle_event[input_audio_buffer.committed]",
-                )
+                # Normal turn-taking is transcription-gated: the response waits
+                # for this turn's input transcription so spurious commits with
+                # no speech never trigger an assistant reply.
+                await self._handle_committed_turn(item_id=item_id)
             else:
                 self._user_turn_during_greeting = True
+                if item_id and self._greeting_pending_item_id is None:
+                    self._greeting_pending_item_id = item_id
 
         elif event_type == "response.output_audio.delta":
             audio_b64 = event.get("delta", "")
@@ -674,8 +693,10 @@ class RealtimeSession:
                 self._verify_greeting_response(response)
                 if self._user_turn_during_greeting:
                     self._user_turn_during_greeting = False
-                    await self._send_response_create(
-                        reason="caller_turn_complete",
+                    pending_item = self._greeting_pending_item_id
+                    self._greeting_pending_item_id = None
+                    await self._flush_greeting_deferred_turn(
+                        item_id=pending_item or "",
                         response_source="app.realtime.session._handle_event[response.done]",
                     )
 
@@ -709,7 +730,8 @@ class RealtimeSession:
         elif event_type == "conversation.item.input_audio_transcription.failed":
             # Transcription is best-effort: a failure must never break
             # turn-taking, greeting, or closing. Log loudly (text + ids only)
-            # and continue the voice loop unchanged.
+            # and fail the turn open (respond anyway) so a transcription
+            # outage can never leave the session deaf.
             error = event.get("error")
             if not isinstance(error, dict):
                 error = {}
@@ -720,6 +742,7 @@ class RealtimeSession:
                 error_code=error.get("code") or "unknown",
                 error_message=error.get("message") or "Unknown transcription error",
             )
+            await self._resolve_committed_turn_failed(item_id=str(event.get("item_id") or ""))
 
         elif event_type == "response.output_audio_transcript.delta":
             # High-frequency streaming delta — debug level, ids only.
@@ -732,21 +755,27 @@ class RealtimeSession:
             logger.debug("Unhandled OpenAI event", event_type=event_type, call_sid=self.call_sid)
 
     async def _handle_caller_transcript_completed(self, event: dict[str, Any]) -> None:
-        """Expose a completed caller transcription without touching the voice loop.
+        """Expose a completed caller transcription and gate the pending turn.
 
         Empty transcripts (silence/noise commits) are logged and dropped so
-        downstream persistence never stores blank turns. Callback failures are
+        downstream persistence never stores blank turns; the matching pending
+        committed turn (if any) is filtered so no assistant response is
+        created for it. Non-empty transcripts resolve the pending turn to
+        exactly one caller_turn_complete response. Callback failures are
         logged and swallowed so transcription can never break a live call.
         Only text + ids are logged; no audio payloads.
         """
         item_id = str(event.get("item_id") or "")
         transcript = str(event.get("transcript") or "").strip()
+        if item_id:
+            self._committed_transcripts[item_id] = transcript
         if not transcript:
             logger.info(
                 "caller_transcript_empty",
                 call_sid=self.call_sid,
                 item_id=item_id,
             )
+            await self._resolve_committed_turn(item_id=item_id, transcript="")
             return
         logger.info(
             "caller_transcript_completed",
@@ -763,6 +792,144 @@ class RealtimeSession:
                     call_sid=self.call_sid,
                     item_id=item_id,
                 )
+        await self._resolve_committed_turn(item_id=item_id, transcript=transcript)
+
+    async def _handle_committed_turn(self, *, item_id: str) -> None:
+        """Buffer a post-greeting commit until its transcription decides it.
+
+        A commit with real speech produces exactly one caller_turn_complete
+        response; a commit with no speech is filtered. Commits without an
+        item_id fall back to an immediate response so malformed events never
+        stall turn-taking.
+        """
+        if not item_id:
+            logger.warning("committed_turn_missing_item_id", call_sid=self.call_sid)
+            await self._send_response_create(
+                reason="caller_turn_complete",
+                response_source="app.realtime.session._handle_committed_turn",
+            )
+            return
+        transcript = self._committed_transcripts.pop(item_id, None)
+        if transcript is not None:
+            # Transcription arrived before the commit: decide immediately.
+            if not transcript.strip():
+                logger.info(
+                    "caller_turn_filtered_empty",
+                    call_sid=self.call_sid,
+                    item_id=item_id,
+                )
+                return
+            await self._send_response_create(
+                reason="caller_turn_complete",
+                response_source="app.realtime.session._handle_committed_turn",
+            )
+            return
+        if item_id in self._pending_committed_turns:
+            return
+        self._pending_committed_turns[item_id] = "caller_turn_complete"
+        task = asyncio.create_task(self._commit_transcript_timeout(item_id=item_id))
+        self._commit_transcript_tasks[item_id] = task
+
+    async def _resolve_committed_turn(self, *, item_id: str, transcript: str) -> None:
+        """Create or filter the response for a committed turn with its transcript."""
+        if not item_id or item_id not in self._pending_committed_turns:
+            return
+        self._cancel_commit_transcript_timeout(item_id=item_id)
+        del self._pending_committed_turns[item_id]
+        self._committed_transcripts.pop(item_id, None)
+        if not transcript.strip():
+            logger.info(
+                "caller_turn_filtered_empty",
+                call_sid=self.call_sid,
+                item_id=item_id,
+            )
+            return
+        await self._send_response_create(
+            reason="caller_turn_complete",
+            response_source="app.realtime.session._resolve_committed_turn",
+        )
+
+    async def _resolve_committed_turn_failed(self, *, item_id: str) -> None:
+        """Fail a pending turn open when its transcription fails."""
+        if not item_id or item_id not in self._pending_committed_turns:
+            return
+        self._cancel_commit_transcript_timeout(item_id=item_id)
+        del self._pending_committed_turns[item_id]
+        self._committed_transcripts.pop(item_id, None)
+        logger.info(
+            "caller_turn_transcript_failed_fallback",
+            call_sid=self.call_sid,
+            item_id=item_id,
+        )
+        await self._send_response_create(
+            reason="caller_turn_complete",
+            response_source="app.realtime.session._resolve_committed_turn_failed",
+        )
+
+    async def _commit_transcript_timeout(self, *, item_id: str) -> None:
+        """Fail a pending turn open when its transcription never arrives."""
+        try:
+            await asyncio.sleep(COMMIT_TRANSCRIPT_TIMEOUT_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("commit_transcript_timeout_failed", call_sid=self.call_sid)
+            return
+        if item_id not in self._pending_committed_turns:
+            return
+        del self._pending_committed_turns[item_id]
+        self._committed_transcripts.pop(item_id, None)
+        self._commit_transcript_tasks.pop(item_id, None)
+        logger.warning(
+            "caller_turn_transcript_timeout",
+            call_sid=self.call_sid,
+            item_id=item_id,
+            timeout_seconds=COMMIT_TRANSCRIPT_TIMEOUT_SECONDS,
+        )
+        await self._send_response_create(
+            reason="caller_turn_complete",
+            response_source="app.realtime.session._commit_transcript_timeout",
+        )
+
+    def _cancel_commit_transcript_timeout(self, *, item_id: str) -> None:
+        """Cancel the transcript timeout for a resolved turn."""
+        task = self._commit_transcript_tasks.pop(item_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _flush_greeting_deferred_turn(self, *, item_id: str, response_source: str) -> None:
+        """Flush one greeting-deferred turn through transcription gating.
+
+        A deferred turn with real speech produces one response; an empty one
+        is filtered. Without an item_id (or when no transcript arrives in
+        time) the turn fails open with a response to preserve the legacy
+        single-flush behavior.
+        """
+        _ = response_source
+        if not item_id:
+            await self._send_response_create(
+                reason="caller_turn_complete",
+                response_source="app.realtime.session._flush_greeting_deferred_turn",
+            )
+            return
+        transcript = self._committed_transcripts.get(item_id)
+        if transcript is not None:
+            self._committed_transcripts.pop(item_id, None)
+            if not transcript.strip():
+                logger.info(
+                    "caller_turn_filtered_empty",
+                    call_sid=self.call_sid,
+                    item_id=item_id,
+                )
+                return
+            await self._send_response_create(
+                reason="caller_turn_complete",
+                response_source="app.realtime.session._flush_greeting_deferred_turn",
+            )
+            return
+        self._pending_committed_turns[item_id] = "caller_turn_complete"
+        task = asyncio.create_task(self._commit_transcript_timeout(item_id=item_id))
+        self._commit_transcript_tasks[item_id] = task
 
     async def _handle_assistant_transcript_done(self, event: dict[str, Any]) -> None:
         """Expose a completed assistant transcript with its response_id.
@@ -1437,6 +1604,15 @@ class RealtimeSession:
         self._transfer_mark_event = None
         self._transfer_mark_name = None
         self._transfer_completed_event = None
+        # Cancel pending commit-transcript timeouts so no gated response fires
+        # after teardown.
+        for task in self._commit_transcript_tasks.values():
+            if not task.done():
+                task.cancel()
+        self._commit_transcript_tasks.clear()
+        self._pending_committed_turns.clear()
+        self._committed_transcripts.clear()
+        self._greeting_pending_item_id = None
         self._cancel_greeting_fallback()
 
         # Record call ended and log latency metrics

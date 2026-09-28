@@ -753,6 +753,11 @@ class TestConfirmationAnswerScenarios:
                 "type": "input_audio_buffer.committed",
                 "item_id": "item_ambiguous",
             })
+            await session._handle_event({
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item_ambiguous",
+                "transcript": "I think so maybe",
+            })
 
         assert session.intake_completed is False
         assert session.closing_response_started is False

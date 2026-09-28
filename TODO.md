@@ -223,7 +223,7 @@ Enable input audio transcription and gate `caller_turn_complete` responses on th
 
 ### Status
 
-- [ ] Not started
+- [x] Completed in `feat/suppress-spurious-response` PR
 
 ## P1 — Re-sync the `response.create` attribution deque on a server-side create failure
 
@@ -1545,6 +1545,8 @@ The MVP is complete when all of the following work:
 - Document the dispatcher SMS delivery guarantee: the notifier's retry loop re-sends after any Twilio exception, including "message accepted but response lost", so delivery is at-least-once and a dispatcher can receive a duplicate SMS in that ambiguous case (Twilio provides no idempotency key), and the `notification_status` vocabulary (`pending` / `sending` / `sent` / `failed`) is currently undocumented. Acceptance: the README's dispatcher-notification section states the at-least-once semantics, the four `notification_status` values and what each means, and how to correlate messages on `sms_sid` when investigating a suspected duplicate. Verification: README section reviewed against the actual behavior in `app/services/notifier.py` and `app/services/tickets.py`.
 - Cover the transfer 911-fallback contract branches: `handle_transfer_finished` raising into `False` and the session's missing/raising `on_transfer_finished` fallback path are untested (only `transfer_call == False` and `return False` are asserted). Acceptance: unit tests force `transfer_call` to raise and assert `handle_transfer_finished` returns `False`; session tests drive a raising and a missing `on_transfer_finished` and assert the `transfer_fallback` 911 `response.create` is sent. Verification: `python -m pytest tests/test_emergency_transfer.py tests/test_transfer_speak_then_redirect.py -v` passes with the new tests.
 - Cover the transfer barge-in interruption path: the `_transfer_interrupted` follow-up completion and the deferred-while-speaking re-arm have no dedicated test. Acceptance: unit tests drive transfer message `interrupted` → follow-up `completed` → mark ack and assert exactly one redirect, plus a caller-speaking-at-redirect test asserting deferral and no duplicate. Verification: `python -m pytest tests/test_transfer_speak_then_redirect.py -v` passes with the new tests.
+- Flush all greeting-window commits through transcript gating: only the first greeting-window `item_id` is tracked, so a second real turn in the same window is dropped when the first is noise. Acceptance: unit tests drive two commits during greeting (first empty, second real) and assert exactly one gated response for the real turn; a single real deferred turn still yields one response and an all-empty window yields none. Verification: `python -m pytest tests/test_spurious_commit_filtering.py tests/test_realtime_session.py -v` passes with the new tests.
+- Cover greeting-deferred empty filtering: no test asserts a greeting-deferred empty transcript yields zero responses. Acceptance: unit tests drive commit during greeting + empty transcript + greeting completion and assert zero `response.create` for the deferred turn, while the deferred-real path still yields one. Verification: `python -m pytest tests/test_spurious_commit_filtering.py -v` passes with the new tests.
 
 ## Recently Completed
 
