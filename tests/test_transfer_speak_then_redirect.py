@@ -6,6 +6,7 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from app.realtime.instructions import TRANSFER_MESSAGE
 from app.realtime.session import RealtimeSession
 
 TRANSFER_ITEM = {
@@ -72,6 +73,20 @@ class TestSpeakThenRedirectOrdering:
             assert session._transfer_task is not None
             on_finished.assert_not_called()
             assert session.transfer_redirect_started is False
+        finally:
+            await session.close()
+
+    async def test_transfer_message_create_pins_fixed_script(self) -> None:
+        session = _make_session()
+        ws = await _connect(session)
+        try:
+            session.on_tool_call = AsyncMock(return_value=TRANSFER_RESULT)
+            await session._handle_function_call(dict(TRANSFER_ITEM))
+            creates = [e for e in _sent(ws) if e.get("type") == "response.create"]
+            assert len(creates) == 1
+            directive = creates[0].get("response", {}).get("instructions", "")
+            assert TRANSFER_MESSAGE in directive
+            assert "Do not add any words" in directive
         finally:
             await session.close()
 

@@ -1,6 +1,10 @@
 """Tests for realtime conversation instructions content."""
 
-from app.realtime.instructions import OPENING_GREETING, ROADSIDE_ASSISTANT_INSTRUCTIONS
+from app.realtime.instructions import (
+    OPENING_GREETING,
+    ROADSIDE_ASSISTANT_INSTRUCTIONS,
+    TRANSFER_MESSAGE,
+)
 
 
 def test_instructions_contain_safety_priority() -> None:
@@ -230,6 +234,30 @@ def test_instructions_handle_failed_completion() -> None:
     assert "never add a closing of your own" in lower
     # Other tool failures keep the generic report-and-wait turn.
     assert "if any other tool reports an error, tell the caller briefly and wait for their response" in lower
+
+
+def test_instructions_require_silent_transfer_tool_call() -> None:
+    """The model must call the transfer tool without speaking first."""
+    lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
+    assert "emit only the function call" in lower
+    assert "never add a transfer message of your own" in lower
+
+
+def test_instructions_scope_fixed_transfer_line_to_success() -> None:
+    """The fixed transfer line is success-only; errors still need a spoken 911 fallback."""
+    lower = ROADSIDE_ASSISTANT_INSTRUCTIONS.lower()
+    assert "when the transfer succeeds" in lower
+    assert "if the transfer tool reports an error" in lower
+    assert "dial 911 directly" in lower
+
+
+def test_transfer_message_constant_value() -> None:
+    """The fixed transfer line must be the exact expected string."""
+    assert TRANSFER_MESSAGE == (
+        "This sounds like a serious emergency, so I'm transferring you to emergency "
+        "services now. Move away from the vehicle if you can, stay safe, and stay on "
+        "the line."
+    )
 
 
 def test_greeting_constant_value() -> None:

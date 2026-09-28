@@ -101,7 +101,7 @@ CONFIRM_ASSISTANCE_REQUEST_TOOL: dict[str, Any] = {
     },
 }
 
-TRANSFER_TO_EMERGENCY_TOOL = {
+TRANSFER_TO_EMERGENCY_TOOL: dict[str, Any] = {
     "type": "function",
     "name": "transfer_to_emergency",
     "description": (
@@ -111,7 +111,9 @@ TRANSFER_TO_EMERGENCY_TOOL = {
         "stopped in active traffic lanes. Do NOT transfer for benign mentions of words "
         "like 'traffic' or 'smoke' alone — assess whether the caller is actually in "
         "danger. Do NOT collect intake information before transferring. If in doubt, "
-        "transfer."
+        "transfer. Call this tool silently: emit only the function call with no spoken "
+        "words before it — on success the system speaks the fixed transfer message for "
+        "you; on error, tell the caller to dial 911 directly."
     ),
     "parameters": {
         "type": "object",

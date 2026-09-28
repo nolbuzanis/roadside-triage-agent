@@ -20,7 +20,7 @@ from app.api.twilio import (
     handle_update_assistance_request,
 )
 from app.main import app
-from app.realtime.instructions import CLOSING_MESSAGE
+from app.realtime.instructions import CLOSING_MESSAGE, TRANSFER_MESSAGE
 from app.realtime.session import (
     CLOSING_HANGUP_GRACE_SECONDS,
     CLOSING_MARK_TIMEOUT_SECONDS,
@@ -997,8 +997,8 @@ class TestEmergencyUnaffected:
 
         creates = _response_creates(ws)
         assert len(creates) == 1
-        # Emergency keeps the generic tool_result path with no closing directive.
-        assert "instructions" not in creates[0].get("response", {})
+        # Emergency keeps its own transfer directive — never the closing one.
+        assert TRANSFER_MESSAGE in creates[0].get("response", {}).get("instructions", "")
         assert CLOSING_MESSAGE not in str(creates[0])
 
         assert session.intake_completed is False

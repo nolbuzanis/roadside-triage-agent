@@ -15,7 +15,7 @@ import websockets.exceptions
 from websockets.asyncio.client import ClientConnection
 
 from app.core.config import get_settings
-from app.realtime.instructions import CLOSING_MESSAGE
+from app.realtime.instructions import CLOSING_MESSAGE, TRANSFER_MESSAGE
 from app.realtime.latency import CallLatencyTracker
 
 logger = structlog.get_logger(__name__)
@@ -1151,11 +1151,24 @@ class RealtimeSession:
                 # turn) must finish playing before the Twilio redirect starts.
                 # Arm the bounded redirect task first so a failed message
                 # response can never leave the call stuck, then create the
-                # message turn with transfer attribution.
+                # message turn with transfer attribution. The turn carries
+                # per-response instructions pinning the exact transfer line
+                # (mirroring the greeting/closing triggers) so the model cannot
+                # improvise a second message on top of whatever it said in the
+                # tool-call turn.
                 self._arm_transfer_redirect(tool_call_id=call_id)
+                directive = (
+                    "The caller is being transferred to emergency services. Speak the "
+                    "transfer line exactly as written, in this order, and then stop:\n\n"
+                    f'"{TRANSFER_MESSAGE}"\n\n'
+                    "Do not add any words, do not paraphrase or rephrase it, do not ask a "
+                    "question, and do not say anything after the transfer line. The "
+                    "transfer starts as soon as you finish speaking."
+                )
                 await self._send_response_create(
                     reason="transfer_message",
                     response_source="app.realtime.session._handle_function_call",
+                    instructions=directive,
                 )
                 return
             # Transfer failure (invalid args, handler error): keep the generic
