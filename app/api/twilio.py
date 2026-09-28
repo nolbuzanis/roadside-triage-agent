@@ -425,6 +425,15 @@ async def handle_transfer_to_emergency(
         )
         _background_tasks.add(task)
         task.add_done_callback(_background_tasks.discard)
+    if settings.EMERGENCY_HANGUP_INSTEAD_OF_TRANSFER is True:
+        # Demo mode: no transfer is coming, so the model must not promise one.
+        return EmergencyTransferResult(
+            status="transferred",
+            message=(
+                "Emergency confirmed. Tell the caller this is an emergency: move "
+                "away from the vehicle, stay safe, and call 911 directly."
+            ),
+        )
     return EmergencyTransferResult(
         status="transferred",
         message="Emergency transfer in progress. Stay on the line.",
@@ -501,7 +510,9 @@ async def handle_transfer_finished(call_sid: str) -> bool:
     Invoked by the RealtimeSession once the transfer message response has
     completed and Twilio has acknowledged the transfer playback mark (or the
     bounded mark/response timeouts elapsed). Fires exactly once per call via
-    the call-state guard; skips when the call already disconnected. Returns
+    the call-state guard; skips when the call already disconnected. When
+    EMERGENCY_HANGUP_INSTEAD_OF_TRANSFER is set (demo mode), hangs up the
+    call instead of redirecting. Returns
     True when the redirect was accepted or no redirect was needed (skipped),
     False when the redirect was attempted but failed so the session can speak
     the 911 fallback.
@@ -518,6 +529,20 @@ async def handle_transfer_finished(call_sid: str) -> bool:
         return True
     state.transfer_redirect_started = True
     settings = get_settings()
+    if settings.EMERGENCY_HANGUP_INSTEAD_OF_TRANSFER is True:
+        # Demo mode: end the call after the emergency message instead of
+        # dialling a real emergency destination.
+        logger.info("transfer_hangup_started", call_sid=call_sid)
+        try:
+            hangup_ok = await asyncio.to_thread(hangup_call, call_sid=call_sid)
+        except Exception:
+            logger.exception("transfer_hangup_exception", call_sid=call_sid)
+            return False
+        if hangup_ok:
+            logger.info("transfer_hangup_completed", call_sid=call_sid)
+            return True
+        logger.warning("transfer_hangup_failed", call_sid=call_sid)
+        return False
     destination = settings.EMERGENCY_TRANSFER_PHONE
     logger.info(
         "transfer_redirect_started",

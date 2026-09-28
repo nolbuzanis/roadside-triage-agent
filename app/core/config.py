@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     TWILIO_PHONE_NUMBER: str
     DISPATCHER_ALERT_PHONE: str
     EMERGENCY_TRANSFER_PHONE: str
+    # Demo mode: hang up after the emergency message finishes playing instead
+    # of redirecting the call to EMERGENCY_TRANSFER_PHONE. Defaults to False
+    # (transfer).
+    EMERGENCY_HANGUP_INSTEAD_OF_TRANSFER: bool = False
     DEMO_PHONE_HMAC_SECRET: str = Field(min_length=1)
     DEMO_SESSION_TTL_SECONDS: int = 900
     DEMO_CLAIMED_SESSION_TTL_SECONDS: int = Field(default=1800, gt=0)

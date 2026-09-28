@@ -199,6 +199,21 @@ class TestHandleTransferToEmergency:
         assert "sensitive internal detail" not in serialized
         assert result.status == "transferred"
 
+    @pytest.mark.asyncio
+    async def test_hangup_mode_result_tells_caller_to_dial_911(self) -> None:
+        with patch("app.api.twilio.get_settings") as mock_settings:
+            mock_settings.return_value.EMERGENCY_TRANSFER_PHONE = "+19115551234"
+            mock_settings.return_value.EMERGENCY_HANGUP_INSTEAD_OF_TRANSFER = True
+            result = await handle_transfer_to_emergency(
+                call_sid="CA_test",
+                arguments='{"reason": "Car on fire"}',
+            )
+
+        assert result.status == "transferred"
+        assert result.message is not None
+        assert "911" in result.message
+        assert "transfer in progress" not in result.message.lower()
+
 
 class TestHandleTransferFinished:
     """Tests for the deferred redirect fired after transfer-message playback."""
@@ -247,6 +262,44 @@ class TestHandleTransferFinished:
             assert result is False
         finally:
             call_manager.remove("CA_fail")
+
+    @pytest.mark.asyncio
+    async def test_hangup_mode_hangs_up_instead_of_redirecting(self) -> None:
+        from app.services.calls import call_manager
+
+        state = call_manager.create(twilio_call_id="CA_hangup", caller_phone="+1")
+        state.transfer_state = "transferred"
+        try:
+            with patch("app.api.twilio.transfer_call") as mock_transfer:
+                with patch("app.api.twilio.hangup_call", return_value=True) as mock_hangup:
+                    with patch("app.api.twilio.get_settings") as mock_settings:
+                        mock_settings.return_value.EMERGENCY_TRANSFER_PHONE = "+19115551234"
+                        mock_settings.return_value.EMERGENCY_HANGUP_INSTEAD_OF_TRANSFER = True
+                        result = await handle_transfer_finished("CA_hangup")
+            mock_transfer.assert_not_called()
+            mock_hangup.assert_called_once_with(call_sid="CA_hangup")
+            assert result is True
+        finally:
+            call_manager.remove("CA_hangup")
+
+    @pytest.mark.asyncio
+    async def test_hangup_mode_failure_returns_false_for_911_fallback(self) -> None:
+        from app.services.calls import call_manager
+
+        state = call_manager.create(twilio_call_id="CA_hangup_fail", caller_phone="+1")
+        state.transfer_state = "transferred"
+        try:
+            with patch("app.api.twilio.transfer_call") as mock_transfer:
+                with patch("app.api.twilio.hangup_call", return_value=False) as mock_hangup:
+                    with patch("app.api.twilio.get_settings") as mock_settings:
+                        mock_settings.return_value.EMERGENCY_TRANSFER_PHONE = "+19115551234"
+                        mock_settings.return_value.EMERGENCY_HANGUP_INSTEAD_OF_TRANSFER = True
+                        result = await handle_transfer_finished("CA_hangup_fail")
+            mock_transfer.assert_not_called()
+            mock_hangup.assert_called_once()
+            assert result is False
+        finally:
+            call_manager.remove("CA_hangup_fail")
 
     @pytest.mark.asyncio
     async def test_redirect_uses_to_thread_for_blocking_io(self) -> None:
