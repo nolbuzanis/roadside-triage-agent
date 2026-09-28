@@ -184,7 +184,7 @@ A second webhook currently overwrites `_pending_connections[call_sid]`, orphanin
 
 ### Status
 
-- [ ] Not started
+- [x] Completed in `feat/duplicate-webhook-connection-reuse` PR
 
 ## P1 — Surface a field-complete intake that is never confirmed
 
