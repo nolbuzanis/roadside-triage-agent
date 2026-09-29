@@ -352,7 +352,7 @@ export default function DemoScreen() {
   return (
     <main className="demo-screen">
       <header className="demo-header">
-        <h1>Try the Roadside AI Demo</h1>
+        <h1>Try the Towbie Demo</h1>
         <p className="demo-subtitle">
           Your live assistance request appears here during the call.
         </p>

@@ -3,7 +3,7 @@ export default function LandingHeader() {
     <header className="landing-top">
       <span className="landing-brand">
         <span className="brand-dot" aria-hidden="true" />
-        Roadside AI
+        Towbie
       </span>
       <span className="landing-live-pill">
         <span className="pill-dot" aria-hidden="true" />
