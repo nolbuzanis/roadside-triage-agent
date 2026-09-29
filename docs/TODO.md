@@ -2217,19 +2217,15 @@ Replace the static sample in `frontend/src/components/DemoLivePanel.tsx:14-39,19
 
 ---
 
-## P2 — Optimize Towbie brand PNGs and clean up superseded logo styles
+## P2 — Clean up superseded logo styles
 
-Follow-up from reviewer on PR #117 (`feat/towbie-branding`): the shipped `frontend/public/towbie-logo.png` (~850KB, RGB no-alpha, 2172x724) and `frontend/public/towbie-icon.png` (~300KB, RGBA, 859x577) are oversized for header/favicon use, the RGB logo renders as an opaque box on non-matching surfaces, and `frontend/src/App.css:391-419` still contains dead `.brand-wordmark` / `.brand-i` / `.brand-dot-mark` styles no longer rendered by `TowbieLogo.tsx`.
+Follow-up from reviewer on PR #117 (`feat/towbie-branding`): `frontend/src/App.css:391-419` still contains dead `.brand-wordmark` / `.brand-i` / `.brand-dot-mark` styles no longer rendered by `TowbieLogo.tsx`. (The PNG optimization + transparent-background parts of this follow-up are already done — the shipped `towbie-logo.png` / `towbie-icon.png` are optimized transparent assets.)
 
-- Compress/downscale both PNGs to header-appropriate sizes (keep the same filenames so no code change is needed).
-- Re-export `towbie-logo.png` with a transparent background so it sits cleanly on the cream landing header and white auth card.
 - Remove the dead `.brand-wordmark`, `.brand-i`, `.brand-dot-mark`, and `.dashboard-header .brand-wordmark` rules from `frontend/src/App.css`.
 - Optionally add explicit `width`/`aspect-ratio` on the logo `img` to eliminate layout shift.
 
 ### Acceptance Criteria
 
-- Total brand-asset payload is an order of magnitude smaller with no visible quality loss at rendered sizes (28-32px height).
-- Logo shows no opaque box on cream (`LandingHeader`) or white (`AuthScreen`) surfaces.
 - Repo-wide grep finds no `brand-wordmark` / `brand-dot-mark` references.
 - `cd frontend && npm run lint && npm run build` pass.
 
