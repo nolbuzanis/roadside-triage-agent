@@ -1022,6 +1022,42 @@ body:has(.demo-screen) {
   outline-offset: 2px;
 }
 
+.demo-feedback {
+  margin-inline: var(--landing-gutter);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  text-align: center;
+  padding: 20px;
+  border-top: 1px solid rgba(20, 17, 13, 0.12);
+}
+
+.demo-feedback h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  color: var(--demo-ink);
+}
+
+.demo-feedback p {
+  margin: 0;
+  font-size: 14px;
+  color: var(--demo-muted);
+}
+
+.demo-feedback a {
+  margin-top: 4px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--demo-ink);
+}
+
+.demo-feedback a:hover {
+  color: var(--demo-accent);
+}
+
 .live-body {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 300px;
