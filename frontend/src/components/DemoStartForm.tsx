@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { SPEAKING_BARS, WAVEFORM_BARS } from '../lib/waveform'
 import { CarIcon, PinIcon, WrenchIcon } from './icons'
+import DemoFooter from './DemoFooter'
 import LandingHeader from './LandingHeader'
 
 interface DemoStartFormProps {
@@ -198,12 +199,7 @@ export default function DemoStartForm({
         </div>
       </section>
 
-      <footer className="landing-footer">
-        <span>Built by Nolan Buzanis</span>
-        <span>
-          Demo only — not for real roadside assistance or emergencies.
-        </span>
-      </footer>
+      <DemoFooter />
     </main>
   )
 }

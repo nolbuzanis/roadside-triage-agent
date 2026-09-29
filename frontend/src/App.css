@@ -828,6 +828,14 @@ body:has(.demo-screen) {
   color: var(--demo-muted);
 }
 
+.landing-footer a {
+  color: inherit;
+}
+
+.landing-footer a:hover {
+  color: var(--demo-ink);
+}
+
 /* Demo active (in-call) screen */
 
 .call-card {

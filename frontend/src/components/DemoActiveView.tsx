@@ -7,6 +7,7 @@ import {
   type RealtimeStatus,
 } from '../lib/realtimeStatus'
 import DemoLivePanel from './DemoLivePanel'
+import DemoFooter from './DemoFooter'
 import LandingHeader from './LandingHeader'
 import { CheckIcon, CopyIcon, PhoneIcon } from './icons'
 
@@ -208,12 +209,7 @@ export default function DemoActiveView({
         realtimeStatus={realtimeStatus}
       />
 
-      <footer className="landing-footer">
-        <span>Built by Nolan Buzanis</span>
-        <span>
-          Demo only — not for real roadside assistance or emergencies.
-        </span>
-      </footer>
+      <DemoFooter />
     </main>
   )
 }
