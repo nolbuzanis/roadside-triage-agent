@@ -1,3 +1,5 @@
+<img src="frontend/public/towbie-logo.svg" alt="Towbie logo" width="220" />
+
 # Towbie (MVP)
 
 An autonomous AI voice agent system built for towing companies to handle inbound non-emergency roadside assistance calls. Powered by OpenAI Realtime and a FastAPI backend, this agent seamlessly gathers critical breakdown details from stranded drivers, persists structured assistance requests into a Supabase database, and instantly notifies human dispatchers via SMS.

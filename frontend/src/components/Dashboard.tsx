@@ -8,6 +8,7 @@ import {
 } from '../lib/realtimeStatus'
 import type { AssistanceRequest } from '../types'
 import RequestCard from './RequestCard'
+import TowbieLogo from './TowbieLogo'
 
 export default function Dashboard({ session }: { session: Session }) {
   const [requests, setRequests] = useState<AssistanceRequest[]>([])
@@ -96,7 +97,8 @@ export default function Dashboard({ session }: { session: Session }) {
     <div className="dashboard">
       <header className="dashboard-header">
         <div>
-          <h1>Dispatcher Dashboard</h1>
+          <TowbieLogo markSize={28} />
+          <h1 className="dashboard-title">Dispatcher Dashboard</h1>
           <p className="dispatcher-email">{session.user.email}</p>
         </div>
         <div className="header-actions">

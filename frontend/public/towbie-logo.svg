@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 232 64" role="img" aria-label="Towbie logo">
+  <title>Towbie logo</title>
+  <mask id="towbie-road-full">
+    <rect width="64" height="64" fill="#fff"/>
+    <path d="M27 10 C31 18 43 20 41 29 C39 38 29 42 27 54" fill="none" stroke="#000" stroke-width="8" stroke-linecap="round"/>
+  </mask>
+  <path d="M33 7 L57 51 H9 Z" fill="#FF5A1F" stroke="#FF5A1F" stroke-width="8" stroke-linejoin="round" mask="url(#towbie-road-full)"/>
+  <g fill="#FF5A1F">
+    <rect x="-1.75" y="-3.5" width="3.5" height="7" rx="1.75" transform="translate(31.5 20) rotate(22)"/>
+    <rect x="-1.75" y="-3.5" width="3.5" height="7" rx="1.75" transform="translate(39 30) rotate(-12)"/>
+    <rect x="-1.75" y="-3.5" width="3.5" height="7" rx="1.75" transform="translate(32 41) rotate(-25)"/>
+  </g>
+  <text x="74" y="44" font-family="Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="37" font-weight="800" letter-spacing="-1" fill="#141B26" textLength="104" lengthAdjust="spacingAndGlyphs">Towb&#x131;</text>
+  <circle cx="171" cy="11" r="5.6" fill="#FF5A1F"/>
+  <text x="182" y="44" font-family="Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="37" font-weight="800" letter-spacing="-1" fill="#141B26">e</text>
+</svg>
