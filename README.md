@@ -900,7 +900,7 @@ The workflow verifies and prints these URLs on every deploy; record the concrete
 
 ### 8. Verify the Production Dashboard
 
-After the first deploy (tracked by the post-deploy smoke-check TODO in `TODO.md`):
+After the first deploy (tracked by the post-deploy smoke-check TODO in `docs/TODO.md`):
 
 1. Open `https://<firebase-project-id>.web.app` — the public demo loads (no Firebase 404)
 2. Open `https://<firebase-project-id>.web.app/admin` — the auth screen loads

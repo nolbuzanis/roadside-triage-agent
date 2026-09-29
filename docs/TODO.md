@@ -2,8 +2,8 @@
 
 Source of truth:
 
-- `PRODUCT.md` — product requirements
-- `ARCHITECTURE.md` — system architecture
+- `docs/PRODUCT.md` — product requirements
+- `docs/ARCHITECTURE.md` — system architecture
 - `README.md` — setup and developer workflow
 
 ## Architecture Direction
