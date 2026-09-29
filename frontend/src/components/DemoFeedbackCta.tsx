@@ -5,7 +5,9 @@ export default function DemoFeedbackCta() {
     <section className="demo-feedback" aria-label="Post-call feedback">
       <h2>Thanks for trying it 👋</h2>
       <p>What felt smooth? What felt weird?</p>
-      <a href={FEEDBACK_URL}>Send feedback</a>
+      <a href={FEEDBACK_URL} target="_blank" rel="noreferrer">
+        Send feedback
+      </a>
     </section>
   )
 }
