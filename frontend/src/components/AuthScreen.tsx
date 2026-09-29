@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { supabase } from '../lib/supabaseClient'
+import TowbieLogo from './TowbieLogo'
 
 export default function AuthScreen() {
   const [email, setEmail] = useState('')
@@ -24,6 +25,9 @@ export default function AuthScreen() {
   return (
     <main className="auth-screen">
       <form className="auth-card" onSubmit={handleSubmit}>
+        <div className="auth-brand">
+          <TowbieLogo />
+        </div>
         <h1>Dispatcher Dashboard</h1>
         <p className="auth-subtitle">Sign in with your dispatcher account</p>
         <label>

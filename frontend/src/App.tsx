@@ -16,7 +16,7 @@ function App() {
 
   useEffect(() => {
     document.title = isAdminPath(window.location.pathname)
-      ? 'Dispatcher Dashboard'
+      ? 'Towbie · Dispatcher Dashboard'
       : 'Towbie Demo'
   }, [])
 

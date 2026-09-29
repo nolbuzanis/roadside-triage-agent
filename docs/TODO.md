@@ -2214,3 +2214,25 @@ Replace the static sample in `frontend/src/components/DemoLivePanel.tsx:14-39,19
 ### Status
 
 - [x] Completed in `feat/render-live-transcript-demo-ui` PR
+
+---
+
+## P2 — Clean up superseded logo styles
+
+Follow-up from reviewer on PR #117 (`feat/towbie-branding`): `frontend/src/App.css:391-419` still contains dead `.brand-wordmark` / `.brand-i` / `.brand-dot-mark` styles no longer rendered by `TowbieLogo.tsx`. (The PNG optimization + transparent-background parts of this follow-up are already done — the shipped `towbie-logo.png` / `towbie-icon.png` are optimized transparent assets.)
+
+- Remove the dead `.brand-wordmark`, `.brand-i`, `.brand-dot-mark`, and `.dashboard-header .brand-wordmark` rules from `frontend/src/App.css`.
+- Optionally add explicit `width`/`aspect-ratio` on the logo `img` to eliminate layout shift.
+
+### Acceptance Criteria
+
+- Repo-wide grep finds no `brand-wordmark` / `brand-dot-mark` references.
+- `cd frontend && npm run lint && npm run build` pass.
+
+### Dependencies
+
+- None (follow-up to PR #117).
+
+### Status
+
+- [ ] Pending
