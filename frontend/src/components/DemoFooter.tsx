@@ -2,8 +2,8 @@ export default function DemoFooter() {
   return (
     <footer className="landing-footer">
       <span>
-        Built by Nolan Buzanis — Senior software engineer focused on
-        realtime systems, AI, and product engineering.{' '}
+        Built by Nolan
+        {' · '}
         <a
           href="https://www.linkedin.com/in/nolanbuzanis/"
           target="_blank"
