@@ -1,6 +1,6 @@
-# Roadside AI Frontend
+# Towbie Frontend
 
-Public demo (home route `/`) and read-only dispatcher UI (`/admin`) for the roadside assistance triage agent. Built with Vite, React, TypeScript, and `@supabase/supabase-js`.
+Public demo (home route `/`) and read-only dispatcher UI (`/admin`) for Towbie. Built with Vite, React, TypeScript, and `@supabase/supabase-js`.
 
 The dashboard authenticates with the single dispatcher Supabase Auth account and reads `assistance_requests` directly from Supabase using the public anon/publishable key. It never contains backend secrets — never put `SUPABASE_SERVICE_ROLE_KEY` in this app.
 

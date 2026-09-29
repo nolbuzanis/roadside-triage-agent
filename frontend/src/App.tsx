@@ -17,7 +17,7 @@ function App() {
   useEffect(() => {
     document.title = isAdminPath(window.location.pathname)
       ? 'Dispatcher Dashboard'
-      : 'Roadside AI Demo'
+      : 'Towbie Demo'
   }, [])
 
   useEffect(() => {
