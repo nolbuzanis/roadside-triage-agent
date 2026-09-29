@@ -49,6 +49,9 @@ firebase-service-account.json
 .DS_Store
 Thumbs.db
 
+# Local PR assets (screenshots etc. kept out of git; attach manually to PRs)
+docs/screenshots/
+
 # Large data files
 *.html
 !frontend/index.html
