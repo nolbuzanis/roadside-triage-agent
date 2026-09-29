@@ -1,5 +1,12 @@
 # Project Guidelines & Agent Rules
 
+## Quick Links
+
+- **[PRODUCT.md](docs/PRODUCT.md)** — Product vision, target user, MVP scope, and non-goals
+- **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** — System architecture, data flow, component details, and data models
+- **[AGENTS.md](AGENTS.md)** — Agent rules, execution protocol, and coding standards
+- **[docs/TODO.md](docs/TODO.md)** — Backlog and task tracking
+
 ## Core Directives
 - **Scope & Focus:** Keep tasks small and incremental. Never attempt to build or rewrite a massive feature in a single prompt.
 - **Subagent Delegation:** Offload heavy codebase searching, file exploration, or multi-file analysis to subagents to prevent main thread context flooding.
@@ -38,7 +45,7 @@ INSPECT → PLAN → IMPLEMENT → VERIFY → REVIEW → FIX → RE-VERIFY → U
 5. **REVIEW:** Run the independent Reviewer subagent. The implementation agent must never approve its own work.
 6. **FIX:** Resolve all BLOCKER and HIGH review findings.
 7. **RE-VERIFY:** Re-run verification after fixes. A PR must not be opened while verification is failing.
-8. **UPDATE STATE:** Update TODO.md to reflect completion only after verification passes and reviewer approves.
+8. **UPDATE STATE:** Update docs/TODO.md to reflect completion only after verification passes and reviewer approves.
 9. **COMMIT:** Create an atomic commit with a conventional commit message.
 10. **PUSH:** Push a dedicated feature branch (never work directly on main for feature work).
 11. **PR:** Open a pull request representing the completed atomic unit.
@@ -61,7 +68,7 @@ INSPECT → PLAN → IMPLEMENT → VERIFY → REVIEW → FIX → RE-VERIFY → U
 ### Reviewer (Read-Only)
 - Independent pre-merge code reviewer for atomic changes
 - Reviews work produced by another agent
-- **MUST NOT** modify production files, tests, documentation, TODO.md, or configuration
+- **MUST NOT** modify production files, tests, documentation, docs/TODO.md, or configuration
 - Determines whether changes are safe, correct, sufficiently tested, architecturally appropriate, and ready to merge
 - Returns verdict: APPROVE or CHANGES_REQUESTED
 - **NO file modifications** — review only
@@ -108,7 +115,7 @@ Independent atomic TODO tasks may run in separate Git worktrees via the `@ykarat
 2. **No cross-worktree dependencies:** Agents must never rely on or modify uncommitted changes from another worktree. Each worktree is a self-contained, committed snapshot.
 3. **Independence check:** Only genuinely independent tasks should be run in parallel. If two tasks share files or have sequential dependencies, run them serially on the same branch.
 4. **Verify before editing:** Before making changes, agents must confirm they are in the correct worktree (`pwd` should resolve to a path under `../ai-agent-worktrees/`) and on the correct feature branch (`git branch --show-current`).
-5. **TODO.md minimization:** When multiple agents may be running in parallel, modify `TODO.md` minimally to reduce merge conflicts. Update only the specific item being completed, and avoid reformatting or restructuring the file.
+5. **docs/TODO.md minimization:** When multiple agents may be running in parallel, modify `docs/TODO.md` minimally to reduce merge conflicts. Update only the specific item being completed, and avoid reformatting or restructuring the file.
 6. **Existing workflow preserved:** The existing branch → implement → verify → review → commit → push → PR workflow remains unchanged within each worktree.
 
 ### Worktree Lifecycle
@@ -209,13 +216,13 @@ The reviewer must not modify files or commit changes.
 - Do not address non-blocking findings in the current PR unless the finding is necessary to satisfy the current task's acceptance criteria or prevent a correctness/security issue. Otherwise, leave the current scope unchanged and create a follow-up TODO when appropriate.
 
 **Suggested follow-up work:**
-- Legitimate follow-up work identified by the reviewer should be added to `TODO.md` as a new TODO item.
+- Legitimate follow-up work identified by the reviewer should be added to `docs/TODO.md` as a new TODO item.
 - Do not silently ignore suggested follow-up work.
 - Do not turn out-of-scope, optional, or already-acceptable observations into TODO items.
 
 **Out-of-scope observations:**
 - Observations that are informational only (e.g., tooling limitations, future strictness plans) should not be turned into TODO items.
-- The reviewer remains read-only and must never modify `TODO.md`.
+- The reviewer remains read-only and must never modify `docs/TODO.md`.
 
 ### After Reviewer APPROVE
 
@@ -231,7 +238,7 @@ For each finding, the agent must explicitly decide one of:
 
 #### Creating follow-up TODOs
 
-If a finding is classified as legitimate follow-up work, the agent **must** add a corresponding item to `TODO.md` before completing the current task. Do not merely mention that the finding is being "tracked" in the response.
+If a finding is classified as legitimate follow-up work, the agent **must** add a corresponding item to `docs/TODO.md` before completing the current task. Do not merely mention that the finding is being "tracked" in the response.
 
 Every new follow-up TODO must:
 
@@ -241,7 +248,7 @@ Every new follow-up TODO must:
 - Include verification criteria
 - Avoid copying the reviewer's prose verbatim
 
-The agent must not add duplicate TODO items. Before adding one, check whether an equivalent task already exists in `TODO.md`.
+The agent must not add duplicate TODO items. Before adding one, check whether an equivalent task already exists in `docs/TODO.md`.
 
 The agent must not expand the current PR solely to resolve non-blocking findings.
 
@@ -251,8 +258,8 @@ Before proceeding from reviewer APPROVE to commit/PR, verify:
 
 - All BLOCKER/HIGH findings are resolved
 - All non-blocking findings were explicitly classified (address now / follow-up TODO / no action)
-- All legitimate follow-up work has been written to `TODO.md`
-- No informational/out-of-scope findings were incorrectly added to `TODO.md`
+- All legitimate follow-up work has been written to `docs/TODO.md`
+- No informational/out-of-scope findings were incorrectly added to `docs/TODO.md`
 
 #### Final task summary
 
@@ -261,7 +268,7 @@ The task summary (reported to the user after PR creation) must include:
 - Reviewer verdict
 - Blocking findings (count, all resolved)
 - Non-blocking findings (count, each classified with rationale)
-- Follow-up TODOs created (list each item added to `TODO.md`)
+- Follow-up TODOs created (list each item added to `docs/TODO.md`)
 - Findings intentionally not actioned (list each with brief reason)
 
 ## Verification Requirements
@@ -286,7 +293,7 @@ Mark it complete only after:
 - reviewer approves the change
 - PR has been created successfully
 
-If the repository policy requires merge before completion, document that distinction explicitly in TODO.md rather than falsely marking the task complete.
+If the repository policy requires merge before completion, document that distinction explicitly in docs/TODO.md rather than falsely marking the task complete.
 
 ## Merge Policy
 

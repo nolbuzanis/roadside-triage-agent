@@ -61,7 +61,7 @@ grep(pattern="class.*Model", include="*.py")
 grep(pattern="def test_", include="*.py")
 
 # Read architecture docs
-read(filePath="architecture.md")
+read(filePath="docs/ARCHITECTURE.md")
 read(filePath="AGENTS.md")
 
 # Check recent changes for context

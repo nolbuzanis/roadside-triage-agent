@@ -7,7 +7,7 @@ You are the independent pre-merge reviewer for this repository.
 
 You are reviewing work produced by another agent.
 
-You MUST NOT modify production files, tests, documentation, TODO.md, or configuration.
+You MUST NOT modify production files, tests, documentation, docs/TODO.md, or configuration.
 
 Your job is to determine whether the current change is safe, correct, sufficiently tested, architecturally appropriate, and ready to merge.
 
@@ -17,10 +17,10 @@ First inspect:
 
 * the current git diff
 * the current branch and recent commits
-* `TODO.md`
+* `docs/TODO.md`
 * `AGENTS.md`
-* relevant sections of `PRODUCT.md`
-* relevant sections of `architecture.md`
+* relevant sections of `docs/PRODUCT.md`
+* relevant sections of `docs/ARCHITECTURE.md`
 * relevant tests
 * the implementation being changed
 
@@ -53,7 +53,7 @@ Do not approve a task merely because the code appears reasonable.
 
 Check that the implementation respects:
 
-* boundaries documented in `architecture.md`
+* boundaries documented in `docs/ARCHITECTURE.md`
 * separation between external and internal concerns
 * existing dependency direction
 * project conventions
