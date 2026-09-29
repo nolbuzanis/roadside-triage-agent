@@ -1,4 +1,4 @@
-<img src="frontend/public/towbie-logo.svg" alt="Towbie logo" width="220" />
+<img src="frontend/public/towbie-logo.png" alt="Towbie logo" width="220" />
 
 # Towbie (MVP)
 

@@ -6,20 +6,11 @@ export default function TowbieLogo({ markSize = 32 }: TowbieLogoProps) {
   return (
     <span className="brand-logo" role="img" aria-label="Towbie">
       <img
-        src="/towbie-icon.svg"
-        alt=""
-        aria-hidden="true"
-        width={markSize}
+        src="/towbie-logo.png"
+        alt="Towbie"
         height={markSize}
+        style={{ width: 'auto' }}
       />
-      <span className="brand-wordmark" aria-hidden="true">
-        Towb
-        <span className="brand-i">
-          &#x131;
-          <span className="brand-dot-mark" />
-        </span>
-        e
-      </span>
     </span>
   )
 }
