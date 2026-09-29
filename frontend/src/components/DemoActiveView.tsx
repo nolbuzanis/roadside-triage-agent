@@ -7,6 +7,7 @@ import {
   type RealtimeStatus,
 } from '../lib/realtimeStatus'
 import DemoLivePanel from './DemoLivePanel'
+import DemoFeedbackCta from './DemoFeedbackCta'
 import DemoFooter from './DemoFooter'
 import LandingHeader from './LandingHeader'
 import { CheckIcon, CopyIcon, PhoneIcon } from './icons'
@@ -208,6 +209,8 @@ export default function DemoActiveView({
         transcripts={transcripts}
         realtimeStatus={realtimeStatus}
       />
+
+      {ended && <DemoFeedbackCta />}
 
       <DemoFooter />
     </main>
