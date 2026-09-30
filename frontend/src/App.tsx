@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { supabase } from './lib/supabaseClient'
+import { initAnalytics, trackPageView } from './lib/analytics'
 import AuthScreen from './components/AuthScreen'
 import Dashboard from './components/Dashboard'
 import DemoScreen from './components/DemoScreen'
@@ -18,6 +19,8 @@ function App() {
     document.title = isAdminPath(window.location.pathname)
       ? 'Towbie · Dispatcher Dashboard'
       : 'Towbie Demo'
+    initAnalytics()
+    trackPageView(window.location.pathname)
   }, [])
 
   useEffect(() => {
