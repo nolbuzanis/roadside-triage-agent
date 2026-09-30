@@ -283,9 +283,12 @@
 
 /* Public demo */
 
-body:has(.demo-landing),
 body:has(.demo-screen) {
   background: var(--demo-cream);
+}
+
+body:has(.demo-landing) {
+  background: #ffffff;
 }
 
 .demo-screen {
@@ -360,13 +363,58 @@ body:has(.demo-screen) {
 
 .demo-landing {
   --landing-gutter: max(40px, calc((100% - 1200px) / 2));
+  position: relative;
+  isolation: isolate;
   min-height: 100svh;
   display: flex;
   flex-direction: column;
-  gap: 36px;
-  padding: 28px 0;
+  gap: 28px;
+  padding: 20px 0;
   color: var(--demo-ink);
-  background: var(--demo-cream);
+  background-color: #ffffff;
+  background-image:
+    linear-gradient(180deg, rgba(255, 255, 255, 0) 56%, #ffffff 82%),
+    linear-gradient(180deg, #efe8dd 0%, #e6dccd 48%, #ffffff 100%);
+  background-size: auto;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+
+/* Photo band. Fades out through the lower hero copy so the road stays visible
+   while the text keeps its contrast against the lightened photo. */
+.demo-landing::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.38) 0%,
+      rgba(255, 255, 255, 0.5) 7%,
+      rgba(255, 255, 255, 0.5) 17%,
+      rgba(255, 255, 255, 0.26) 30%,
+      rgba(255, 255, 255, 0) 50%
+    ),
+    url('/hero.jpg');
+  background-size: auto, 100% auto;
+  background-position: center, top center;
+  background-repeat: no-repeat;
+  -webkit-mask-image: linear-gradient(
+    180deg,
+    #000 0,
+    #000 270px,
+    rgba(0, 0, 0, 0) 560px,
+    rgba(0, 0, 0, 0) 100%
+  );
+  mask-image: linear-gradient(
+    180deg,
+    #000 0,
+    #000 270px,
+    rgba(0, 0, 0, 0) 560px,
+    rgba(0, 0, 0, 0) 100%
+  );
 }
 
 .landing-top {
@@ -457,15 +505,9 @@ body:has(.demo-screen) {
   display: grid;
   grid-template-columns: minmax(0, 1.15fr) minmax(320px, 470px);
   gap: 48px;
-  align-items: center;
-  padding: 56px var(--landing-gutter) 64px;
-  background:
-    radial-gradient(
-      110% 80% at 80% 15%,
-      rgba(255, 255, 255, 0.7),
-      transparent 55%
-    ),
-    linear-gradient(180deg, #efe8dd 0%, #e6dccd 48%, #d8cbb8 100%);
+  align-items: start;
+  padding: 24px var(--landing-gutter) 64px;
+  background: transparent;
 }
 
 .hero-copy {
@@ -498,7 +540,7 @@ body:has(.demo-screen) {
 .hero-lede {
   font-size: 17px;
   line-height: 1.55;
-  color: var(--demo-muted);
+  color: var(--demo-ink);
   max-width: 54ch;
 }
 
@@ -530,12 +572,13 @@ body:has(.demo-screen) {
   width: 36px;
   height: 36px;
   border-radius: 50%;
-  border: 1px solid rgba(20, 17, 13, 0.3);
-  background: rgba(255, 255, 255, 0.55);
+  border: none;
+  background: #ffffff;
+  box-shadow: 0 4px 12px rgba(20, 17, 13, 0.18);
   display: grid;
   place-items: center;
-  font-size: 14px;
-  font-weight: 700;
+  font-size: 15px;
+  font-weight: 800;
   color: var(--demo-ink);
   flex-shrink: 0;
 }
@@ -543,7 +586,7 @@ body:has(.demo-screen) {
 .step-text {
   font-size: 14px;
   line-height: 1.3;
-  color: var(--demo-muted);
+  color: var(--demo-ink);
 }
 
 .step-text strong {
@@ -1306,17 +1349,23 @@ body:has(.demo-screen) {
 
   .demo-landing {
     --landing-gutter: 20px;
-    gap: 28px;
-    padding: 20px 0;
   }
 
-  .hero-steps li + li::before {
-    width: 24px;
-    margin: 0 10px;
+  .demo-landing::before {
+    background-size: auto, max(100%, 675px) auto;
+  }
+
+  .hero-steps {
+    display: none;
   }
 
   .start-card {
     padding: 24px;
+    margin-top: 24px;
+  }
+
+  .landing-hero {
+    padding-bottom: 16px;
   }
 
   .preview-panel {
