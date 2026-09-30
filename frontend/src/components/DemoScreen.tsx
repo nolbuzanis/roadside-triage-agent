@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { REALTIME_SUBSCRIBE_STATES } from '@supabase/supabase-js'
 import { supabase } from '../lib/supabaseClient'
+import { trackEvent } from '../lib/analytics'
 import { startDemoSession } from '../lib/demoSession'
 import {
   clearStoredDemoSession,
@@ -184,18 +185,33 @@ export default function DemoScreen() {
 
   const activeDemoId = phase === 'active' && demo ? demo.id : null
   const linkedRequestSeenRef = useRef(false)
+  const trackedTerminalRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
     if (!activeDemoId) {
       return
     }
     linkedRequestSeenRef.current = false
+    trackedTerminalRef.current = new Set()
     let active = true
     const handleLinkedRequestEvent = (incoming: AssistanceRequest) => {
       if (incoming.demo_session_id !== activeDemoId) {
         return
       }
       setRequests((current) => upsertRequest(current, incoming))
+      if (
+        incoming.intake_status === 'completed' ||
+        incoming.intake_status === 'abandoned' ||
+        incoming.intake_status === 'escalated'
+      ) {
+        const key = `${incoming.id}:${incoming.intake_status}`
+        if (!trackedTerminalRef.current.has(key)) {
+          trackedTerminalRef.current.add(key)
+          trackEvent(`intake_${incoming.intake_status}`, {
+            demo_session_id: activeDemoId,
+          })
+        }
+      }
       if (!linkedRequestSeenRef.current) {
         linkedRequestSeenRef.current = true
         // The claim extends expires_at before the row links, so the first
@@ -302,6 +318,7 @@ export default function DemoScreen() {
         demo_phone: started.demo_phone,
       }
       writeStoredDemoSession(stored)
+      trackEvent('demo_session_start', { demo_session_id: stored.id })
       setRequests([])
       setTranscripts([])
       setDemo(stored)
@@ -309,6 +326,7 @@ export default function DemoScreen() {
       setRealtimeStatus('connecting')
       setPhase('active')
     } catch (startError) {
+      trackEvent('demo_session_start_failed', {})
       setError(
         startError instanceof Error ? startError.message : String(startError),
       )

@@ -773,7 +773,8 @@ GitHub main (frontend/** or firebase.json change)
 GitHub Actions (.github/workflows/deploy-frontend.yml)
     ↓
 npm ci → oxlint → tsc + vite build
-    (VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY / VITE_API_BASE_URL inlined)
+    (VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY / VITE_API_BASE_URL inlined,
+     plus optional VITE_FEEDBACK_URL / VITE_GA_MEASUREMENT_ID)
     ↓
 FirebaseExtended/action-hosting-deploy → live channel
     ↓
@@ -840,6 +841,13 @@ Set these in **Settings → Secrets and variables → Actions → Variables**:
 | `VITE_SUPABASE_ANON_KEY` | Public Supabase anon/publishable key (inlined into the browser bundle) | `eyJhbGciOi...` or `sb_publishable_...` |
 | `VITE_API_BASE_URL` | Backend base URL the browser calls (inlined into the browser bundle); must be an absolute http(s) URL | `https://roadside-agent-<hash>-<region>.a.run.app` |
 
+#### Optional Repository Variables
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `VITE_FEEDBACK_URL` | Destination for the post-call "Send feedback" link (inlined into the browser bundle) | `https://forms.example.com/feedback` |
+| `VITE_GA_MEASUREMENT_ID` | Google Analytics 4 measurement ID (inlined into the browser bundle); analytics disabled when unset | `G-XXXXXXXXXX` |
+
 #### Required Repository Secrets
 
 Set these in **Settings → Secrets and variables → Actions → Secrets**:
@@ -896,7 +904,7 @@ The workflow verifies and prints these URLs on every deploy; record the concrete
 
 ### 7. Security
 
-- The build step receives only `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, and `VITE_API_BASE_URL` (all public values); no other workflow secrets are passed to `npm run build`.
+- The build step receives only `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, and `VITE_API_BASE_URL` (all public values) plus the optional `VITE_FEEDBACK_URL` and `VITE_GA_MEASUREMENT_ID`; no other workflow secrets are passed to `npm run build`.
 - No `SUPABASE_SERVICE_ROLE_KEY`, Twilio, or OpenAI credentials appear in the frontend repository, the workflow configuration, or the deployed bundle.
 - The Cloud Run voice deployment and its Secret Manager credentials are entirely separate.
 
