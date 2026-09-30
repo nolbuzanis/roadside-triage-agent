@@ -10,13 +10,14 @@ This MVP introduces an autonomous AI voice triage agent that instantly answers i
 - **Secondary User (The Stranded Driver)**: Motorists stranded on the roadside who need immediate, calm, and efficient intake without waiting on hold, providing them reassurance that help is on the way.
 
 ## 3. Core Features (MVP Scope)
-1. **Autonomous Voice Intake**: 24/7 inbound PSTN phone call answering powered by Vapi (integrating Twilio SIP, Deepgram Nova-2 STT, OpenAI GPT-4o, and ElevenLabs TTS).
-2. **Structured 3-Step Triage**: A strict conversational state machine that extracts exactly three variables:
+1. **Autonomous Voice Intake**: 24/7 inbound PSTN phone call answering. Twilio receives the call and streams its audio to the OpenAI Realtime API over a WebSocket bridge hosted by the backend, which conducts the conversation and hangs up (or redirects) when done.
+2. **Structured 3-Step Triage**: Progressive intake that collects exactly three variables:
    - **Location**: Cross-streets, landmarks, or highway mile markers.
    - **Vehicle Details**: Make, model, and color.
    - **Issue Nature**: The specific mechanical problem (e.g., flat tire, engine smoke, dead battery).
-3. **Emergency & Hazard Escalation**: Real-time detection of high-hazard keywords (e.g., "active traffic", "fire", "smoke", "hurt", "bleeding"). Upon detection, the agent immediately interrupts the standard flow and transfers the call to 911 or a live human operator.
-4. **Automated Assistance-Request Persistence**: Real-time webhook integration that parses structured function-call JSON payloads from the LLM and inserts them into a PostgreSQL database.
+   Details are saved as the caller provides them (partial saves allowed, nothing invented), then read back for verbal confirmation; the request completes only on a clear affirmative summary confirmation.
+3. **Emergency Escalation**: The agent assesses whether the caller is in immediate physical danger (e.g., active fire, collision with injuries, vehicle stopped in active traffic lanes) and silently invokes an emergency-transfer tool — benign word mentions alone do not trigger it. The system then speaks a fixed transfer message and redirects the call to the configured emergency destination. Demo deployments hang up after the message instead of dialing out (default).
+4. **Automated Assistance-Request Persistence**: Realtime function-tool calls from the voice model are validated and merged into a PostgreSQL (Supabase) assistance request, with completion, abandonment, and escalation tracked as lifecycle states.
 5. **Dispatcher SMS Notification**: Instant SMS alert sent to the on-duty dispatcher's phone via Twilio upon successful intake, containing the formatted assistance request data.
 
 ## 4. Explicit Non-Goals (Out of Scope for MVP)
