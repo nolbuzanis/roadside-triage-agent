@@ -283,9 +283,12 @@
 
 /* Public demo */
 
-body:has(.demo-landing),
 body:has(.demo-screen) {
   background: var(--demo-cream);
+}
+
+body:has(.demo-landing) {
+  background: #ffffff;
 }
 
 .demo-screen {
@@ -366,7 +369,21 @@ body:has(.demo-screen) {
   gap: 36px;
   padding: 28px 0;
   color: var(--demo-ink);
-  background: var(--demo-cream);
+  background-color: #ffffff;
+  background-image:
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.65) 0%,
+      rgba(255, 255, 255, 0.25) 30%,
+      rgba(255, 255, 255, 0) 50%,
+      #ffffff 82%,
+      #ffffff 100%
+    ),
+    url('/hero.jpg'),
+    linear-gradient(180deg, #efe8dd 0%, #e6dccd 48%, #ffffff 100%);
+  background-size: auto, 100% auto, auto;
+  background-position: center, top center, center;
+  background-repeat: no-repeat, no-repeat, no-repeat;
 }
 
 .landing-top {
@@ -459,19 +476,7 @@ body:has(.demo-screen) {
   gap: 48px;
   align-items: center;
   padding: 56px var(--landing-gutter) 64px;
-  background-color: #e6dccd;
-  background-image:
-    linear-gradient(rgba(20, 17, 13, 0.5), rgba(20, 17, 13, 0.5)),
-    url('/hero.jpg'),
-    radial-gradient(
-      110% 80% at 80% 15%,
-      rgba(255, 255, 255, 0.7),
-      transparent 55%
-    ),
-    linear-gradient(180deg, #efe8dd 0%, #e6dccd 48%, #d8cbb8 100%);
-  background-size: auto, cover, auto, auto;
-  background-position: center, center, center, center;
-  background-repeat: no-repeat, no-repeat, no-repeat, no-repeat;
+  background: transparent;
 }
 
 .hero-copy {
@@ -555,31 +560,6 @@ body:has(.demo-screen) {
 .step-text strong {
   color: var(--demo-ink);
   font-weight: 700;
-}
-
-/* Light hero copy over the photo + dark scrim. Cards keep their own
-   light backgrounds, so only the copy needs the override. */
-.landing-hero .hero-eyebrow,
-.landing-hero .hero-title,
-.landing-hero .step-text strong {
-  color: #ffffff;
-  text-shadow: 0 1px 12px rgba(0, 0, 0, 0.35);
-}
-
-.landing-hero .hero-lede,
-.landing-hero .step-text {
-  color: rgba(255, 255, 255, 0.85);
-  text-shadow: 0 1px 12px rgba(0, 0, 0, 0.35);
-}
-
-.landing-hero .hero-steps li + li::before {
-  background: rgba(255, 255, 255, 0.4);
-}
-
-.landing-hero .step-num {
-  border-color: rgba(255, 255, 255, 0.5);
-  background: rgba(255, 255, 255, 0.15);
-  color: #ffffff;
 }
 
 .start-card {
