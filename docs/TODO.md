@@ -2238,4 +2238,4 @@ Follow-up from reviewer on PR #117 (`feat/towbie-branding`): `frontend/src/App.c
 
 ### Status
 
-- [ ] Pending
+- [x] Completed in `chore/cleanup-superseded-logo-styles` PR — removed the dead `.brand-wordmark`, `.brand-i`, `.brand-dot-mark`, and `.dashboard-header .brand-wordmark` rules from `frontend/src/App.css` (live `.brand-logo` retained); reviewer APPROVE, `npm run lint` and `npm run build` pass.

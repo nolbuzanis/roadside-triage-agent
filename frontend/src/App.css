@@ -436,36 +436,6 @@ body:has(.demo-landing) {
   flex-shrink: 0;
 }
 
-.brand-wordmark {
-  font-size: 22px;
-  line-height: 1;
-  font-weight: 800;
-  letter-spacing: -0.02em;
-  color: var(--demo-ink);
-  white-space: nowrap;
-}
-
-.brand-i {
-  position: relative;
-  display: inline-block;
-}
-
-.brand-dot-mark {
-  position: absolute;
-  top: 0.04em;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 0.26em;
-  height: 0.26em;
-  border-radius: 50%;
-  background: var(--demo-accent);
-}
-
-.dashboard-header .brand-wordmark {
-  color: var(--text-h);
-  font-size: 20px;
-}
-
 .dashboard-title {
   margin: 10px 0 0;
 }
